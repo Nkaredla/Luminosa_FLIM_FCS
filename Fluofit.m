@@ -89,7 +89,9 @@ irs = (1-c+floor(c))*irf(rem(rem(t-floor(c)-1, n)+n,n)+1) + (c-floor(c))*irf(rem
 z = Convol(irs, x);
 z = [ones(size(z,1),1) z];
 % A = z\y;
-A = lsqnonneg(z,y);
+% A = lsqnonneg(z,y);
+
+A = PIRLSnonneg(z,y,10);
 z = z*A;
 close all
 if init<2

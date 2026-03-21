@@ -32,6 +32,7 @@ params.NA = 1.45;
 params.showPlots = true;
 results = run_ism_reconstruction_from_ptu(outNew, params);
 
+%% reassigned TCSPC
 flim = reassigned_flim(outNew, results, params);
 
 int = results.acoImage;
@@ -70,8 +71,8 @@ tcspcIRF = tcspcIRF(:).';
 tcspc_pix = flim.reassigned.total.xyT;   % same as flim.total.xyT
 
 % Fit one global ex-Gaussian IRF + global lifetimes
-outIRF = Calc_mIRF_Global_ExGauss(outNew.head, tcspc_pix, [0.35 1.8 3.2 6]);
-% outIRF = Calc_mIRF_Global_GammaShifted(outNew.head, tcspc_pix, [0.35 1.5 3 5]);
+% outIRF = Calc_mIRF_Global_ExGauss(outNew.head, tcspc_pix, [0.35 1.8 3.2 6]);
+outIRF = Calc_mIRF_Global_GammaShifted(outNew.head, tcspc_pix, [0.35 1 3 6]);
 
 % This is the fitted IRF vector
 tcspcIRF = outIRF.IRF(:);
@@ -90,8 +91,9 @@ disp(outIRF.pIRF.');
 
 disp('Fitted lifetimes in ns:');
 disp(outIRF.tauFit.');
-%% Triexponential fitting and pattern matching
-tau0 = outIRF.tauFit;      % tri-exp
+%% Triexponential fitting and pattern matching - ISM
+tcspc_pix = flim.reassigned.total.xyT;   % same as flim.total.xyT
+tau0 = [0.35 1.5 5];      % tri-exp
 tcspcIRF = squeeze(tcspcIRF)/max(tcspcIRF);
 tcspcIRF(tcspcIRF<1e-10) = 0;
 tcspcIRF = tcspcIRF(:).';
@@ -105,4 +107,20 @@ opts.normalizePatterns = true;
 opts.sortLifetimes = true;
 
 outFLIM = GlobalMultiExpPatternMatchFromTCSPC( ...
+    tcspc_pix, tcspcIRF, pulsePeriodNs, dtNs, tau0, opts);
+
+%% Triexponential fitting and pattern matching - Confocal
+
+tcspc_pix = flim.unassigned.total.xyT;   % same as flim.total.xyT
+tau0 = [0.35 1.5 5];      % tri-exp
+opts = struct();
+opts.useGPU = true;
+opts.mode = 'PIRLS';
+opts.batchSize = 4000;
+opts.includeBackground = true;
+opts.pieIndex = 1;              % only relevant if tcspc_pix is 4D
+opts.normalizePatterns = true;
+opts.sortLifetimes = true;
+
+outFLIM2 = GlobalMultiExpPatternMatchFromTCSPC( ...
     tcspc_pix, tcspcIRF, pulsePeriodNs, dtNs, tau0, opts);
