@@ -60,11 +60,41 @@ outNew.head.Resolution = dtNs;
 outNew.head.SyncRate = outNew.head.TTResult_SyncRate;
 
 tcspcIRF = Calc_mIRF(outNew.head, squeeze(sum(sum(tcspc_pix,1),2))');
-tcspcIRF = squeeze(tcspcIRF);
+tcspcIRF = squeeze(tcspcIRF)/max(tcspcIRF);
+tcspcIRF(tcspcIRF<1e-4) = 0;
 tcspcIRF = tcspcIRF(:).';
 
+
+%%
+
+tcspc_pix = flim.reassigned.total.xyT;   % same as flim.total.xyT
+
+% Fit one global ex-Gaussian IRF + global lifetimes
+% outIRF = Calc_mIRF_Global_ExGauss(outNew.head, tcspc_pix, [0.35 1.8 3.2 6]);
+outIRF = Calc_mIRF_Global_GammaShifted(outNew.head, tcspc_pix, [0.35 1.5 3 6]);
+
+% This is the fitted IRF vector
+tcspcIRF = outIRF.IRF(:);
+
+% Check fit
+figure;
+semilogy(outIRF.t, max(outIRF.y,1), 'k'); hold on;
+semilogy(outIRF.t, max(outIRF.fit,1), 'r');
+xlabel('Time (ns)');
+ylabel('Counts');
+legend('global decay','exGauss reconvolution fit');
+title(sprintf('Global exGauss fit, chi = %.3f', outIRF.chi));
+
+disp('Fitted IRF params [t0 sigma tauR] in ns:');
+disp(outIRF.pIRF.');
+
+disp('Fitted lifetimes in ns:');
+disp(outIRF.tauFit.');
 %% Triexponential fitting and pattern matching
-tau0 = [0.3 1.5 4.8];      % tri-exp
+tau0 = [0.3 1.5 3 6];      % tri-exp
+tcspcIRF = squeeze(tcspcIRF)/max(tcspcIRF);
+tcspcIRF(tcspcIRF<1e-5) = 0;
+tcspcIRF = tcspcIRF(:).';
 opts = struct();
 opts.useGPU = true;
 opts.mode = 'PIRLS';
