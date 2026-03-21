@@ -124,7 +124,7 @@ tau = dt*tau';
 c = dt*c;
 offset = zz(1,1); 
 A(1) = [];
-if 0
+if 1
 	hold off
     subplot('position',[0.1 0.4 0.8 0.5])
 	plot(t,log10(y),t,log10(irs),t,log10(z));

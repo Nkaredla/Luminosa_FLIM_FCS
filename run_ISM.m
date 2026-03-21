@@ -65,13 +65,13 @@ tcspcIRF(tcspcIRF<1e-4) = 0;
 tcspcIRF = tcspcIRF(:).';
 
 
-%%
+%% Other IRF calculation models
 
 tcspc_pix = flim.reassigned.total.xyT;   % same as flim.total.xyT
 
 % Fit one global ex-Gaussian IRF + global lifetimes
-% outIRF = Calc_mIRF_Global_ExGauss(outNew.head, tcspc_pix, [0.35 1.8 3.2 6]);
-outIRF = Calc_mIRF_Global_GammaShifted(outNew.head, tcspc_pix, [0.35 1.5 3 6]);
+outIRF = Calc_mIRF_Global_ExGauss(outNew.head, tcspc_pix, [0.35 1.8 3.2 6]);
+% outIRF = Calc_mIRF_Global_GammaShifted(outNew.head, tcspc_pix, [0.35 1.5 3 5]);
 
 % This is the fitted IRF vector
 tcspcIRF = outIRF.IRF(:);
@@ -91,9 +91,9 @@ disp(outIRF.pIRF.');
 disp('Fitted lifetimes in ns:');
 disp(outIRF.tauFit.');
 %% Triexponential fitting and pattern matching
-tau0 = [0.3 1.5 3 6];      % tri-exp
+tau0 = outIRF.tauFit;      % tri-exp
 tcspcIRF = squeeze(tcspcIRF)/max(tcspcIRF);
-tcspcIRF(tcspcIRF<1e-5) = 0;
+tcspcIRF(tcspcIRF<1e-10) = 0;
 tcspcIRF = tcspcIRF(:).';
 opts = struct();
 opts.useGPU = true;

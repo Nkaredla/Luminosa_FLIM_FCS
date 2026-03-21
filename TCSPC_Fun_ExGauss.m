@@ -2,6 +2,7 @@ function [err, c, zz, z, IRF] = TCSPC_Fun_ExGauss(p, t, y, para)
 % TCSPC_Fun_ExGauss
 %
 % Reconvolution fit model using an ex-Gaussian IRF.
+% Inner nonnegative amplitude solve uses PIRLSnonneg if available.
 %
 % Model:
 %   y(t) ~ c0*1 + sum_i ci * [ IRF_exG (*) exp(-t/tau_i)/tau_i ]
@@ -13,7 +14,7 @@ function [err, c, zz, z, IRF] = TCSPC_Fun_ExGauss(p, t, y, para)
 %
 % If para is provided:
 %   para = [t0; sigma; tauR] fixed IRF parameters
-%   p    = [tau1; tau2; ...]  or [other free params]
+%   p    = [tau1; tau2; ...]
 %
 % Inputs
 % ------
@@ -23,7 +24,7 @@ function [err, c, zz, z, IRF] = TCSPC_Fun_ExGauss(p, t, y, para)
 % Outputs
 % -------
 % err : objective value
-% c   : NNLS amplitudes (background in row 1)
+% c   : nonnegative amplitudes (background in row 1)
 % zz  : basis matrix
 % z   : fitted model
 % IRF : normalized ex-Gaussian IRF
@@ -53,9 +54,9 @@ tau(tau <= 0) = 1e-6;
 
 IRF = IRF_ExGauss(p(1:nIRF), t, []);
 
-% Decay kernel starts at the first TCSPC bin
-t0 = t - t(1);
-t0(t0 < 0) = 0;
+% Decay kernel starts at first TCSPC bin
+tdec = t - t(1);
+tdec(tdec < 0) = 0;
 
 nT   = numel(t);
 nExp = numel(tau);
@@ -64,27 +65,76 @@ zz = zeros(nT, nExp + 1);
 zz(:,1) = ones(nT,1);   % background column
 
 for i = 1:nExp
-    decay = exp(-t0 ./ tau(i)) ./ tau(i);
+    decay = exp(-tdec ./ tau(i)) ./ tau(i);
     tmp = Convol(IRF, decay);
     zz(:,1+i) = tmp(1:nT);
 end
 
-% Optional mild normalization of non-background columns
-% Keeps scales manageable without changing span
+% Normalize columns for conditioning
 colsum = sum(zz,1);
 colsum(colsum <= 0) = 1;
 zz = zz ./ (ones(nT,1) * colsum);
 
-nY = size(y,2);
-c  = zeros(size(zz,2), nY);
-z  = zeros(nT, nY);
-
-for j = 1:nY
-    c(:,j) = lsqnonneg(zz, y(:,j));
-    z(:,j) = zz * c(:,j);
-end
+% Solve amplitudes with PIRLS
+[c, z] = solve_nonneg_with_pirls(zz, y);
 
 % Pearson-like objective
 den = max(abs(z), 10);
 err = sum(sum((y - z).^2 ./ den));
+
+end
+
+
+function [c, z] = solve_nonneg_with_pirls(M, Y)
+% Solve min ||Y - M*C||^2 with C >= 0
+% Preference order:
+%   1) PIRLSnonneg_batch_gpu_matlab(M,Y)
+%   2) PIRLSnonneg(M,Y)
+%   3) PIRLSnonneg(M,Y(:,j)) columnwise
+%   4) fallback to lsqnonneg columnwise
+
+nBasis = size(M,2);
+nY = size(Y,2);
+
+% 1) Batch GPU PIRLS if present
+if nY > 1 && exist('PIRLSnonneg_batch_gpu_matlab', 'file') == 2
+    try
+        c = PIRLSnonneg_batch_gpu_matlab(M, Y);
+        c = max(c, 0);
+        z = M * c;
+        return
+    catch
+    end
+end
+
+% 2) PIRLS that may accept matrix RHS
+if exist('PIRLSnonneg', 'file') == 2
+    try
+        c = PIRLSnonneg(M, Y);
+        c = max(c, 0);
+        z = M * c;
+        return
+    catch
+    end
+
+    % 3) Columnwise PIRLS
+    try
+        c = zeros(nBasis, nY);
+        for j = 1:nY
+            c(:,j) = PIRLSnonneg(M, Y(:,j));
+        end
+        c = max(c, 0);
+        z = M * c;
+        return
+    catch
+    end
+end
+
+% 4) Fallback
+c = zeros(nBasis, nY);
+z = zeros(size(M,1), nY);
+for j = 1:nY
+    c(:,j) = lsqnonneg(M, Y(:,j));
+    z(:,j) = M * c(:,j);
+end
 end
