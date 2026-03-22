@@ -58,7 +58,7 @@ MATLAB is required.
 
 Optional toolboxes and features:
 - Parallel Computing Toolbox is required for `parpool`, `parfeval`, and GPU paths (`gpuArray`, `gpuDeviceCount`, `pagemtimes`).
-- Image Processing Toolbox is required for `imgaussfilt`, `regionfill`, and `montage` used in ISM reconstruction.
+- Image Processing Toolbox is required for `imgaussfilt`, `regionfill`, `montage`, `drawline`, and `improfile` (ISM and line-profile tools).
 - Signal Processing Toolbox may be required for `hann` depending on MATLAB version.
 
 External files not included in this repository (required by some functions):
@@ -70,6 +70,8 @@ External files not included in this repository (required by some functions):
 - `tttr2xfcs.m`
 - `AutodetectTimeGates.m`
 - `mim.m`
+- `CombineImages.m` (used by `run_beads_batch.m`)
+- `Gauss2D.m` (used by `run_beads_batch.m`)
 - `mexUtil.h` (required to build `cIntersect.cpp`)
 
 If you only use the PTU MultiFrame readers and the ISM and FLIM pipeline, the missing line-scan and HT3 helpers are not required.
@@ -165,6 +167,24 @@ res = lsFCS('data.ptu', 1, 10, [], 0);
 [G, Gcross, Gcarp, GcarpCross, t, xxi] = lsCrossRead(res, 25);
 ```
 
+### Batch ISM on beads (example script)
+
+`run_beads_batch.m` is a batch-processing example that loops through a folder of PTU files, reconstructs APR and ACO-ISM images, writes PNG and TIFF outputs, and measures bead widths.
+
+Notes:
+- Requires `CombineImages.m`, `save_tiff.m`, and `Gauss2D.m`.
+- The script references `results.deconvolvedImage`. In the current ISM pipeline, the main reconstruction output is `results.acoImage`. If you do not have a separate deconvolution step, replace `results.deconvolvedImage` with `results.acoImage`.
+
+### Line profile across images
+
+`lineProfileAcrossImages.m` lets you draw one line on a reference image and extract intensity profiles along the same line in all images.
+
+```matlab
+titles = {'Raw sum','APR','ACO-ISM'};
+ims = cat(3, results.rawSum, results.aprImage, results.acoImage);
+[profiles, distPix, pos] = lineProfileAcrossImages(ims, 2, 600, titles);
+```
+
 ## Function Reference
 
 ### Readers and I/O
@@ -215,6 +235,11 @@ Key params: `oversampleXY`, `keepSameSize`, `storeTotalCubes`, `storeFrameCubes`
 `run_ISM.m`
 Type: Script
 Summary: Example end-to-end pipeline for PTU read, ISM reconstruction, FLIM reassignment, and IRF estimation.
+
+`run_beads_batch.m`
+Type: Script
+Summary: Batch ISM reconstruction over a folder of PTU files, saves images, and estimates bead widths.
+Notes: Uses `CombineImages.m`, `save_tiff.m`, and `Gauss2D.m`, and references `results.deconvolvedImage`.
 
 ### IRF models and estimation
 
@@ -326,3 +351,20 @@ Notes: Precompiled `cIntersect.mexw64` and `cIntersect.mexa64` are included. Reb
 Signature: `handle = cim(x, p1, p2, p3, clmp)`
 Summary: Convenience image display wrapper around `imagesc` with optional overlays.
 Notes: Calls `mim`, which is not included in this repository.
+
+`lineProfileAcrossImages.m`
+Signature: `[profiles, distPix, pos] = lineProfileAcrossImages(imStack, refIdx, nSamples, imgTitles)`
+Summary: Interactive line selection on a reference image and profile extraction across a stack.
+Notes: Requires Image Processing Toolbox for `drawline` and `improfile`.
+
+`CombineImagesMultiCmap.m`
+Signature: `imRGB = CombineImagesMultiCmap(imraw, n, m, cmaps, flag, labelx, labely, fsize, clims)`
+Summary: Tiles an image stack into a mosaic and applies a separate colormap per panel.
+
+`ShowImagesMultiCmapWithColorbars.m`
+Signature: `ShowImagesMultiCmapWithColorbars(imraw, cmaps, clims, titlestr, blackbg)`
+Summary: Displays a stack with per-panel colormaps and colorbars.
+
+`save_tiff.m`
+Signature: `save_tiff(filename, imgdata, datatype, bitdepth, force_overwrite)`
+Summary: Saves an image or stack to TIFF with datatype and bitdepth control.
