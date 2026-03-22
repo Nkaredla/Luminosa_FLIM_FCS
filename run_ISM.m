@@ -1,4 +1,5 @@
-name = 'D:\Luminosa\Data\Ciaofan\RawImage_2.ptu';
+% name = 'D:\Luminosa\Data\Ciaofan\RawImage_2.ptu';
+name = 'D:\Luminosa\Data\270226\ISM\GattaBeads_25\ISM_20260227-195546\RawImage.ptu';
 
 head = PTU_Read_Head(name);
 
@@ -109,6 +110,9 @@ opts.sortLifetimes = true;
 outFLIM = GlobalMultiExpPatternMatchFromTCSPC( ...
     tcspc_pix, tcspcIRF, pulsePeriodNs, dtNs, tau0, opts);
 
+figure
+cmaps = {'red','green','blue','orange'};
+ShowImagesMultiCmapWithColorbars(outFLIM.Amp, cmaps, [], [], true);
 %% Triexponential fitting and pattern matching - Confocal
 
 tcspc_pix = flim.unassigned.total.xyT;   % same as flim.total.xyT
@@ -124,3 +128,7 @@ opts.sortLifetimes = true;
 
 outFLIM2 = GlobalMultiExpPatternMatchFromTCSPC( ...
     tcspc_pix, tcspcIRF, pulsePeriodNs, dtNs, tau0, opts);
+
+figure
+cmaps = {'red','green','blue','orange'};
+ShowImagesMultiCmapWithColorbars(outFLIM2.Amp, cmaps, [], [], true);

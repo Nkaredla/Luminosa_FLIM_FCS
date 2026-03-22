@@ -1,0 +1,56 @@
+% name = 'D:\Luminosa\Data\Ciaofan\RawImage_2.ptu';
+
+folderName = 'D:\Luminosa\Data\270226\ISM\GattaBeads_25\good\';
+filenames = dir(folderName);
+
+for k = 3:numel(filenames)
+    %     name = [folderName, filenames(k).name,filesep,'RawImage.ptu'];
+    name =  [folderName, filenames(k).name];
+    if strcmpi(name(end-2:end),'ptu')
+        
+        head = PTU_Read_Head(name);
+
+        out = PTU_MultiFrameScanReadFast(name); % read the channels
+
+        dind = out.dind;
+        ind = dind>=9 & dind<=31; % these are the PDA-23 detector channels
+        tags = out.tags(:,:,ind);
+
+        outNew = out;
+        outNew.dind = dind(ind);
+        outNew.tags = tags;
+
+        %% Pixel reassignment
+        params = struct();
+        params.imageSource = 'tags';      % use outPTU.tags(:,:,channel)
+        params.smoothSigma = 1;
+        params.useWindow = true;
+        params.normalizeImages = true;
+        params.upsampleReg = 20;
+
+        params.nIter = 1000;
+        params.checkEvery = 25;
+        params.stopTol = 1e-7;
+        params.minIter = 50;
+
+        params.pixelSize = head.ImgHdr_PixResol*1e3;            % nm/pixel in object plane
+        params.lambda = 690;              % nm
+        params.NA = 1.45;
+
+        params.showPlots = true;
+
+        try
+            results = run_ism_reconstruction_from_ptu(outNew, params);
+            close all
+            CombineImages(cat(3,results.rawSum, results.aprImage, results.acoImage, results.deconvolvedImage),2,2,'scale')
+            print( [name(1:end-4),'_ISM_image.png'],'-dpng','-r300')
+            save_tiff( [name(1:end-4),'_Confocal_image.tiff'],uint16(results.rawSum/max(results.rawSum(:))*2^16-1),'uint',16,1)
+            save_tiff( [name(1:end-4),'_APR_image.tiff'],uint16(results.aprImage/max(results.aprImage(:))*2^16-1),'uint',16,1)
+            save_tiff( [name(1:end-4),'_ACO_image.tiff'],uint16(results.acoImage/max(results.acoImage(:))*2^16-1),'uint',16,1)
+            save_tiff( [name(1:end-4),'_Deconv_image.tiff'],uint16(results.deconvolvedImage/max(results.deconvolvedImage(:))*2^16-1),'uint',16,1)
+        catch
+            print('Did not process')
+        end
+    end
+
+end

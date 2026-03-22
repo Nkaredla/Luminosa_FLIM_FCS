@@ -97,6 +97,11 @@ params = setDefault(params, 'lambda', 650);
 params = setDefault(params, 'NA', 1.4);
 
 params = setDefault(params, 'showPlots', true);
+params = setDefault(params, 'doISMDeconv', true);
+params = setDefault(params, 'deconvLambda', 1e-3);
+params = setDefault(params, 'deconvClipNegative', true);
+params = setDefault(params, 'deconvPreserveFlux', true);
+
 
     function s = setDefault(s, fieldName, defaultValue)
         if ~isfield(s, fieldName) || isempty(s.(fieldName))
@@ -210,6 +215,21 @@ otfISMideal = normalizeOTFdc(otfISMideal);
 otfISMexp = normalizeOTFdc(otfISMexp);
 
 % ------------------------------------------------------------
+% 8b) Enderlein-style OTF rectification / deconvolution
+%     IMPORTANT: these OTFs correspond to APR / ISM, not ACO.
+% ------------------------------------------------------------
+if params.doISMDeconv
+    [deconvolvedImage, deconvFilter] = deconvolveToIdealOTF( ...
+        aprImage, otfISMexp, otfISMideal, ...
+        params.deconvLambda, ...
+        params.deconvClipNegative, ...
+        params.deconvPreserveFlux);
+else
+    deconvolvedImage = [];
+    deconvFilter = [];
+end
+
+% ------------------------------------------------------------
 % 9) Collect outputs
 % ------------------------------------------------------------
 results = struct();
@@ -230,6 +250,8 @@ results.otfWF = otfWF;
 results.otfISMexp = otfISMexp;
 results.otfISMideal = otfISMideal;
 results.paramsUsed = params;
+results.deconvolvedImage = deconvolvedImage;
+results.deconvFilter = deconvFilter;
 
 if params.showPlots
     show_aco_ism_results(results);
@@ -647,3 +669,71 @@ for k = 1:N
 end
 end
 
+function [imgOut, Hfilter] = deconvolveToIdealOTF(imgIn, otfExp, otfIdeal, lambda, clipNegative, preserveFlux)
+% DECONVOLVETOIDEALOTF
+%
+% Enderlein-style regularized OTF rectification:
+%
+%   Fout(k) = Hfilter(k) * Fin(k)
+%
+% with
+%
+%   Hfilter(k) = otfIdeal(k) * conj(otfExp(k)) / ( |otfExp(k)|^2 + lambda )
+%
+% For the current code, otfExp is real/nonnegative, but we keep the
+% conjugate form for generality.
+%
+% Inputs
+% ------
+% imgIn         : APR / reassigned ISM image
+% otfExp        : experimental ISM OTF
+% otfIdeal      : ideal ISM OTF
+% lambda        : Tikhonov/Wiener-style regularization scalar
+% clipNegative  : if true, clip negative output values to zero
+% preserveFlux  : if true, renormalize output to same total sum as input
+
+if nargin < 4 || isempty(lambda)
+    lambda = 1e-3;
+end
+if nargin < 5 || isempty(clipNegative)
+    clipNegative = true;
+end
+if nargin < 6 || isempty(preserveFlux)
+    preserveFlux = true;
+end
+
+imgIn = double(imgIn);
+otfExp = double(otfExp);
+otfIdeal = double(otfIdeal);
+
+assert(isequal(size(imgIn), size(otfExp), size(otfIdeal)), ...
+    'imgIn, otfExp, and otfIdeal must have the same size.');
+
+% Normalize OTFs to DC = 1 if needed
+if abs(otfExp(1,1)) > 0
+    otfExp = otfExp / otfExp(1,1);
+end
+if abs(otfIdeal(1,1)) > 0
+    otfIdeal = otfIdeal / otfIdeal(1,1);
+end
+
+% Enderlein-style regularized filter
+Hfilter = (otfIdeal .* conj(otfExp)) ./ (abs(otfExp).^2 + lambda);
+
+% Apply in Fourier domain
+Fin = fft2(imgIn);
+Fout = Hfilter .* Fin;
+imgOut = real(ifft2(Fout));
+
+if clipNegative
+    imgOut(imgOut < 0) = 0;
+end
+
+if preserveFlux
+    sIn = sum(imgIn(:));
+    sOut = sum(imgOut(:));
+    if sOut > 0
+        imgOut = imgOut / sOut * sIn;
+    end
+end
+end
