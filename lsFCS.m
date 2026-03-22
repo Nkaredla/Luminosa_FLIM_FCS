@@ -143,130 +143,10 @@ for i = 1:nPixels
     line_idx(i) = find(tmp(:,i),1,'last');
 end
 
-if flagparallel
-    phot_read_idx = 0:nEvents:NRecords;
-    phot_read_idx(end+1) = NRecords;
+% Parallel worker path removed. Always use the Luminosa line-scan reader.
+while num>0
 
-    npool = min([numel(phot_read_idx)-1,20]);
-
-    MATLAB_2013b_or_newer = false;
-    % Check MATLAB version
-    MATLABversion = strsplit(version,'.');
-    if(str2double(MATLABversion(1))>=8 && str2double(MATLABversion(2))>=2) % matlabpool -> parpool in MATLAB 2013b (8.2.x) and later
-        MATLAB_2013b_or_newer = true;
-    end
-    if MATLAB_2013b_or_newer
-        clust = parcluster;
-        try
-            p = gcp('nocreate');
-            if isempty(p)
-                nrRunningWorkers = 0;
-            else
-                nrRunningWorkers = p.NumWorkers;
-            end
-
-            if(nrRunningWorkers == 0)
-                parpool(npool);
-                p = gcp('nocreate');
-                nrRunningWorkers = p.NumWorkers;
-            end
-            parallelProcessingAvailable = true;
-            fprintf('Parallel processing available (%i workers).\n', nrRunningWorkers)
-        catch
-            parallelProcessingAvailable = false;
-            fprintf(' Parallel processing unavailable.\n')
-        end
-
-
-        %           random_name = round(rand * 10000000);
-        %     temp_name = [name(1:end-4) sprintf('_%i-%i.mat', random_name, jj)];
-
-        addAttachedFiles(p,{'PTU_LineScanCorr.m','PTU_LineScanRead.m','PTU_Read.m','PTU_Read_Head.m','tttr2xfcs.m','cIntersect.m','cIntersect.cpp','cIntersect.mexw64','mexUtil.h'})
-
-
-
-
-        for jj = 1:length(phot_read_idx)-1
-            jobs(jj) = parfeval(p,@PTU_LineScanCorr, 1, ['\\jesrv2\AG-Enderlein' name(3:end)],  [phot_read_idx(jj)+1,nEvents],dind,cnum,pixel_n,tau,Timeunit,macroresolution,Ncasc,Nsub);
-        end
-
-
-
-        for jj = 1:length(phot_read_idx)-1
-            %         get(jobs(jj), 'State')
-            %             disp(jobs(jj).State)
-            wait(jobs(jj))
-        end
-
-        auto = zeros(Ncasc*Nsub,length(pixel_n),length(phot_read_idx)-1);
-        for jj = 1:length(phot_read_idx)-1
-            outargs = fetchOutputs(jobs(jj));
-            if dnum>1
-                auto(:,:,jj) = squeeze(outargs(:,1,2,:)+outargs(:,2,1,:));
-            else
-                auto(:,:,jj) = squeeze(outargs);
-            end
-        end
-
-    else % older versions of Matlab
-        try
-            nrRunningWorkers = matlabpool('size'); %#ok<*DPOOL>
-            if(nrRunningWorkers == 0)
-                matlabpool('open',npool);
-            end
-            parallelProcessingAvailable = true;
-            fprintf('Parallel processing available (%i workers).\n', matlabpool('size'))
-        catch
-            parallelProcessingAvailable = false;
-            fprintf('Parallel processing unavailable.\n')
-        end
-        clust = findResource('scheduler','type','jobmanager','Name','hal9001','LookupURL','134.76.92.49');
-
-        %     random_name = round(rand * 10000000);
-        %     temp_name = [name(1:end-4) sprintf('_%i-%i.mat', random_name, jj)];
-
-
-
-        path_str = pwd;
-        filedeps = cell(1,3);
-        filedeps{1} = [path_str '\' 'PTU_LineScanRead.m'];
-        filedeps{2} = [path_str '\' 'PTU_Read.m'];
-        filedeps{3} = [path_str '\' 'PTU_Read_Head.m'];
-        %     filedeps{4} = temp_name;
-
-
-        for jj = 1:length(phot_read_idx)-1
-            jobs{jj} = createJob(clust);
-            set(jobs{jj}, 'JobData', jj);
-            %         set(jobs{jj}, 'AdditionalPaths', {[path_str '\']});
-            %         set(jobs{jj}, 'AttachedFiles', filedeps);
-            set(jobs{jj}, 'FileDependencies', filedeps);
-            createTask(jobs{jj}, @PTU_LineScanRead, 7, {name,  [phot_read_idx(jj)+1,nEvents]}); %file_name is short filename
-
-            if (length(findJob(clust, 'State', 'queued')) < 20)
-                submit(jobs{jj});
-            end
-        end
-    end
-    res.line_idx = line_idx;
-    res.bin2 = tau;
-    res.autotime = autotime;
-    res.auto            = auto;
-    head.NCounts        = cnt;
-    res.head            = head;
-
-    save([name(1:end-4),'_lsFCS.mat'],'res')
-
-
-else
-
-    while num>0
-
-        if isfield(head,'CreatorSW_Name') && strcmpi(head.CreatorSW_Name,'Luminosa')
-            [head, im_sync, im_tcspc, im_chan, ~, im_pixel, ~, num] = LPTU_LineScanRead(name, [1 + cnt, nEvents]);
-        else
-            [head, im_sync, im_tcspc, im_chan, ~, im_pixel, ~, num] = PTU_LineScanRead(name, [1 + cnt, nEvents]);
-        end
+        [head, im_sync, im_tcspc, im_chan, ~, im_pixel, ~, num] = LPTU_LineScanRead(name, [1 + cnt, nEvents]);
 
         cnt = cnt + num;
         if (num>0) && (~isempty(im_sync))
@@ -319,26 +199,24 @@ else
 %         drawnow;
 
         iBunch = iBunch+1;
-    end
-
-
-    res.line_idx = line_idx;
-    res.bin2 = tau;
-    res.tcspcdata2      = tcspcdata2(t1:t1+len);
-
-    res.autotime = autotime;
-    automean=0;
-    for ii = 1:size(auto,2)
-        automean=automean + auto(:,ii,ii,:);
-    end
-    automean = mean(squeeze(automean),2);
-    res.automean        = automean;
-    res.auto            = auto;
-    res.rate            = rate;
-    res.time            = time;
-    head.NCounts        = cnt;
-    res.head            = head;
-
-    save([name(1:end-4),'_lsFCS.mat'],'res')
-
 end
+
+
+res.line_idx = line_idx;
+res.bin2 = tau;
+res.tcspcdata2      = tcspcdata2(t1:t1+len);
+
+res.autotime = autotime;
+automean=0;
+for ii = 1:size(auto,2)
+    automean=automean + auto(:,ii,ii,:);
+end
+automean = mean(squeeze(automean),2);
+res.automean        = automean;
+res.auto            = auto;
+res.rate            = rate;
+res.time            = time;
+head.NCounts        = cnt;
+res.head            = head;
+
+save([name(1:end-4),'_lsFCS.mat'],'res')
