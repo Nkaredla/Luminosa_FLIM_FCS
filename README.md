@@ -61,21 +61,6 @@ Optional toolboxes and features:
 - Image Processing Toolbox is required for `imgaussfilt`, `regionfill`, `montage`, `drawline`, and `improfile` (ISM and line-profile tools).
 - Signal Processing Toolbox may be required for `hann` depending on MATLAB version.
 
-External files not included in this repository (required by some functions):
-- `HT3_Read.m`
-- `mHist.m`
-- `mHist3.m`
-- `PTU_LineScanRead.m`
-- `PTU_LineScanCorr.m`
-- `tttr2xfcs.m`
-- `AutodetectTimeGates.m`
-- `mim.m`
-- `CombineImages.m` (used by `run_beads_batch.m`)
-- `Gauss2D.m` (used by `run_beads_batch.m`)
-- `mexUtil.h` (required to build `cIntersect.cpp`)
-
-If you only use the PTU MultiFrame readers and the ISM and FLIM pipeline, the missing line-scan and HT3 helpers are not required.
-
 ## Units and Conventions
 
 - Time inputs and outputs are usually in nanoseconds (ns) unless stated otherwise.
@@ -132,6 +117,8 @@ Key fields:
 1) Read PTU and build detector images.
 2) Reconstruct APR + ACO-ISM.
 3) Reassign photons and compute lifetime maps.
+
+Reference for ACO-ISM: Ancora et al., *Image scanning microscopy reconstruction by autocorrelation inversion*, Journal of Physics: Photonics 6(4):045003 (2024), DOI: 10.1088/2515-7647/ad68dd.
 
 ```matlab
 ptuOut = PTU_MultiFrameScanReadFast(name, 1e6, false);
