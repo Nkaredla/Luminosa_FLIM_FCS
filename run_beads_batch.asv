@@ -44,10 +44,21 @@ for k = 3:numel(filenames)
             close all
             CombineImages(cat(3,results.rawSum, results.aprImage, results.acoImage, results.deconvolvedImage),2,2,'scale')
             print( [name(1:end-4),'_ISM_image.png'],'-dpng','-r300')
-            imwrite( [name(1:end-4),'_ISM_image.tiff'],)
+            save_tiff( [name(1:end-4),'_Confocal_image.tiff'],uint16(results.rawSum/max(results.rawSum(:))*2^16-1),'uint',16,1)
+            save_tiff( [name(1:end-4),'_APR_image.tiff'],uint16(results.aprImage/max(results.aprImage(:))*2^16-1),'uint',16,1)
+            save_tiff( [name(1:end-4),'_ACO_image.tiff'],uint16(results.acoImage/max(results.acoImage(:))*2^16-1),'uint',16,1)
+            save_tiff( [name(1:end-4),'_Deconv_image.tiff'],uint16(results.deconvolvedImage/max(results.deconvolvedImage(:))*2^16-1),'uint',16,1)
         catch
-            print('Did not process')
+            print('Did not process') 
         end
     end
 
 end
+
+%%
+
+titles = {'Raw sum', 'APR', 'ACO-ISM', 'APR deconv'};
+
+
+res = lineProfileAcrossImages(cat(3,results.rawSum, results.aprImage, results.acoImage, results.deconvolvedImage),[], [],titles);
+for k = 1

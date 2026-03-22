@@ -49,8 +49,22 @@ for k = 3:numel(filenames)
             save_tiff( [name(1:end-4),'_ACO_image.tiff'],uint16(results.acoImage/max(results.acoImage(:))*2^16-1),'uint',16,1)
             save_tiff( [name(1:end-4),'_Deconv_image.tiff'],uint16(results.deconvolvedImage/max(results.deconvolvedImage(:))*2^16-1),'uint',16,1)
         catch
-            print('Did not process')
+            print('Did not process') 
         end
     end
 
+end
+
+%%
+
+
+titles = {'Raw sum', 'APR', 'ACO-ISM', 'APR deconv'};
+
+ims = cat(3,results.rawSum, results.aprImage, results.acoImage, results.deconvolvedImage);
+res = lineProfileAcrossImages(ims,[], [],titles);
+
+wbead = zeros(4,1);
+for k = 1:size(res,2)
+     [~, ~, wx, wy] = Gauss2D(ims(:,:,k));
+     wbead(k) = (wx+wy)/2*head.ImgHdr_PixResol*1e3;
 end
