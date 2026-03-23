@@ -19,7 +19,7 @@ for k = 5:numel(filenames)
     cmap = cmap(30:end-30,:);
     
     cim(tauc ,log10(0.001 + int.^2),[3.5 6.5],'v',cmap)
-    save([name(1:end-4),'_FLIM.mat'], 'out','head');
+    save([name(1:end-4),'_FLIM.mat'], out,head);
 
     print( [name(1:end-4),'_FLIM_image.png'],'-dpng','-r300')
             
