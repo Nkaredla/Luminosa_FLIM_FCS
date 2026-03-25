@@ -9,7 +9,7 @@ Read a PTU MultiFrame scan, reconstruct APR + ACO-ISM, and build reassigned FLIM
 ```matlab
 name = 'path/to/data.ptu';
 
-ptuOut = PTU_MultiFrameScanReadFast(name, 1e6, false);
+ptuOut = PTU_MultiFrameScanReadFast(name, 1e6, true); % store tcspc_pix for IRF fitting
 
 params = struct();
 params.imageSource = 'tags';
@@ -33,6 +33,8 @@ ismRes = run_ism_reconstruction_from_ptu(ptuOut, params);
 
 flim = reassigned_flim(ptuOut, ismRes, params);
 ```
+
+If you do not need `tcspc_pix`, set `storeTcspcPix = false` in `PTU_MultiFrameScanReadFast` to save memory.
 
 Estimate a global IRF and lifetimes from a TCSPC cube:
 
@@ -60,6 +62,7 @@ Optional toolboxes and features:
 - Parallel Computing Toolbox is required for `parpool`, `parfeval`, and GPU paths (`gpuArray`, `gpuDeviceCount`, `pagemtimes`).
 - Image Processing Toolbox is required for `imgaussfilt`, `regionfill`, `montage`, `drawline`, and `improfile` (ISM and line-profile tools).
 - Signal Processing Toolbox may be required for `hann` depending on MATLAB version.
+- `AutodetectTimeGates.m` uses `mCluster` (not included). Provide an equivalent on your MATLAB path or replace the gate detection.
 
 ## Units and Conventions
 
@@ -88,8 +91,11 @@ Fields (most common):
 `ismRes` is returned by `run_ism_reconstruction_from_ptu`.
 
 Key fields:
-- `imgStack`, `channelIDs`, `shiftsToCenter`.
-- `rawSum`, `aprImage`, `acoAverage`, `acoImage`.
+- `imgStack`, `channelIDs`.
+- `tempReferenceIndex`, `centerDetectorIndex`.
+- `shiftsToTempRef`, `shiftsToCenter`, `detectorPositions`.
+- `rawSum`, `aprImage`, `acoAverage`, `acoAverageMasked`, `acoImage`.
+- `deconvolvedImage`, `deconvFilter` (empty if `params.doISMDeconv = false`).
 - `convHistory`, `otfWF`, `otfISMexp`, `otfISMideal`.
 - `paramsUsed`.
 
@@ -160,7 +166,11 @@ res = lsFCS('data.ptu', 1, 10, [], 0);
 
 Notes:
 - Requires `CombineImages.m`, `save_tiff.m`, and `Gauss2D.m`.
-- The script references `results.deconvolvedImage`. In the current ISM pipeline, the main reconstruction output is `results.acoImage`. If you do not have a separate deconvolution step, replace `results.deconvolvedImage` with `results.acoImage`.
+- The script uses `results.deconvolvedImage`, which is produced when `params.doISMDeconv` is true (default). If you disable deconvolution, swap in `results.acoImage` or `results.aprImage`.
+
+### Batch FLIM quicklook (example script)
+
+`FLIM_read.m` is a simple batch script for reading PTU files in a folder, building intensity and lifetime maps, adding a scale bar, and saving a PNG plus a MAT file per dataset. Edit `folderName` at the top of the script before running.
 
 ### Line profile across images
 
@@ -201,6 +211,11 @@ Signature: `[head, im_sync, im_tcspc, im_chan, im_line, im_col, im_frame, num] =
 Summary: Reads photons from PTU line-scan files and assigns each photon to line and column indices.
 Notes: Only monodirectional line scans (`ImgHdr_Ident == 9` and `ImgHdr_BiDirect == 0`).
 
+`LPTU_LineScanReadOld.m`
+Signature: `[head, im_sync, im_tcspc, im_chan, im_line, im_col, im_frame, num] = LPTU_LineScanReadOld(name, cnts, nx)`
+Summary: Legacy PTU line-scan reader kept for backwards compatibility (defaults to `nx = 50`).
+Notes: Prefer `LPTU_LineScanRead` for current workflows.
+
 `Harp_tcspc.m`
 Signature: `[bin, tcspcdata, head] = Harp_tcspc(name, resolution, deadtime, photons)`
 Summary: Builds TCSPC histograms from `.ht3` or `.ptu` files with optional deadtime filtering.
@@ -211,17 +226,21 @@ Notes: Caches results to `*.ht3tcspc`. Requires `HT3_Read.m` and `mHist.m`.
 `run_ism_reconstruction_from_ptu.m`
 Signature: `results = run_ism_reconstruction_from_ptu(ptuOut, params)`
 Summary: APR + ACO-ISM reconstruction with phase-correlation registration and Schultz-Snyder inversion.
-Key params: `imageSource`, `smoothSigma`, `upsampleReg`, `nIter`, `stopTol`, `pixelSize`, `lambda`, `NA`, `showPlots`.
-Outputs: `results.aprImage`, `results.acoImage`, `results.shiftsToCenter`, and diagnostics.
+Key params: `imageSource`, `frameIndices`, `frameCombine`, `dropEmptyChannels`, `centerDetectorIndex`, `tempReferenceIndex`, `smoothSigma`, `useWindow`, `normalizeImages`, `upsampleReg`, `nIter`, `checkEvery`, `stopTol`, `minIter`, `supportMask`, `preserveFlux`, `pixelSize`, `lambda`, `NA`, `doISMDeconv`, `deconvLambda`, `deconvClipNegative`, `deconvPreserveFlux`, `showPlots`.
+Outputs: `results.aprImage`, `results.acoImage`, `results.deconvolvedImage`, `results.shiftsToCenter`, plus OTF and registration diagnostics.
 
 `reassigned_flim.m`
 Signature: `flim = reassigned_flim(ptuOut, ismRes, params)`
 Summary: Reassigns photons using APR shifts and computes lifetime statistics on native or oversampled grids.
-Key params: `oversampleXY`, `keepSameSize`, `storeTotalCubes`, `storeFrameCubes`, `minCounts`, `useBackground`, `bgBins`, `t0Mode`, `t0Bin`, `overflowAction`.
+Key params: `oversampleXY`, `keepSameSize`, `storeTotalCubes`, `storeFrameCubes`, `frameIndices`, `minCounts`, `useBackground`, `bgBins`, `t0Mode`, `t0Bin`, `overflowAction`.
 
 `run_ISM.m`
 Type: Script
 Summary: Example end-to-end pipeline for PTU read, ISM reconstruction, FLIM reassignment, and IRF estimation.
+
+`FLIM_read.m`
+Type: Script
+Summary: Batch PTU quicklook that builds intensity/lifetime maps, adds a scale bar, and saves PNG and MAT outputs. Edit `folderName` in the script.
 
 `run_beads_batch.m`
 Type: Script
@@ -293,6 +312,20 @@ Summary: Bounded Nelder-Mead optimizer used for IRF and decay fitting.
 Signature: `y = Convol(irf, x)`
 Summary: Periodic convolution used for reconvolution fitting.
 
+### Histogram utilities
+
+`mHist.m`
+Signature: `[z, xv] = mHist(x, xv, weight)`
+Summary: 1D histogram with optional weights and custom bin centers/edges.
+
+`mHist2.m`
+Signature: `[z, xv, yv] = mHist2(x, y, xv, yv, weight)`
+Summary: 2D histogram with optional weights and custom bin vectors.
+
+`mHist3.m`
+Signature: `[h, xv, yv, zv] = mHist3(x, y, z, xv, yv, zv)`
+Summary: 3D histogram with custom bin vectors or sizes.
+
 ### Pattern matching and PIRLS
 
 `PatternMatchIm_matlab.m`
@@ -319,9 +352,18 @@ Signature: `res = lsFCS(name, cnum, maxtime, timegates, flagparallel)`
 Summary: Line-scan FCS with multi-tau correlation and optional parallel processing.
 Outputs: `res.tcspc`, `res.autotime`, `res.auto`, `res.automean`, `res.rate`, `res.time`, `res.head`.
 
+`AutodetectTimeGates.m`
+Signature: `[t1, len] = AutodetectTimeGates(tcspcdata, cnum)`
+Summary: Heuristic gate detection for multi-pulse TCSPC data (returns gate start indices and a common length).
+Notes: Uses `mCluster` (not included).
+
 `lsCrossRead.m`
 Signature: `[G, Gcross, Gcarp, GcarpCross, t, xxi] = lsCrossRead(res, flag)`
 Summary: Reorders line-scan correlation output into correlation vs spatial shift and component pairs.
+
+`tttr2xfcs.m`
+Signature: `[auto, autotime] = tttr2xfcs(y, num, Ncasc, Nsub)`
+Summary: Multi-tau auto- and cross-correlation for weighted photon streams.
 
 `tttr2xfcsSym.m`
 Signature: `[auto, autotime] = tttr2xfcsSym(y, num, Ncasc, Nsub)`
@@ -337,12 +379,24 @@ Notes: Precompiled `cIntersect.mexw64` and `cIntersect.mexa64` are included. Reb
 `cim.m`
 Signature: `handle = cim(x, p1, p2, p3, clmp)`
 Summary: Convenience image display wrapper around `imagesc` with optional overlays.
-Notes: Calls `mim`, which is not included in this repository.
+Notes: Calls `mim` (included).
+
+`mim.m`
+Signature: `mim(x, p1, p2, p3)`
+Summary: Minimal image display helper used by `cim` and `CombineImages`.
+
+`addPTUScaleBar.m`
+Signature: `h = addPTUScaleBar(axOrIm, head, imSize, location, varargin)`
+Summary: Draws a scale bar on an image using PTU header pixel size metadata.
 
 `lineProfileAcrossImages.m`
 Signature: `[profiles, distPix, pos] = lineProfileAcrossImages(imStack, refIdx, nSamples, imgTitles)`
 Summary: Interactive line selection on a reference image and profile extraction across a stack.
 Notes: Requires Image Processing Toolbox for `drawline` and `improfile`.
+
+`CombineImages.m`
+Signature: `im = CombineImages(imraw, n, m, flag, labelx, labely, fsize)`
+Summary: Tiles an image stack into an `n`-by-`m` mosaic with optional scaling and labels.
 
 `CombineImagesMultiCmap.m`
 Signature: `imRGB = CombineImagesMultiCmap(imraw, n, m, cmaps, flag, labelx, labely, fsize, clims)`
