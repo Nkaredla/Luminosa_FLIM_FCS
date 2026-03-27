@@ -102,6 +102,12 @@ params = setDefault(params, 'deconvLambda', 1e-3);
 params = setDefault(params, 'deconvClipNegative', true);
 params = setDefault(params, 'deconvPreserveFlux', true);
 
+params = setDefault(params, 'showChannelLabels', true);
+params = setDefault(params, 'channelLabelMode', 'channel');  % 'channel', 'index', or 'both'
+params = setDefault(params, 'channelLabelFontSize', 10);
+params = setDefault(params, 'channelLabelColor', [0 0 0]);
+params = setDefault(params, 'channelLabelWeight', 'bold');
+
 
     function s = setDefault(s, fieldName, defaultValue)
         if ~isfield(s, fieldName) || isempty(s.(fieldName))
@@ -253,8 +259,22 @@ results.paramsUsed = params;
 results.deconvolvedImage = deconvolvedImage;
 results.deconvFilter = deconvFilter;
 
+% Detector/channel lookup table
+results.detectorIndex = (1:numel(results.channelIDs)).';
+results.centerChannelID = results.channelIDs(results.centerDetectorIndex);
+
+results.detectorTable = table( ...
+    results.detectorIndex, ...
+    results.channelIDs(:), ...
+    results.detectorPositions(:,1), ...
+    results.detectorPositions(:,2), ...
+    results.shiftsToCenter(:,1), ...
+    results.shiftsToCenter(:,2), ...
+    'VariableNames', {'DetectorIndex','ChannelID','PosDY','PosDX','ShiftToCenterDY','ShiftToCenterDX'});
+
+
 if params.showPlots
-    show_aco_ism_results(results);
+    show_aco_ism_results(results, params);
 end
 end
 
@@ -587,7 +607,16 @@ end
 % =========================================================================
 % Plotting
 % =========================================================================
-function show_aco_ism_results(res)
+function show_aco_ism_results(res, params)
+
+if nargin < 2 || isempty(params)
+    params = struct();
+end
+if ~isfield(params, 'showChannelLabels'), params.showChannelLabels = false; end
+if ~isfield(params, 'channelLabelMode'), params.channelLabelMode = 'channel'; end
+if ~isfield(params, 'channelLabelFontSize'), params.channelLabelFontSize = 10; end
+if ~isfield(params, 'channelLabelColor'), params.channelLabelColor = [0 0 0]; end
+if ~isfield(params, 'channelLabelWeight'), params.channelLabelWeight = 'bold'; end
 
 imgStack = res.imgStack;
 [H, W, ~] = size(imgStack);
@@ -606,16 +635,55 @@ subplot(2,3,3);
 imagesc(res.acoImage); axis image off; colormap hot;
 title('ACO-ISM image');
 
+% subplot(2,3,4);
+% plot(res.detectorPositions(:,2), -res.detectorPositions(:,1), 'o', 'LineWidth', 1.4);
+% hold on;
+% plot(res.detectorPositions(res.centerDetectorIndex,2), ...
+%     -res.detectorPositions(res.centerDetectorIndex,1), ...
+%     'rp', 'MarkerSize', 12, 'LineWidth', 2);
+% axis equal; grid on;
+% xlabel('\Delta x [px]');
+% ylabel('\Delta y [px]');
+% title('Recovered detector geometry');
 subplot(2,3,4);
-plot(res.detectorPositions(:,2), -res.detectorPositions(:,1), 'o', 'LineWidth', 1.4);
+xpos = res.detectorPositions(:,2);
+ypos = -res.detectorPositions(:,1);
+
+plot(xpos, ypos, 'o', 'LineWidth', 1.4, 'MarkerSize', 6);
 hold on;
-plot(res.detectorPositions(res.centerDetectorIndex,2), ...
-    -res.detectorPositions(res.centerDetectorIndex,1), ...
-    'rp', 'MarkerSize', 12, 'LineWidth', 2);
-axis equal; grid on;
+plot(xpos(res.centerDetectorIndex), ypos(res.centerDetectorIndex), ...
+     'rp', 'MarkerSize', 14, 'LineWidth', 2);
+
+if params.showChannelLabels
+    for k = 1:numel(xpos)
+        switch lower(params.channelLabelMode)
+            case 'channel'
+                lbl = sprintf('%d', res.channelIDs(k));
+            case 'index'
+                lbl = sprintf('%d', k);
+            case 'both'
+                lbl = sprintf('%d [%d]', res.channelIDs(k), k);
+            otherwise
+                lbl = sprintf('%d', res.channelIDs(k));
+        end
+
+        text(xpos(k) + 0.2, ypos(k) + 0.2, lbl, ...
+            'Color', params.channelLabelColor, ...
+            'FontSize', params.channelLabelFontSize, ...
+            'FontWeight', params.channelLabelWeight, ...
+            'BackgroundColor', 'w', ...
+            'Margin', 1, ...
+            'HorizontalAlignment', 'left', ...
+            'VerticalAlignment', 'bottom');
+    end
+end
+
+axis equal;
+grid on;
 xlabel('\Delta x [px]');
 ylabel('\Delta y [px]');
-title('Recovered detector geometry');
+title(sprintf('Recovered detector geometry (center ch %d)', res.centerChannelID));
+
 
 subplot(2,3,5);
 fx = (-floor(W/2):ceil(W/2)-1) / W;

@@ -3,24 +3,14 @@ function flim = reassigned_flim(ptuOut, ismRes, params)
 %
 % Optimized FLIM reconstruction from PTU photons using APR shifts.
 %
-% Key optimization:
-% If keepSameSize = true, we NEVER build the oversampled 3D cube.
-% We compute oversampled photon bins, map them directly to native bins,
-% and accumulate only the native-size uint16 cube.
+% Main optimization:
+%   - direct photon-to-native-bin mapping when keepSameSize = true
+%   - direct moment accumulation when useBackground = false
+%   - build uint16 cubes only when explicitly needed
 %
-% Storage policy:
-%   - x-y-t cubes are stored as uint16
-%   - tag / tauMean / tauRMS / meanArrival / globalDecay are stored as double
-%
-% Outputs:
-%   flim.unassigned.total
-%   flim.unassigned.frames
-%   flim.reassigned.total
-%   flim.reassigned.frames
-%
-% Compatibility:
-%   flim.total  = flim.reassigned.total
-%   flim.frames = flim.reassigned.frames
+% IMPORTANT:
+%   im_tcspc is NEVER modified here.
+%   Only the spatial coordinates are reassigned.
 
     if nargin < 3
         params = struct();
@@ -28,11 +18,11 @@ function flim = reassigned_flim(ptuOut, ismRes, params)
 
     params = setDefault(params, 'oversampleXY', 2);
     params = setDefault(params, 'keepSameSize', true);
-    params = setDefault(params, 'storeTotalCubes', true);
+    params = setDefault(params, 'storeTotalCubes', false);
     params = setDefault(params, 'storeFrameCubes', false);
     params = setDefault(params, 'frameIndices', []);
     params = setDefault(params, 'minCounts', 20);
-    params = setDefault(params, 'useBackground', true);
+    params = setDefault(params, 'useBackground', false);
     params = setDefault(params, 'bgBins', []);
     params = setDefault(params, 't0Mode', 'auto');
     params = setDefault(params, 't0Bin', []);
@@ -127,7 +117,7 @@ function flim = reassigned_flim(ptuOut, ismRes, params)
     dCol = dCol(okBase);
 
     % ------------------------------------------------------------
-    % Convert photons to native bins directly
+    % Convert photons to final bins
     % ------------------------------------------------------------
     [rb_un, cb_un, tb_un, fr_un] = map_photons_to_bins( ...
         row0, col1, zeros(size(dRow)), zeros(size(dCol)), t0, fr, ...
@@ -146,16 +136,16 @@ function flim = reassigned_flim(ptuOut, ismRes, params)
     end
 
     % ------------------------------------------------------------
-    % TOTAL cubes
+    % TOTAL stats / cubes
     % ------------------------------------------------------------
-    cubeUn = build_cube_from_bins_uint16(rb_un, cb_un, tb_un, outH, outW, Ng, params.overflowAction);
-    cubeRe = build_cube_from_bins_uint16(rb_re, cb_re, tb_re, outH, outW, Ng, params.overflowAction);
+    [statsUn, cubeUn] = stats_from_binned_photons( ...
+        rb_un, cb_un, tb_un, outH, outW, Ng, tAxisNs, params, params.storeTotalCubes);
 
-    statsUn = tcspc_cube_to_lifetime_double(cubeUn, tAxisNs, params);
-    statsRe = tcspc_cube_to_lifetime_double(cubeRe, tAxisNs, params);
+    [statsRe, cubeRe] = stats_from_binned_photons( ...
+        rb_re, cb_re, tb_re, outH, outW, Ng, tAxisNs, params, params.storeTotalCubes);
 
     % ------------------------------------------------------------
-    % FRAMEWISE cubes and maps
+    % FRAMEWISE stats / cubes
     % ------------------------------------------------------------
     frameList = unique(fr(:)).';
     nFrames = numel(frameList);
@@ -170,18 +160,14 @@ function flim = reassigned_flim(ptuOut, ismRes, params)
         indRe = (fr_re == fk);
 
         if any(indUn)
-            cubeF_un = build_cube_from_bins_uint16( ...
-                rb_un(indUn), cb_un(indUn), tb_un(indUn), outH, outW, Ng, params.overflowAction);
-
-            statsF_un = tcspc_cube_to_lifetime_double(cubeF_un, tAxisNs, params);
+            [statsF_un, cubeF_un] = stats_from_binned_photons( ...
+                rb_un(indUn), cb_un(indUn), tb_un(indUn), outH, outW, Ng, tAxisNs, params, params.storeFrameCubes);
             framesUn = fill_frame_struct(framesUn, statsF_un, cubeF_un, k, params.storeFrameCubes);
         end
 
         if any(indRe)
-            cubeF_re = build_cube_from_bins_uint16( ...
-                rb_re(indRe), cb_re(indRe), tb_re(indRe), outH, outW, Ng, params.overflowAction);
-
-            statsF_re = tcspc_cube_to_lifetime_double(cubeF_re, tAxisNs, params);
+            [statsF_re, cubeF_re] = stats_from_binned_photons( ...
+                rb_re(indRe), cb_re(indRe), tb_re(indRe), outH, outW, Ng, tAxisNs, params, params.storeFrameCubes);
             framesRe = fill_frame_struct(framesRe, statsF_re, cubeF_re, k, params.storeFrameCubes);
         end
     end
@@ -198,26 +184,17 @@ function flim = reassigned_flim(ptuOut, ismRes, params)
 
     flim.unassigned = struct();
     flim.unassigned.total = statsUn;
-    if params.storeTotalCubes
-        flim.unassigned.total.xyT = cubeUn;
-        flim.unassigned.total.rcT = cubeUn;
-    else
-        flim.unassigned.total.xyT = [];
-        flim.unassigned.total.rcT = [];
-    end
+    flim.unassigned.total.xyT = cubeUn;
+    flim.unassigned.total.rcT = cubeUn;
     flim.unassigned.frames = framesUn;
 
     flim.reassigned = struct();
     flim.reassigned.total = statsRe;
-    if params.storeTotalCubes
-        flim.reassigned.total.xyT = cubeRe;
-        flim.reassigned.total.rcT = cubeRe;
-    else
-        flim.reassigned.total.xyT = [];
-        flim.reassigned.total.rcT = [];
-    end
+    flim.reassigned.total.xyT = cubeRe;
+    flim.reassigned.total.rcT = cubeRe;
     flim.reassigned.frames = framesRe;
 
+    % Compatibility aliases
     flim.total = flim.reassigned.total;
     flim.frames = flim.reassigned.frames;
 end
@@ -226,41 +203,135 @@ end
 function [rb, cb, tb, frOut] = map_photons_to_bins(row0, col0, dRow, dCol, t0, fr, H, W, Ng, OS, keepSameSize)
 % Map photons to final histogram bins.
 %
-% If keepSameSize = true:
-%   compute oversampled bin, then map directly to its native downsampled bin
-%   without ever building the oversampled cube.
-%
-% If keepSameSize = false:
-%   return oversampled bins directly.
+% im_tcspc is unchanged.
+% Only row/col are spatially shifted.
 
     row_os = floor((row0 - 0.5 + dRow) * OS + 0.5);
     col_os = floor((col0 - 0.5 + dCol) * OS + 0.5);
     tb = floor(t0);
 
+    ok = row_os >= 1 & row_os <= H*OS & col_os >= 1 & col_os <= W*OS & tb >= 1 & tb <= Ng;
+
+    row_os = row_os(ok);
+    col_os = col_os(ok);
+    tb = tb(ok);
+    frOut = fr(ok);
+
     if keepSameSize
-        ok = row_os >= 1 & row_os <= H*OS & col_os >= 1 & col_os <= W*OS & tb >= 1 & tb <= Ng;
-
-        row_os = row_os(ok);
-        col_os = col_os(ok);
-        tb = tb(ok);
-        frOut = fr(ok);
-
         rb = floor((row_os - 1) / OS) + 1;
         cb = floor((col_os - 1) / OS) + 1;
     else
-        ok = row_os >= 1 & row_os <= H*OS & col_os >= 1 & col_os <= W*OS & tb >= 1 & tb <= Ng;
-
-        rb = row_os(ok);
-        cb = col_os(ok);
-        tb = tb(ok);
-        frOut = fr(ok);
+        rb = row_os;
+        cb = col_os;
     end
 end
 
 
-function cube = build_cube_from_bins_uint16(rb, cb, tb, H, W, Ng, overflowAction)
-% Build [row,col,t] cube and store as uint16
+function [stats, cube16] = stats_from_binned_photons(rb, cb, tb, H, W, Ng, tAxisNs, params, wantCube)
+% Fast path:
+%   if useBackground = false and wantCube = false,
+%   compute tag/tau directly from photon moments.
+%
+% Exact path:
+%   if useBackground = true or wantCube = true,
+%   build uint16 cube and compute from cube.
 
+    if isempty(rb)
+        stats = empty_stats(H, W, Ng, tAxisNs, params);
+        cube16 = [];
+        return;
+    end
+
+    if ~params.useBackground && ~wantCube
+        stats = direct_moment_stats(rb, cb, tb, H, W, Ng, tAxisNs, params);
+        cube16 = [];
+        return;
+    end
+
+    cube16 = build_cube_from_bins_uint16(rb, cb, tb, H, W, Ng, params.overflowAction);
+    stats = tcspc_cube_to_lifetime_double(cube16, tAxisNs, params);
+
+    if ~wantCube
+        cube16 = [];
+    end
+end
+
+
+function stats = direct_moment_stats(rb, cb, tb, H, W, Ng, tAxisNs, params)
+% Exact direct-moment stats when useBackground = false.
+% No cube allocation.
+
+    pixIdx = sub2ind([H, W], rb, cb);
+    nPix = H * W;
+
+    globalDecay = accumarray(double(tb), 1, [Ng, 1], @sum, 0);
+
+    switch lower(params.t0Mode)
+        case 'auto'
+            [~, t0Bin] = max(globalDecay);
+        case 'manual'
+            assert(~isempty(params.t0Bin), 'Manual t0Mode requires params.t0Bin.');
+            t0Bin = params.t0Bin;
+        otherwise
+            error('t0Mode must be ''auto'' or ''manual''.');
+    end
+
+    tShift = tAxisNs - tAxisNs(t0Bin);
+    tPerPhoton = tShift(tb(:));
+
+    cnt  = accumarray(pixIdx, 1, [nPix, 1], @sum, 0);
+    sum1 = accumarray(pixIdx, tPerPhoton, [nPix, 1], @sum, 0);
+    sum2 = accumarray(pixIdx, tPerPhoton.^2, [nPix, 1], @sum, 0);
+
+    tag = reshape(double(cnt), [H, W]);
+
+    meanArrival = zeros(H, W, 'double');
+    tauMean = zeros(H, W, 'double');
+    tauRMS = zeros(H, W, 'double');
+
+    valid = cnt >= params.minCounts;
+
+    meanTmp = zeros(nPix,1);
+    meanTmp(valid) = sum1(valid) ./ cnt(valid);
+
+    varTmp = zeros(nPix,1);
+    varTmp(valid) = sum2(valid) ./ cnt(valid) - meanTmp(valid).^2;
+    varTmp = max(varTmp, 0);
+
+    meanArrival(:) = meanTmp;
+    tauMean(:) = max(meanTmp, 0);
+    tauRMS(:) = sqrt(varTmp);
+
+    stats = struct();
+    stats.tag = tag;
+    stats.meanArrival = meanArrival;
+    stats.tauMean = tauMean;
+    stats.tauRMS = tauRMS;
+    stats.globalDecay = double(globalDecay);
+    stats.tAxisNs = tAxisNs(:);
+    stats.t0Bin = double(t0Bin);
+end
+
+
+function stats = empty_stats(H, W, Ng, tAxisNs, params)
+    if strcmpi(params.t0Mode, 'manual') && ~isempty(params.t0Bin)
+        t0Bin = params.t0Bin;
+    else
+        t0Bin = 1;
+    end
+
+    stats = struct();
+    stats.tag = zeros(H, W, 'double');
+    stats.meanArrival = zeros(H, W, 'double');
+    stats.tauMean = zeros(H, W, 'double');
+    stats.tauRMS = zeros(H, W, 'double');
+    stats.globalDecay = zeros(Ng, 1, 'double');
+    stats.tAxisNs = tAxisNs(:);
+    stats.t0Bin = double(t0Bin);
+end
+
+
+function cube = build_cube_from_bins_uint16(rb, cb, tb, H, W, Ng, overflowAction)
     if isempty(rb)
         cube = zeros(H, W, Ng, 'uint16');
         return;
@@ -279,7 +350,7 @@ function cube16 = cast_counts_to_uint16(counts, outSize, overflowAction)
         switch lower(overflowAction)
             case 'error'
                 error(['TCSPC cube exceeds uint16 range (max count = %g). ' ...
-                       'Use fewer frames / lower oversampling, or switch overflowAction to ''clip''.'], mx);
+                       'Use fewer frames, lower oversampling, or switch overflowAction to ''clip''.'], mx);
             case 'clip'
                 warning('TCSPC cube exceeds uint16 range (max count = %g). Clipping to uint16 max.', mx);
                 counts = min(counts, double(intmax('uint16')));
@@ -293,7 +364,7 @@ end
 
 
 function stats = tcspc_cube_to_lifetime_double(cube16, tAxisNs, params)
-% Lifetime/statistics from uint16 cube, returned as double
+% Exact stats from uint16 cube, outputs double.
 
     cube = double(cube16);
     [H, W, Ng] = size(cube);

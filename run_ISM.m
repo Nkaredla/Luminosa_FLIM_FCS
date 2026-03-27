@@ -15,7 +15,7 @@ outNew.tags = tags;
 
 %% Pixel reassignment
 params = struct();
-params.imageSource = 'tags';      % use outPTU.tags(:,:,channel)
+params.imageSource = 'tags';
 params.smoothSigma = 1;
 params.useWindow = true;
 params.normalizeImages = true;
@@ -26,15 +26,38 @@ params.checkEvery = 25;
 params.stopTol = 1e-7;
 params.minIter = 50;
 
-params.pixelSize = head.ImgHdr_PixResol*1e3;            % nm/pixel in object plane
-params.lambda = 690;              % nm
+params.pixelSize = head.ImgHdr_PixResol * 1e3;
+params.lambda = 690;
 params.NA = 1.45;
 
+params.showChannelLabels = true;
+params.channelLabelMode = 'channel';     % 'channel', 'index', or 'both'
+params.channelLabelFontSize = 9;
+params.channelLabelColor = [0 0 0];
+params.channelLabelWeight = 'bold';
+
+params.storeImageStack = false;
 params.showPlots = true;
+params.showChannelLabels = true;
+
 results = run_ism_reconstruction_from_ptu(outNew, params);
+writetable(results.detectorTable, [name(1:end-4) '_detector_map.csv']);
+save([name(1:end-4) '_detector_map.mat'], 'results');
+
 
 %% reassigned TCSPC
-flim = reassigned_flim(outNew, results, params);
+
+flimParams = struct();
+flimParams.oversampleXY = 2;
+flimParams.keepSameSize = true;
+flimParams.storeTotalCubes = true;
+flimParams.storeFrameCubes = false;
+flimParams.useBackground = true;
+flimParams.minCounts = 20;
+flimParams.overflowAction = 'error';
+
+flim = reassigned_flim(outNew, results, flimParams);
+
 
 int = results.acoImage;
 lb = 10; % lower bound, 30 for cells, 10 for tissue
@@ -61,6 +84,8 @@ tAxisNs = flim.tAxisNs;
 outNew.head.Resolution = dtNs;
 outNew.head.SyncRate = outNew.head.TTResult_SyncRate;
 
+
+%% parametric IRF models : Model 1
 tcspcIRF = Calc_mIRF(outNew.head, squeeze(sum(sum(tcspc_pix,1),2))');
 tcspcIRF = squeeze(tcspcIRF)/max(tcspcIRF);
 tcspcIRF(tcspcIRF<1e-4) = 0;
