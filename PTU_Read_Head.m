@@ -1,8 +1,11 @@
-function [head] = PTU_Read_Head(name)
+function [head] = PTU_Read_Head(name, verbose)
 
 % Read PicoQuant Unified TTTR Files
 
 head = [];
+if nargin < 2 || isempty(verbose)
+    verbose = false;
+end
 fid = fopen(name);
 if fid<1
     fprintf(1,'\n\n      Could not open <%s>. Aborted.\n', name);
@@ -84,7 +87,9 @@ else
                     TagInt = fread(fid, 1, 'int64');
                     TagString = fread(fid, TagInt, '*char');
                     TagString = (TagString(TagString ~= 0))';
-                    fprintf(1, '%s', TagString);
+                    if verbose
+                        fprintf(1, '%s', TagString);
+                    end
                     if TagIdx > -1
                         EvalName = [TagIdent '(' int2str(TagIdx + 1) ',:)'];
                     end;

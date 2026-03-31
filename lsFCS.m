@@ -1,4 +1,4 @@
-function res = lsFCS(name,cnum,maxtime,timegates,flagparallel)
+function res = lsFCS(name,cnum,maxtime,timegates)
 %
 % Input parameters :
 %
@@ -38,10 +38,6 @@ close all
 nEvents=2e6; % 1 million records in one bunch
 if nargin < 2 || isempty(cnum)
     cnum=1;
-end
-
-if nargin<5||isempty(flagparallel)
-    flagparallel = 0;
 end
 
 [bin, tcspcdata] = Harp_tcspc(name);
@@ -143,8 +139,14 @@ for i = 1:nPixels
     line_idx(i) = find(tmp(:,i),1,'last');
 end
 
-% Parallel worker path removed. Always use the Luminosa line-scan reader.
-while num>0
+hPlot = figure('Name','lsFCS correlations','NumberTitle','off');
+wb = [];
+if ~isempty(NRecords) && NRecords > 0
+    wb = waitbar(0,'lsFCS: 0%');
+end
+
+try
+    while num>0
 
         [head, im_sync, im_tcspc, im_chan, ~, im_pixel, ~, num] = LPTU_LineScanRead(name, [1 + cnt, nEvents]);
 
@@ -167,7 +169,7 @@ while num>0
                             (im_chan  == uint8(dind(j))) & ...
                             (im_tcspc >= tau(1,j,k)) & ...
                             (im_tcspc <  tau(end,j,k) + 1 );
-                        [tau(1,j,k) tau(end,j,k)]
+%                         [tau(1,j,k) tau(end,j,k)]
                         r = r+1;
                     end
                 end
@@ -184,21 +186,55 @@ while num>0
             auto(:,:,:,iBunch) = tttr2xfcsSym(tPhoton, flvp, Ncasc, Nsub); % main function that produces the G(k,k',tau) 3D matrix. with k the number of pixels. these are auto and cross correlations.
 
         end
+        if ~isempty(wb) && ishandle(wb) && NRecords > 0
+            if mod(iBunch,5)==0 || cnt>=NRecords
+                p = min(cnt/NRecords,1);
+                waitbar(p, wb, sprintf('lsFCS: %.1f%%', 100*p));
+                drawnow limitrate
+            end
+        end
 %         subplot('position', [0.925 0.2 0.025 0.6]);
 %         bar(0,(cnt/NRecords));
-%         axis([-0.4 0.4 0 1]);
-%         set(gca,'xtick',[],'ytick',[]);
-%         subplot('position', [0.1 0.1 0.7 0.8]);
-%         %     automean=mean(reshape(auto,size(auto,1),[]),2);
-%         automean=0;
-%         for ii = 1:size(auto,2)
-%             automean=automean + auto(:,ii,ii,:);
-%         end
-%         automean = mean(squeeze(automean),2);
-%         semilogx(autotime,automean)
-%         drawnow;
+        % Plot spatio-temporal correlations (tau vs xi) per detector/pulse
+        if ~isempty(hPlot) && ishandle(hPlot)
+            figure(hPlot);
+            clf(hPlot);
+        end
+        tres.auto = auto;
+        tres.autotime = autotime;
+        tres.line_idx = line_idx;
+        tres.time = time;
+        [G, Gcross, Gcarp, GcarpCross, t, xxi] = lsCrossRead(tres);
+
+        for j = 1:dnum
+            for k = 1:cnum
+                comp = (j-1)*cnum + k;
+                subplot(cnum, dnum, (k-1)*dnum + j);
+                imagesc(xxi, t, G(:,:,comp));
+                axis xy
+                set(gca, 'YScale', 'log');
+                if k == cnum
+                    xlabel('\xi');
+                end
+                if j == 1
+                    ylabel('\tau (s)');
+                end
+                title(sprintf('D%d P%d', j, k));
+            end
+        end
+        drawnow;
 
         iBunch = iBunch+1;
+    end
+catch ME
+    if ~isempty(wb) && ishandle(wb)
+        close(wb);
+    end
+    rethrow(ME);
+end
+
+if ~isempty(wb) && ishandle(wb)
+    close(wb);
 end
 
 
@@ -219,4 +255,4 @@ res.time            = time;
 head.NCounts        = cnt;
 res.head            = head;
 
-save([name(1:end-4),'_lsFCS.mat'],'res')
+save([name(1:end-4),'_lsFCS.mat'],'res','-v7.3')
