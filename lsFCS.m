@@ -213,11 +213,25 @@ try
                 imagesc(xxi, t, G(:,:,comp));
                 axis xy
                 set(gca, 'YScale', 'log');
-                if k == cnum
-                    xlabel('\xi');
-                end
-                if j == 1
-                    ylabel('\tau (s)');
+                xlabel('\xi');
+                ylabel('\tau (s)');
+                cb = colorbar;
+                ylabel(cb, 'Amplitude');
+                % Use decade ticks on time axis (e.g., 1 ms, 10 ms, 100 ms)
+                if ~isempty(t)
+                    tpos = t(isfinite(t) & t > 0);
+                    if ~isempty(tpos)
+                        tmin = min(tpos);
+                        tmax = max(tpos);
+                        nmin = floor(log10(tmin));
+                        nmax = ceil(log10(tmax));
+                        ticks = 10.^(nmin:nmax);
+                        ticks = ticks(ticks >= tmin & ticks <= tmax);
+                        if numel(ticks) < 3
+                            ticks = logspace(log10(tmin), log10(tmax), 3);
+                        end
+                        set(gca, 'YTick', unique(ticks));
+                    end
                 end
                 title(sprintf('D%d P%d', j, k));
             end

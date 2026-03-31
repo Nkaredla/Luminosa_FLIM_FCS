@@ -167,7 +167,7 @@ res = lsFCS('data.ptu', 1, 10, []);
 
 ### Batch line-scan FCS (example script)
 
-`run_lsFCS_batch.m` loops over subfolders in a root directory and runs `lsFCS` on the single `.ptu` file in each subfolder.
+`run_lsFCS.m` loops over subfolders in a root directory and runs `lsFCS` on the single `.ptu` file in each subfolder. It can optionally fit a single-diffusion model for components 1 and 4 and save PNG figures with `w0` and diffusion coefficient values in the title.
 
 ### Batch ISM on beads (example script)
 
