@@ -115,6 +115,9 @@ Key fields:
 
 Key fields:
 - `tau`, `tcspc`, `autotime`, `auto`, `automean`, `rate`, `time`, `head`, `line_idx`.
+Notes:
+- `lsFCS` now plots spatio-temporal correlations (tau vs xi) live in a `cnum x dnum` subplot grid.
+- Use `lsCrossRead(res, flag)` to compute `G`, `Gcross`, and carpet correlations.
 
 ## Workflows
 
@@ -156,9 +159,15 @@ tauMean = out.tauMeanArithmetic;
 ### Line-scan FCS
 
 ```matlab
-res = lsFCS('data.ptu', 1, 10, [], 0);
+res = lsFCS('data.ptu', 1, 10, []);
 [G, Gcross, Gcarp, GcarpCross, t, xxi] = lsCrossRead(res, 25);
 ```
+
+`lsFCS` displays a live `cnum x dnum` grid of spatio-temporal correlation maps (`tau` vs `xi`) while processing.
+
+### Batch line-scan FCS (example script)
+
+`run_lsFCS_batch.m` loops over subfolders in a root directory and runs `lsFCS` on the single `.ptu` file in each subfolder.
 
 ### Batch ISM on beads (example script)
 
@@ -187,8 +196,9 @@ ims = cat(3, results.rawSum, results.aprImage, results.acoImage);
 ### Readers and I/O
 
 `PTU_Read_Head.m`
-Signature: `head = PTU_Read_Head(name)`
+Signature: `head = PTU_Read_Head(name, verbose)`
 Summary: Reads PicoQuant PTU headers into a struct with all tag fields and `head.length`.
+Notes: `verbose` defaults to `false` (wide-string tag output is suppressed unless enabled).
 
 `PTU_Read.m`
 Signature: `[sync, tcspc, chan, special, num, loc, head] = PTU_Read(name, cnts, head)`
@@ -348,8 +358,8 @@ Outputs: `out.taufit`, `out.Amp`, `out.AmpFrac`, `out.tauMeanArithmetic`, `out.t
 ### FCS and correlation
 
 `lsFCS.m`
-Signature: `res = lsFCS(name, cnum, maxtime, timegates, flagparallel)`
-Summary: Line-scan FCS with multi-tau correlation and optional parallel processing.
+Signature: `res = lsFCS(name, cnum, maxtime, timegates)`
+Summary: Line-scan FCS with multi-tau correlation; live spatio-temporal plotting in a `cnum x dnum` grid.
 Outputs: `res.tcspc`, `res.autotime`, `res.auto`, `res.automean`, `res.rate`, `res.time`, `res.head`.
 
 `AutodetectTimeGates.m`
