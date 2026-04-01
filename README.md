@@ -163,11 +163,11 @@ res = lsFCS('data.ptu', 1, 10, []);
 [G, Gcross, Gcarp, GcarpCross, t, xxi] = lsCrossRead(res, 25);
 ```
 
-`lsFCS` displays a live `cnum x dnum` grid of spatio-temporal correlation maps (`tau` vs `xi`) while processing.
+`lsFCS` displays a live `cnum x dnum` grid of spatio-temporal correlation maps (`tau` vs `xi`) while processing. The time axis uses decade ticks (e.g., 1 ms, 10 ms, 100 ms when in range).
 
 ### Batch line-scan FCS (example script)
 
-`run_lsFCS.m` loops over subfolders in a root directory and runs `lsFCS` on the single `.ptu` file in each subfolder. It can optionally fit a single-diffusion model for components 1 and 4 and save PNG figures with `w0` and diffusion coefficient values in the title.
+`run_lsFCS.m` loops over subfolders in a root directory and runs `lsFCS` on the single `.ptu` file in each subfolder. It can optionally fit a single-diffusion model for components 1 and 4 and save PNG figures with `w0` (Gaussian sigma) and diffusion coefficient values in the title.
 
 ### Batch ISM on beads (example script)
 

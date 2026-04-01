@@ -5,7 +5,7 @@
 % The output for each file is saved by lsFCS as *_lsFCS.mat next to the .ptu.
 
 % === User settings ===
-rootDir   = 'D:\Luminosa\Data\270226\POPC_DiO_5pc_NTA_B7H6_Atto488_20\'; % <-- change this
+rootDir   = 'D:\Luminosa\Data\270226\POPC_DiO_10pc_NTA_B7H6_Atto488_21\'; % <-- change this
 cnum      = 2;     % number of pulses in one sync (set to your experiment)
 maxtime   = 1;    % max correlation time (seconds)
 timegates = [];    % [] = auto-detect; or Nx2 array [start len] per pulse
