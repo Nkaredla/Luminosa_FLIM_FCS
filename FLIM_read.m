@@ -1,7 +1,7 @@
 
-folderName = 'D:\Luminosa\Data\260319\';
+folderName = 'D:\Luminosa\Data\260323\t1_20260323-104734\';
 filenames = dir(folderName);
-for k = 5:numel(filenames)
+for k = 3:numel(filenames)
     name = [folderName, filenames(k).name,filesep,'RawImage.ptu'];
     head = PTU_Read_Head(name);
     out = PTU_MultiFrameScanReadFast(name); % read the channels
