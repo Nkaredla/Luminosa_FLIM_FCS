@@ -1,4 +1,4 @@
-folderName = 'D:\Luminosa\Data\260323\t1_20260323-103604\';
+folderName = 'D:\Luminosa\Data\260323\t1_20260323-104842\';
 pattern = 'Series_*.ptu';
 
 files = dir(fullfile(folderName, pattern));
@@ -29,6 +29,8 @@ useLineScan = (numel(files) == 1);
 videoFile = fullfile(folderName, 'FLIM_Intensity_series.mp4');
 fps = 5;
 tauRangeNs = [3.5 6.5];
+useGPU = false;          % enable GPU for tag/tau (requires tcspc_pix)
+storeTcspcPix = useGPU;  % GPU path needs tcspc_pix; keep false unless needed
 
 try
     vw = VideoWriter(videoFile, 'MPEG-4');
@@ -45,14 +47,25 @@ ax2 = subplot(1,2,2);
 cmap = jet(256);
 cmap = cmap(30:end-30,:);
 
+
+opts = struct();
+opts.photonsPerChunk   = 5e6;
+opts.computePerFrame   = true;
+opts.storeTcspcPix     = false;
+opts.storePhotonLists  = false;
+opts.storeTimeCell     = false;
+opts.showWaitbar       = true;
+opts.maxFrames         = inf;
+
+
 for k = 1:numel(files)
     name = fullfile(folderName, files(k).name);
     if useLineScan
         [int2, tau2, head] = readLineScanToMaps(name);
     else
         head = PTU_Read_Head(name);
-        out = PTU_MultiFrameScanReadFast(name); % read the channels
-
+%         out = PTU_MultiFrameScanReadFast(name, [], storeTcspcPix, useGPU); % read the channels
+        out = PTU_FLIM_GPU(name, opts);
         int = out.tags;
         tauc = out.taus;
 

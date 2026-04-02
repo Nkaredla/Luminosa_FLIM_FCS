@@ -1,4 +1,4 @@
-function out = PTU_MultiFrameScanReadFast(name, photonsPerChunk, storeTcspcPix)
+function out = PTU_MultiFrameScanReadFast(name, photonsPerChunk, storeTcspcPix, useGPU)
 % PTU_MultiFrameScanRead
 %
 % Fast reader for PTU MultiFrame Scan, monodirectional case:
@@ -15,12 +15,29 @@ function out = PTU_MultiFrameScanReadFast(name, photonsPerChunk, storeTcspcPix)
 % NOTE:
 % tcspc_pix can still be extremely large even as uint16.
 % Default is storeTcspcPix = false.
+%
+% GPU notes:
+% - GPU acceleration is only used for tag/tau calculation when tcspc_pix
+%   is being built (storeTcspcPix = true). Histogramming is still on CPU.
+%
+% For time series where each time point is stored in a separate PTU,
+% call this reader per file. If no frame markers are present, remaining
+% photons are treated as a single frame.
 
 if nargin < 2 || isempty(photonsPerChunk)
     photonsPerChunk = 1e6;
 end
 if nargin < 3 || isempty(storeTcspcPix)
     storeTcspcPix = false;
+end
+if nargin < 4 || isempty(useGPU)
+    useGPU = false;
+end
+useGPU = useGPU && gpuIsAvailable();
+if useGPU && ~storeTcspcPix
+    warning('PTU_MultiFrameScanReadFast:GPU', ...
+        'useGPU requested but storeTcspcPix = false. GPU path requires tcspc_pix; proceeding on CPU.');
+    useGPU = false;
 end
 
 out = struct();
@@ -368,7 +385,7 @@ for ch = 1:maxch_n
     if any(ind)
         % tag/tau from moments only
         [tag_ch, tau_ch, tcspc_ch] = compute_channel_stats( ...
-            im_line(ind), im_col(ind), im_tcspc(ind), nx, ny, Ngate, Resolution, storeTcspcPix);
+            im_line(ind), im_col(ind), im_tcspc(ind), nx, ny, Ngate, Resolution, storeTcspcPix, useGPU);
 
         tags(:,:,ch) = tag_ch;
         taus(:,:,ch) = tau_ch;
@@ -469,32 +486,13 @@ end
 end
 
 
-function [tag_ch, tau_ch, tcspc_ch] = compute_channel_stats(im_line, im_col, im_tcspc, nx, ny, Ngate, Resolution, storeTcspc)
+function [tag_ch, tau_ch, tcspc_ch] = compute_channel_stats(im_line, im_col, im_tcspc, nx, ny, Ngate, Resolution, storeTcspc, useGPU)
 % Global per-channel stats from photons.
 % tag_ch, tau_ch are single
 % tcspc_ch is uint16 if requested, else []
 
-pixIdx = sub2ind([nx, ny], double(im_line), double(im_col));
-tbin = double(im_tcspc);
-
-nPix = nx * ny;
-cnt  = accumarray(pixIdx, 1,       [nPix, 1], @sum, 0);
-sum1 = accumarray(pixIdx, tbin,    [nPix, 1], @sum, 0);
-sum2 = accumarray(pixIdx, tbin.^2, [nPix, 1], @sum, 0);
-
-tag_ch = reshape(single(cnt), [nx, ny]);
-
-valid = cnt > 0;
-m1 = zeros(nPix, 1, 'double');
-m2 = zeros(nPix, 1, 'double');
-
-m1(valid) = (sum1(valid) ./ cnt(valid)) * Resolution;
-m2(valid) = (sum2(valid) ./ cnt(valid)) * (Resolution^2);
-
-varT = max(m2 - m1.^2, 0);
-tau_ch = reshape(single(sqrt(varT)), [nx, ny]);
-
-if storeTcspc
+if storeTcspc && useGPU
+    % Build tcspc_pix (CPU), then compute moments on GPU
     linIdx = sub2ind([nx, ny, Ngate], double(im_line), double(im_col), double(im_tcspc));
     counts3 = accumarray(linIdx, 1, [nx * ny * Ngate, 1], @sum, 0);
 
@@ -504,7 +502,61 @@ if storeTcspc
     end
 
     tcspc_ch = reshape(uint16(counts3), [nx, ny, Ngate]);
+
+    tcspc_g = gpuArray(double(tcspc_ch));
+    tag_g = sum(tcspc_g, 3);
+    bins = gpuArray(reshape(1:Ngate, 1, 1, []));
+    tmp1 = sum(tcspc_g .* bins, 3) * Resolution;
+    tmp2 = sum(tcspc_g .* (bins.^2), 3) * (Resolution^2);
+
+    denom = max(tag_g, 1);
+    mean1 = tmp1 ./ denom;
+    varT = max(tmp2 ./ denom - mean1.^2, 0);
+
+    tag_ch = gather(single(tag_g));
+    tau_ch = gather(single(sqrt(varT)));
 else
-    tcspc_ch = [];
+    pixIdx = sub2ind([nx, ny], double(im_line), double(im_col));
+    tbin = double(im_tcspc);
+
+    nPix = nx * ny;
+    cnt  = accumarray(pixIdx, 1,       [nPix, 1], @sum, 0);
+    sum1 = accumarray(pixIdx, tbin,    [nPix, 1], @sum, 0);
+    sum2 = accumarray(pixIdx, tbin.^2, [nPix, 1], @sum, 0);
+
+    tag_ch = reshape(single(cnt), [nx, ny]);
+
+    valid = cnt > 0;
+    m1 = zeros(nPix, 1, 'double');
+    m2 = zeros(nPix, 1, 'double');
+
+    m1(valid) = (sum1(valid) ./ cnt(valid)) * Resolution;
+    m2(valid) = (sum2(valid) ./ cnt(valid)) * (Resolution^2);
+
+    varT = max(m2 - m1.^2, 0);
+    tau_ch = reshape(single(sqrt(varT)), [nx, ny]);
+
+    if storeTcspc
+        linIdx = sub2ind([nx, ny, Ngate], double(im_line), double(im_col), double(im_tcspc));
+        counts3 = accumarray(linIdx, 1, [nx * ny * Ngate, 1], @sum, 0);
+
+        if max(counts3) > double(intmax('uint16'))
+            warning('tcspc_pix exceeds uint16 range; clipping to uint16 max.');
+            counts3 = min(counts3, double(intmax('uint16')));
+        end
+
+        tcspc_ch = reshape(uint16(counts3), [nx, ny, Ngate]);
+    else
+        tcspc_ch = [];
+    end
 end
+end
+
+function ok = gpuIsAvailable()
+    ok = false;
+    try
+        ok = gpuDeviceCount > 0;
+    catch
+        ok = false;
+    end
 end
