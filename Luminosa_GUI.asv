@@ -1,4 +1,4 @@
-function Luminosa_GUI
+mfunction Luminosa_GUI
 % Luminosa_GUI_globalIRF_autofit_full
 % Standalone GUI for FLIM / ISM-FLIM / FCS analysis.
 % GUI Tau0 is used only for TCSPC/pattern fitting.
@@ -30,7 +30,6 @@ function Luminosa_GUI
     app.gamma = 1;
     app.displayMode = 'intensity';
     app.cbTau = [];
-    app.cbImage = [];
     app.irfCache = struct('key', '', 'irf', [], 'meta', struct());
     app.txtFitResults = [];
     app.txtLegend = [];
@@ -58,7 +57,6 @@ function Luminosa_GUI
     app.seriesTcspcPixCache = [];   % Pre-computed tcspc_pix for fast ROI access
     app.seriesFlimCache = [];       % Pre-computed FLIM images for fast scrolling
     app.seriesFrameFileMap = [];    % Map each frame to its source PTU file
-    app.ptuOutOriginal = [];        % Original full-file data for global IRF calculation
 
     app.fig = uifigure('Name','Luminosa FLIM / ISM-FLIM / FCS', 'Position',[80 60 1080 680]);
     app.grid = uigridlayout(app.fig, [1 1]);
@@ -333,7 +331,6 @@ function Luminosa_GUI
         useGPU = app.chkUseGPU.Value && gpuIsAvailable() && storeTCSPC;
 
         try
-            % Clear existing data
             app.flim = [];
             app.ismRes = [];
             app.pattern = [];
@@ -348,14 +345,6 @@ function Luminosa_GUI
             app.globalFit = [];
             app.tcspcDisplayMode = 'none';
             clearTCSPCSidePanel();
-            
-            % Clear series data (switch to single file mode)
-            app.seriesData = {};
-            app.seriesIntensityCache = {};
-            app.seriesTcspcPixCache = {};
-            app.seriesFlimCache = {};
-            app.seriesFrameFileMap = [];
-            app.currentFrameIndex = 1;
 
             if ~isempty(app.roi) && isvalid(app.roi)
                 delete(app.roi);
@@ -363,250 +352,6 @@ function Luminosa_GUI
             app.roi = [];
             clearRoiListeners();
 
-            % Check file size to decide on loading method
-            fileInfo = dir(app.lastFile);
-            fileSizeMB = fileInfo.bytes / (1024 * 1024);
-            
-            if fileSizeMB < 300 && exist('mHist4', 'file') == 2
-                % Use mHist4 for smaller files with potential multiframe support
-                addStatus('Loading PTU with mHist4 for multiframe detection...');
-                drawnow;
-                
-                % Load PTU header to check for multiframe
-                if exist('PTU_Read_Head', 'file') == 2
-                    header = PTU_Read_Head(app.lastFile);
-                    if isfield(header, 'TTResult_NumberOfRecords') && header.TTResult_NumberOfRecords > 1000000
-                        % Potentially multiframe - use PTU_FLIM_GPU with frame extraction
-                        opts = struct();
-                        opts.computePerFrame = true;
-                        opts.photonsPerChunk = photonsPerChunk;
-                        opts.storeTcspcPix = storeTCSPC;
-                        opts.storePhotonLists = storeTCSPC;  % Need photon lists for per-frame extraction
-                        opts.storeTimeCell = false;
-                        opts.useGPU = useGPU;
-                        opts.showWaitbar = false;
-                        
-                        addStatus('Loading with PTU_FLIM_GPU for multiframe analysis...');
-                        drawnow;
-                        
-                        try
-                            app.ptuOut = PTU_FLIM_GPU(app.lastFile, opts);
-                            addStatus(sprintf('PTU_FLIM_GPU completed. Data structure fields: %s', strjoin(fieldnames(app.ptuOut), ', ')));
-                        catch ME
-                            addStatus(sprintf('PTU_FLIM_GPU failed: %s', ME.message));
-                            app.frameSlider.Visible = 'off';
-                            loadSingleFramePTU();
-                            return;
-                        end
-                        
-                        % Store original full-file data for global IRF calculation
-                        app.ptuOutOriginal = app.ptuOut;
-                        
-                        % Check if we have multiple frames with robust error handling
-                        hasNFramesField = false;
-                        nFramesValue = 1;
-                        hasMultiFrameTag = false;
-                        actualFrames = 1;
-                        
-                        try
-                            if isfield(app.ptuOut, 'nFrames') && ~isempty(app.ptuOut.nFrames) && isfinite(app.ptuOut.nFrames)
-                                hasNFramesField = true;
-                                nFramesValue = app.ptuOut.nFrames;
-                            end
-                        catch ME
-                            addStatus(sprintf('Warning: Could not access nFrames field: %s', ME.message));
-                        end
-                        
-                        try
-                            if isfield(app.ptuOut, 'tag') && ~isempty(app.ptuOut.tag) && ndims(app.ptuOut.tag) >= 4
-                                actualFrames = size(app.ptuOut.tag, 4);
-                                if actualFrames > 1
-                                    hasMultiFrameTag = true;
-                                end
-                            end
-                        catch ME
-                            addStatus(sprintf('Warning: Could not analyze tag dimensions: %s', ME.message));
-                        end
-                        
-                        % Determine if this is a multiframe file
-                        isMultiFrame = (hasNFramesField && nFramesValue > 1) || (hasMultiFrameTag && actualFrames > 1);
-                        
-                        if isMultiFrame
-                            % Use the maximum of nFrames and actual tag frames for safety
-                            numFrames = max(nFramesValue, actualFrames);
-                            addStatus(sprintf('Detected multiframe PTU: nFrames=%d, tag frames=%d. Using %d frames.', nFramesValue, actualFrames, numFrames));
-                            drawnow;
-                            
-                            % Extract individual frames
-                            app.seriesData = cell(numFrames, 1);
-                            app.seriesIntensityCache = cell(numFrames, 1);
-                            app.seriesFlimCache = cell(numFrames, 1);
-                            if storeTCSPC
-                                app.seriesTcspcPixCache = cell(numFrames, 1);
-                            end
-                            
-                            for frameIdx = 1:numFrames
-                                addStatus(sprintf('  -> Processing frame %d/%d...', frameIdx, numFrames));
-                                
-                                % Create frame-specific data structure
-                                frameData = struct();
-                                
-                                % Copy essential header and metadata
-                                if isfield(app.ptuOut, 'head')
-                                    frameData.head = app.ptuOut.head;
-                                end
-                                
-                                % Extract frame-specific intensity data
-                                intensityImg = [];
-                                if isfield(app.ptuOut, 'tag') && size(app.ptuOut.tag, 4) >= frameIdx
-                                    frameData.tag = app.ptuOut.tag(:,:,:,frameIdx);
-                                    frameData.tags = sum(frameData.tag, 3);  % Create tags field for intensity
-                                    intensityImg = frameData.tags;
-                                    addStatus(sprintf('    Frame %d intensity: %dx%d pixels, %d total counts', frameIdx, size(frameData.tags,1), size(frameData.tags,2), sum(frameData.tags(:))));
-                                elseif isfield(app.ptuOut, 'tags') && ~isempty(app.ptuOut.tags)
-                                    % Fallback to global tags if per-frame not available
-                                    frameData.tags = app.ptuOut.tags;
-                                    intensityImg = frameData.tags;
-                                    addStatus(sprintf('    Frame %d: Using global intensity data as fallback', frameIdx));
-                                end
-                                
-                                % Always cache intensity image (even if empty)
-                                if ~isempty(intensityImg)
-                                    app.seriesIntensityCache{frameIdx} = intensityImg;
-                                else
-                                    % Create intensity from other available data
-                                    intensityImg = getIntensityMapFromPTUData(frameData);
-                                    app.seriesIntensityCache{frameIdx} = intensityImg;
-                                    if ~isempty(intensityImg)
-                                        addStatus(sprintf('    Frame %d: Generated intensity from available data (%dx%d)', frameIdx, size(intensityImg,1), size(intensityImg,2)));
-                                    else
-                                        addStatus(sprintf('    Frame %d: No intensity data available', frameIdx));
-                                    end
-                                end
-                                
-                                % Extract frame-specific tau data
-                                if isfield(app.ptuOut, 'tau') && size(app.ptuOut.tau, 4) >= frameIdx
-                                    frameData.tau = app.ptuOut.tau(:,:,:,frameIdx);
-                                    frameData.taus = frameData.tau;  % Ensure taus field exists
-                                end
-                                
-                                % For TCSPC, use the existing tcspc_pix if available, or try to extract photon lists
-                                if storeTCSPC
-                                    tcspcDataAssigned = false;
-                                    
-                                    % Try to use existing tcspc_pix first
-                                    if isfield(app.ptuOut, 'tcspc_pix') && ~isempty(app.ptuOut.tcspc_pix)
-                                        % Use existing tcspc_pix directly
-                                        frameData.tcspc_pix = app.ptuOut.tcspc_pix;
-                                        app.seriesTcspcPixCache{frameIdx} = app.ptuOut.tcspc_pix;
-                                        addStatus(sprintf('    Frame %d: Using existing tcspc_pix (%s)', frameIdx, mat2str(size(app.ptuOut.tcspc_pix))));
-                                        tcspcDataAssigned = true;
-                                    elseif isfield(app.ptuOut, 'im_frame') && ~isempty(app.ptuOut.im_frame)
-                                        framePhotonMask = (app.ptuOut.im_frame == frameIdx);
-                                        if any(framePhotonMask)
-                                            frameData.im_sync = app.ptuOut.im_sync(framePhotonMask);
-                                            frameData.im_tcspc = app.ptuOut.im_tcspc(framePhotonMask);
-                                            frameData.im_chan = app.ptuOut.im_chan(framePhotonMask);
-                                            frameData.im_line = app.ptuOut.im_line(framePhotonMask);
-                                            frameData.im_col = app.ptuOut.im_col(framePhotonMask);
-                                            frameData.im_frame = ones(sum(framePhotonMask), 1, 'like', app.ptuOut.im_frame);
-                                            
-                                            % Create per-frame TCSPC pixel data using mHist4
-                                            try
-                                                if exist('mHist4', 'file') == 2 && ~isempty(frameData.im_col) && ~isempty(frameData.im_tcspc)
-                                                    maxCol = max(frameData.im_col);
-                                                    maxLine = max(frameData.im_line);
-                                                    maxChan = max(frameData.im_chan);
-                                                    maxTcspc = round(app.ptuOut.head.MeasDesc_Resolution*1e12);
-                                                    
-                                                    [h, ~, ~, ~, ~] = mHist4(double(frameData.im_col), double(frameData.im_line), ...
-                                                        double(frameData.im_chan), double(frameData.im_tcspc), ...
-                                                        1:maxCol, 1:maxLine, 1:maxChan, 1:maxTcspc);
-                                                    frameData.tcspc_pix = h;
-                                                    app.seriesTcspcPixCache{frameIdx} = h;
-                                                    addStatus(sprintf('    Frame %d: Generated TCSPC data (%dx%dx%dx%d)', frameIdx, size(h,1), size(h,2), size(h,3), size(h,4)));
-                                                    tcspcDataAssigned = true;
-                                                end
-                                            catch ME
-                                                addStatus(sprintf('    Frame %d: mHist4 failed: %s', frameIdx, ME.message));
-                                                % Fallback: use frame-specific tag data for TCSPC
-                                                if isfield(frameData, 'tag') && ~isempty(frameData.tag)
-                                                    frameData.tcspc_pix = frameData.tag;
-                                                    app.seriesTcspcPixCache{frameIdx} = frameData.tag;
-                                                    tcspcDataAssigned = true;
-                                                    addStatus(sprintf('    Frame %d: Using tag data as TCSPC fallback', frameIdx));
-                                                end
-                                            end
-                                        else
-                                            addStatus(sprintf('    Frame %d: No photons found for this frame', frameIdx));
-                                        end
-                                    end
-                                    
-                                    % Final fallback: ensure each frame has some TCSPC structure even if empty
-                                    if ~tcspcDataAssigned
-                                        if isfield(frameData, 'tag') && ~isempty(frameData.tag)
-                                            frameData.tcspc_pix = frameData.tag;
-                                            app.seriesTcspcPixCache{frameIdx} = frameData.tag;
-                                            addStatus(sprintf('    Frame %d: Using tag as final TCSPC fallback', frameIdx));
-                                        else
-                                            % Create minimal empty TCSPC structure
-                                            frameData.tcspc_pix = [];
-                                            app.seriesTcspcPixCache{frameIdx} = [];
-                                            addStatus(sprintf('    Frame %d: No TCSPC data available', frameIdx));
-                                        end
-                                    end
-                                end
-                                
-                                app.seriesData{frameIdx} = frameData;
-                            end
-                            
-                            app.seriesFrameFileMap = ones(numFrames, 1); % All frames from same file
-                            
-                            % Calculate global IRF from original full-file data
-                            addStatus('Calculating global IRF from all frames...');
-                            drawnow;
-                            irfOK = ensureGlobalIRF(true);
-                            if irfOK
-                                addStatus('Global IRF calculated successfully.');
-                            end
-                            
-                            % Set up frame slider
-                            app.frameSlider.Limits = [1, numFrames];
-                            app.frameSlider.Value = 1;
-                            app.frameSlider.Visible = 'on';
-                            
-                            % Load first frame and calculate its FLIM
-                            app.currentFrameIndex = 1;
-                            loadSeriesFrame(1);
-                            
-                            addStatus(sprintf('PTU loaded with %d frames. Global IRF calculated. Use frame slider to navigate.', numFrames));
-                        else
-                            % Single frame file
-                            app.frameSlider.Visible = 'off';
-                            loadSingleFramePTU();
-                        end
-                    else
-                        % Single frame file
-                        app.frameSlider.Visible = 'off';
-                        loadSingleFramePTU();
-                    end
-                else
-                    % Fallback to standard loading
-                    app.frameSlider.Visible = 'off';
-                    loadSingleFramePTU();
-                end
-            else
-                % Standard loading for larger files
-                app.frameSlider.Visible = 'off';
-                loadSingleFramePTU();
-            end
-            
-        catch ME
-            addStatus(['Load failed: ' ME.message]);
-        end
-        
-        function loadSingleFramePTU()
-            % Standard PTU loading logic
             if exist('PTU_MultiFrameScanReadFast_nativeTCSPC', 'file') == 2
                 app.ptuOut = PTU_MultiFrameScanReadFast_nativeTCSPC(app.lastFile, photonsPerChunk, storeTCSPC, useGPU, true);
             elseif exist('PTU_MultiFrameScanReadFast_multiTauTCSPC', 'file') == 2
@@ -637,6 +382,8 @@ function Luminosa_GUI
             else
                 addStatus('PTU loaded, but global IRF estimation failed.');
             end
+        catch ME
+            addStatus(['Load failed: ' ME.message]);
         end
     end
     
@@ -721,34 +468,9 @@ function Luminosa_GUI
                     error('No compatible PTU reader was found on the MATLAB path.');
                 end
                 
-                % Extract individual frames from the multiframe PTU with robust error handling
-                numFramesInFile = 1;
-                hasMultipleFrames = false;
-                
-                % Check for nFrames field safely
-                try
-                    if isfield(ptuData, 'nFrames') && ~isempty(ptuData.nFrames) && isfinite(ptuData.nFrames) && ptuData.nFrames > 0
-                        numFramesInFile = ptuData.nFrames;
-                        hasMultipleFrames = (numFramesInFile > 1);
-                    end
-                catch ME
-                    addStatus(sprintf('  Warning: Could not access nFrames in %s: %s', files(fileIdx).name, ME.message));
-                end
-                
-                % Also check tag dimensions as fallback
-                try
-                    if isfield(ptuData, 'tag') && ~isempty(ptuData.tag) && ndims(ptuData.tag) >= 4
-                        tagFrames = size(ptuData.tag, 4);
-                        if tagFrames > 1
-                            numFramesInFile = max(numFramesInFile, tagFrames);
-                            hasMultipleFrames = true;
-                        end
-                    end
-                catch ME
-                    addStatus(sprintf('  Warning: Could not analyze tag dimensions in %s: %s', files(fileIdx).name, ME.message));
-                end
-                
-                if hasMultipleFrames
+                % Extract individual frames from the multiframe PTU
+                if isfield(ptuData, 'nFrames') && ptuData.nFrames > 0
+                    numFramesInFile = ptuData.nFrames;
                     addStatus(sprintf('  -> Extracting %d frames from %s', numFramesInFile, files(fileIdx).name));
                     
                     for frameIdx = 1:numFramesInFile
@@ -902,7 +624,7 @@ function Luminosa_GUI
     end
     
     function onFrameChanged(~, ~)
-        if isempty(app.seriesData)
+        if isempty(app.seriesFiles)
             return;
         end
         frameNum = round(app.frameSlider.Value);
@@ -912,38 +634,32 @@ function Luminosa_GUI
     end
     
     function loadSeriesFrame(frameNum)
-        if frameNum < 1 || frameNum > numel(app.seriesData)
+        if isempty(app.seriesFiles) || frameNum < 1 || frameNum > numel(app.seriesFiles)
             return;
         end
         
         % Fast frame switching using cached data
         if frameNum <= numel(app.seriesData) && ~isempty(app.seriesData{frameNum})
-            requestedDisplayMode = app.displayMode;
-            
             % Set current frame data - no loading needed since it's cached
             app.currentFrame = frameNum;
-            app.currentFrameIndex = frameNum;  % Keep both variables in sync
             app.ptuOut = app.seriesData{frameNum};
             app.frameSlider.Value = frameNum;
             
-            % Ensure frame has proper TCSPC data structure
-            if ~isfield(app.ptuOut, 'tcspc_pix') && frameNum <= numel(app.seriesTcspcPixCache) && ...
-               ~isempty(app.seriesTcspcPixCache{frameNum})
-                app.ptuOut.tcspc_pix = app.seriesTcspcPixCache{frameNum};
-            end
-            
-            % Clear previous analysis results for new frame (but preserve global IRF)
+            % Clear previous analysis results for new frame
             app.flim = [];
             app.ismRes = [];
             app.pattern = [];
             app.tcspc = [];
             app.tcspcFit = [];
             app.tcspcGlobal = [];
+            app.irfCache = struct('key', '', 'irf', [], 'meta', struct());
+            app.irfGlobal = [];
+            app.irfGlobalModel = '';
+            app.irfGlobalMeta = struct();
+            app.irfGlobalDtNs = [];
             app.globalFit = [];
             app.tcspcDisplayMode = 'none';
             clearTCSPCSidePanel();
-            % Note: Keep app.irfGlobal, app.irfGlobalModel, app.irfGlobalMeta, app.irfGlobalDtNs
-            % for multiframe files since IRF should be calculated from full file data
 
             if ~isempty(app.roi) && isvalid(app.roi)
                 delete(app.roi);
@@ -954,66 +670,13 @@ function Luminosa_GUI
             % Show cached intensity for instant switching
             showIntensityFromCache(frameNum);
             
-            % Setup IRF using original full-file data for proper fitting
-            if ~isempty(app.ptuOutOriginal)
-                % Temporarily switch to original data for IRF calculation
-                tempPtuOut = app.ptuOut;
-                app.ptuOut = app.ptuOutOriginal;
-                irfOK = ensureGlobalIRF(false);  % Don't force recalculation if already done
-                app.ptuOut = tempPtuOut;  % Switch back to frame data
-            else
-                irfOK = ensureGlobalIRF(true);
-            end
-            
-            % Calculate and display global TCSPC for current frame
+            % Setup IRF and fitting for current frame
+            irfOK = ensureGlobalIRF(true);
             fitOK = false;
             if irfOK
                 fitOK = autoFitGlobalTCSPC();
             end
             showGlobalTCSPC();
-            
-            % Automatically calculate FLIM for current frame if TCSPC data available
-            if ~isempty(app.seriesTcspcPixCache) && frameNum <= numel(app.seriesTcspcPixCache) && ...
-               ~isempty(app.seriesTcspcPixCache{frameNum})
-                % Check if FLIM is already cached for this frame
-                if isempty(app.seriesFlimCache) || frameNum > numel(app.seriesFlimCache) || ...
-                   isempty(app.seriesFlimCache{frameNum})
-                    addStatus(sprintf('Computing FLIM for frame %d...', frameNum));
-                    drawnow;
-                    
-                    try
-                        % Use GPU if available for FLIM computation
-                        useGPU = app.chkUseGPU.Value && gpuIsAvailable();
-                        flimData = quickFLIMFromTCSPCFlexible(app.ptuOut, useGPU);
-                        
-                        % Cache the FLIM result
-                        if numel(app.seriesFlimCache) < frameNum
-                            app.seriesFlimCache{frameNum} = [];
-                        end
-                        if isfield(flimData, 'total') && isfield(flimData.total, 'tauMean')
-                            app.seriesFlimCache{frameNum} = flimData.total.tauMean;
-                        end
-                        
-                        % Store FLIM result
-                        app.flim = flimData;
-                        addStatus(sprintf('FLIM computed for frame %d.', frameNum));
-                    catch ME
-                        addStatus(sprintf('FLIM computation failed for frame %d: %s', frameNum, ME.message));
-                        app.flim = [];
-                    end
-                else
-                    % Use cached FLIM
-                    if ~isempty(app.seriesFlimCache{frameNum})
-                        app.flim = struct();
-                        app.flim.total = struct();
-                        app.flim.total.tauMean = app.seriesFlimCache{frameNum};
-                        addStatus(sprintf('Using cached FLIM for frame %d.', frameNum));
-                    end
-                end
-            else
-                app.flim = [];
-                addStatus(sprintf('No TCSPC data available for quick FLIM on frame %d.', frameNum));
-            end
             
             % Update title to show frame info with source file
             totalFrames = numel(app.seriesData);
@@ -1024,16 +687,8 @@ function Luminosa_GUI
             else
                 title(app.axImage, sprintf('Frame %d/%d', frameNum, totalFrames));
             end
-
-            if strcmp(requestedDisplayMode, 'tau') && ~isempty(app.flim)
-                showTauMean();
-            end
             
-            if irfOK && fitOK
-                addStatus(sprintf('Switched to frame %d/%d - TCSPC and IRF ready', frameNum, totalFrames));
-            else
-                addStatus(sprintf('Switched to frame %d/%d (instant from cache)', frameNum, totalFrames));
-            end
+            addStatus(sprintf('Switched to frame %d/%d (instant from cache)', frameNum, numel(app.seriesFiles)));
         else
             addStatus(sprintf('Frame %d not cached. Use Load Series to pre-load all frames.', frameNum));
         end
@@ -1880,70 +1535,51 @@ function Luminosa_GUI
             return;
         end
         imgG = applyGamma(double(img), app.gamma);
-        clearImageColorbars();
         cla(app.axImage);
-        app.axImage.CLimMode = 'auto';
         imagesc(app.axImage, imgG);
-        axis(app.axImage, 'on');
         axis(app.axImage, 'image');
         app.axImage.Visible = 'on';
         colormap(app.axImage, gray);
-        app.cbImage = colorbar(app.axImage);
+        colorbar(app.axImage);
         title(app.axImage, 'Intensity (gamma)');
         setSmallTitles();
+        if ~isempty(app.cbTau) && isvalid(app.cbTau)
+            delete(app.cbTau);
+            app.cbTau = [];
+        end
         app.displayMode = 'intensity';
         drawnow;
     end
 
     function showIntensityFromCache(frameNum)
         % Show intensity image from pre-computed cache for fast navigation
-        addStatus(sprintf('Showing intensity for frame %d (cache size: %d)', frameNum, numel(app.seriesIntensityCache)));
-        
-        % Check if cache exists for this frame
-        if frameNum > numel(app.seriesIntensityCache)
-            addStatus(sprintf('Frame %d exceeds cache size (%d). Using fallback.', frameNum, numel(app.seriesIntensityCache)));
+        if frameNum > numel(app.seriesIntensityCache) || isempty(app.seriesIntensityCache{frameNum})
+            % Fallback to computing intensity from current ptuOut
             showIntensityFromPTU();
             return;
         end
         
-        % Get cached intensity image
         img = app.seriesIntensityCache{frameNum};
         if isempty(img)
-            addStatus(sprintf('Frame %d intensity cache is empty. Trying to generate from current data.', frameNum));
-            % Try to generate intensity from current frame data
-            if ~isempty(app.ptuOut)
-                img = getIntensityMapFromPTUData(app.ptuOut);
-                if ~isempty(img)
-                    % Update cache with generated intensity
-                    app.seriesIntensityCache{frameNum} = img;
-                    addStatus(sprintf('Generated and cached intensity for frame %d (%dx%d)', frameNum, size(img,1), size(img,2)));
-                else
-                    showIntensityFromPTU();
-                    return;
-                end
-            else
-                showIntensityFromPTU();
-                return;
-            end
+            showIntensityFromPTU();
+            return;
         end
         
-        % Display the intensity image
         imgG = applyGamma(double(img), app.gamma);
-        clearImageColorbars();
         cla(app.axImage);
-        app.axImage.CLimMode = 'auto';
         imagesc(app.axImage, imgG);
-        axis(app.axImage, 'on');
         axis(app.axImage, 'image');
         app.axImage.Visible = 'on';
         colormap(app.axImage, gray);
-        app.cbImage = colorbar(app.axImage);
-        title(app.axImage, sprintf('Frame %d Intensity (cached)', frameNum));
+        colorbar(app.axImage);
+        title(app.axImage, 'Intensity (gamma) - Cached');
         setSmallTitles();
+        if ~isempty(app.cbTau) && isvalid(app.cbTau)
+            delete(app.cbTau);
+            app.cbTau = [];
+        end
         app.displayMode = 'intensity';
         drawnow;
-        
-        addStatus(sprintf('Successfully displayed intensity for frame %d', frameNum));
     end
 
     function img = getIntensityMapFromPTUData(ptuData)
@@ -2002,18 +1638,9 @@ function Luminosa_GUI
         end
         intensity = getIntensityMap();
         if isempty(intensity)
-            cmap = jet(256);
-            cmap = cmap(30:end-30,:);
-            trange = getTauRange(img);
-            clearImageColorbars();
-            cla(app.axImage);
             imagesc(app.axImage, img);
-            axis(app.axImage, 'on');
             axis(app.axImage, 'image');
-            colormap(app.axImage, cmap);
-            caxis(app.axImage, trange);
-            app.cbTau = colorbar(app.axImage);
-            ylabel(app.cbTau, 'Tau (ns)');
+            colorbar(app.axImage);
             title(app.axImage, 'Tau mean (ns)');
             setSmallTitles();
         else
@@ -2315,8 +1942,6 @@ function Luminosa_GUI
         trange = getTauRange(tau);
         bright = applyGamma(intensity, app.gamma);
         rgb = flim_rgb(tau, bright, trange, cmap);
-        clearImageColorbars();
-        cla(app.axImage);
         image(app.axImage, rgb);
         axis(app.axImage, 'image');
         axis(app.axImage, 'off');
@@ -2324,19 +1949,11 @@ function Luminosa_GUI
         setSmallTitles();
         colormap(app.axImage, cmap);
         caxis(app.axImage, trange);
-        app.cbTau = colorbar(app.axImage);
-        ylabel(app.cbTau, 'Tau (ns)');
-    end
-
-    function clearImageColorbars()
         if ~isempty(app.cbTau) && isvalid(app.cbTau)
             delete(app.cbTau);
         end
-        app.cbTau = [];
-        if ~isempty(app.cbImage) && isvalid(app.cbImage)
-            delete(app.cbImage);
-        end
-        app.cbImage = [];
+        app.cbTau = colorbar(app.axImage);
+        ylabel(app.cbTau, 'Tau (ns)');
     end
 
     function trange = getTauRange(tau)
@@ -3189,3 +2806,4 @@ function [maskSub, x1, x2, y1, y2] = roiPixelMaskSub(roi, nRows, nCols)
         end
     end
 end
+

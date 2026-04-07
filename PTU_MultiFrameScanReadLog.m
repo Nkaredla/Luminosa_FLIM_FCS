@@ -2,8 +2,9 @@ function out = PTU_MultiFrameScanReadLog(name, photonsPerChunk, storeTcspcPixMT,
 % PTU_MultiFrameScanReadFast_multiTauTCSPC
 %
 % Read a PTU multi-frame scan, preserve native photon TCSPC bins, and store
-% the image TCSPC as a compressed multi-tau / log-binned cube instead of a
-% dense linear tcspc_pix cube.
+% the image TCSPC as a compressed multi-tau cube instead of a dense linear
+% tcspc_pix cube. Full resolution is preserved up to the global peak, then
+% multi-tau binning starts after the peak.
 %
 % Why this function exists
 % ------------------------
@@ -107,8 +108,18 @@ else
            'compression while preserving the finest recorded resolution.']);
 end
 
+% Determine global peak bin to anchor full-resolution region.
+if isempty(tcspcNative)
+    peakIdx = 1;
+else
+    tcspcNative = max(1, min(NgateNative, round(tcspcNative)));
+    peakCounts = accumarray(tcspcNative, 1, [NgateNative, 1], @sum, 0);
+    [~, peakIdx] = max(peakCounts);
+    peakIdx = max(1, min(NgateNative, peakIdx));
+end
+
 [edgesNativeBin, centersNs, edgesNs, widthsNs, native2mt] = ...
-    buildMultiTauAxis(NgateNative, dtNativeNs, binsPerOctave);
+    buildMultiTauAxis(NgateNative, dtNativeNs, binsPerOctave, peakIdx);
 
 nMt = numel(centersNs);
 mtIdx = native2mt(max(1, min(NgateNative, round(tcspcNative))));
@@ -164,6 +175,7 @@ out.head.TCSPC_MultiTau_Nbins = nMt;
 out.head.TCSPC_MultiTau_IsCompressed = true;
 out.head.TCSPC_MultiTau_NativeResolution_ns = dtNativeNs;
 out.head.TCSPC_MultiTau_PulsePeriod_ns = pulsePeriodNs;
+out.head.TCSPC_MultiTau_PeakBin = peakIdx;
 
 % Dense linear cube intentionally omitted to avoid huge files.
 out.tcspc_pix = [];
@@ -190,28 +202,39 @@ end
 end
 
 
-function [edgesNativeBin, centersNs, edgesNs, widthsNs, native2mt] = buildMultiTauAxis(NgateNative, dtNs, binsPerOctave)
+function [edgesNativeBin, centersNs, edgesNs, widthsNs, native2mt] = buildMultiTauAxis(NgateNative, dtNs, binsPerOctave, peakIdx)
 % Build a multi-tau/log-binned time axis in native-bin units.
+% Full resolution is kept up to the peak bin, then multitau after.
 %
 % Native bins are 1-based. The grouped multi-tau bins cover intervals
 % [edgesNativeBin(i)+1, edgesNativeBin(i+1)] in native-bin indexing.
 
 binsPerOctave = max(2, round(binsPerOctave));
-
-widths = [];
-level = 0;
-covered = 0;
-while covered < NgateNative
-    w = 2^level;
-    add = repmat(w, 1, binsPerOctave);
-    widths = [widths add]; %#ok<AGROW>
-    covered = sum(widths);
-    level = level + 1;
+if nargin < 4 || isempty(peakIdx)
+    peakIdx = 1;
 end
+peakIdx = max(1, min(NgateNative, round(peakIdx)));
 
-edgesNativeBin = [0, cumsum(widths)];
-edgesNativeBin(edgesNativeBin > NgateNative) = NgateNative;
-edgesNativeBin = unique(edgesNativeBin, 'stable');
+% Linear edges up to the peak bin.
+edgesNativeBin = 0:peakIdx;
+
+% Multitau after the peak bin.
+remain = NgateNative - peakIdx;
+if remain > 0
+    widths = [];
+    level = 0;
+    covered = 0;
+    while covered < remain
+        w = 2^level;
+        add = repmat(w, 1, binsPerOctave);
+        widths = [widths add]; %#ok<AGROW>
+        covered = sum(widths);
+        level = level + 1;
+    end
+    edgesPost = peakIdx + cumsum(widths);
+    edgesPost(edgesPost > NgateNative) = NgateNative;
+    edgesNativeBin = unique([edgesNativeBin, edgesPost], 'stable');
+end
 if edgesNativeBin(end) < NgateNative
     edgesNativeBin(end+1) = NgateNative;
 end
