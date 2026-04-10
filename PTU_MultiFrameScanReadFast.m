@@ -83,6 +83,10 @@ Resolution = max(1e9 * rawRes_s, 0.128);             % ns
 chDiv = max(1, round((Resolution * 1e-9) / rawRes_s));
 Ngate = min(1024, ceil(1e9 * head.MeasDesc_GlobalResolution / Resolution) + 1);
 
+% Preserve native timing metadata for downstream TCSPC/IRF reconstruction.
+head.MeasDesc_Resolution_Original = rawRes_s;
+head.TCSPC_chDiv = chDiv;
+
 % Keep compatibility with downstream code that expects coarse resolution
 head.MeasDesc_Resolution = Resolution * 1e-9;
 

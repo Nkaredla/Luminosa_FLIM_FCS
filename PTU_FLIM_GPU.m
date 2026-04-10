@@ -103,6 +103,10 @@ function out = PTU_FLIM_GPU(name, opts)
     chDiv = max(1, round((Resolution * 1e-9) / rawRes_s));
     Ngate = min(opts.maxNgate, ceil(1e9 * head.MeasDesc_GlobalResolution / Resolution) + 1);
 
+    % Preserve native timing metadata for downstream TCSPC/IRF reconstruction.
+    head.MeasDesc_Resolution_Original = rawRes_s;
+    head.TCSPC_chDiv = chDiv;
+
     % Preserve compatibility with downstream code expecting coarse resolution
     head.MeasDesc_Resolution = Resolution * 1e-9;
 
@@ -125,6 +129,9 @@ function out = PTU_FLIM_GPU(name, opts)
     % Discover active channels from a short read
     % -------------------------------------------------------------
     [~, ~, tmpchan0, tmpmarkers0] = PTU_Read(name, [1 min(1e4, head.TTResult_NumberOfRecords)], head);
+    n0 = min([numel(tmpchan0), numel(tmpmarkers0)]);
+    tmpchan0 = tmpchan0(1:n0);
+    tmpmarkers0 = tmpmarkers0(1:n0);
     dind = unique(tmpchan0(tmpmarkers0 == 0));
     dind = dind(:)';
     nCh = numel(dind);
@@ -220,6 +227,15 @@ function out = PTU_FLIM_GPU(name, opts)
             break;
         end
 
+        nProc = min([numel(tmpy), numel(tmptcspc), numel(tmpchan), numel(tmpmarkers)]);
+        if nProc <= 0
+            continue;
+        end
+        tmpy = tmpy(1:nProc);
+        tmptcspc = tmptcspc(1:nProc);
+        tmpchan = tmpchan(1:nProc);
+        tmpmarkers = tmpmarkers(1:nProc);
+
         if ~isempty(yCarry)
             tmpy = tmpy + tend;
         end
@@ -238,6 +254,12 @@ function out = PTU_FLIM_GPU(name, opts)
         tcspcCarry  = [tcspcCarry; uint16(tcspcNew)]; %#ok<AGROW>
         chanCarry   = [chanCarry; chanNew]; %#ok<AGROW>
         markerCarry = [markerCarry; markerNew]; %#ok<AGROW>
+
+        nCarry = min([numel(yCarry), numel(tcspcCarry), numel(chanCarry), numel(markerCarry)]);
+        yCarry = yCarry(1:nCarry);
+        tcspcCarry = tcspcCarry(1:nCarry);
+        chanCarry = chanCarry(1:nCarry);
+        markerCarry = markerCarry(1:nCarry);
 
         % Update line markers
         if LineStart == LineStop

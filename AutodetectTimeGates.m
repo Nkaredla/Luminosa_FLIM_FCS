@@ -5,8 +5,8 @@ function [t1, len] = AutodetectTimeGates(tcspcdata, cnum)
 tmp = mean(tcspcdata(:,1:min([2 size(tcspcdata,2)])),2);
 
 tmp2 = sort(tmp);
-baseline = mean(tmp2(1:ceil(size(tmp2)/5)));
-peak = mean(tmp2(ceil(size(tmp2)*0.99):end));
+baseline = mean(tmp2(1:ceil(length(tmp2)/5)));
+peak = mean(tmp2(ceil(length(tmp2)*0.99):end));
 
 [ind, num] = mCluster(tmp>(baseline+0.15*(peak-baseline)));
 
@@ -14,8 +14,8 @@ tt = 1:size(tcspcdata, 1);
 if ((size(tcspcdata, 2) == 4) && (cnum > 2))
     tmp = mean(tcspcdata(:,3:4),2);
     tmp2 = sort(tmp);
-    baseline = mean(tmp2(1:ceil(size(tmp2)/5)));
-    peak = mean(tmp2(ceil(size(tmp2)*0.99):end));
+    baseline = mean(tmp2(1:ceil(length(tmp2)/5)));
+    peak = mean(tmp2(ceil(length(tmp2)*0.99):end));
 
     [ind2, num2] = mCluster(tmp>(baseline+0.15*(peak-baseline)));
     

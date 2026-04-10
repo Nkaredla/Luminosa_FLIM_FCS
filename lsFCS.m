@@ -254,7 +254,7 @@ end
 
 res.line_idx = line_idx;
 res.bin2 = tau;
-res.tcspcdata2      = tcspcdata2(t1:t1+len);
+res.tcspcdata2      = tcspcdata2;
 
 res.autotime = autotime;
 automean=0;

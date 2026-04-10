@@ -1,0 +1,98 @@
+folderName = 'D:\Luminosa\Data\270326\nk_b7h6_miet_64\';
+resultFolderName = 'CellSeg2Color_results';
+
+cfg = struct();
+cfg.segDetectorIndex = 1;   % d1
+cfg.fitDetectorIndex = 2;   % d2
+cfg.segPulseIndex = 1;      % channel 1
+cfg.fitPulseIndex = 2;      % channel 2
+cfg.minCellDiameterUm = 3.0;
+cfg.tau0 = [0.4 2.5];
+cfg.useGuiStyleMultiExpFit = true;
+cfg.usePixelwiseIntensityLifetimeMap = true;
+cfg.includeBackgroundInFit = true;
+cfg.pixelwiseIncludeBackground = true;
+cfg.pixelwiseMinPhotons = 10;
+cfg.showFigures = false;
+cfg.saveOutputs = true;
+cfg.saveMat = true;
+cfg.saveCsv = true;
+cfg.saveFigures = true;
+cfg.closeFiguresAfterSave = true;
+cfg.verbose = true;
+cfg.plotProgress = true;
+cfg.closeProgressFigure = true;
+
+targets = collectBatchTargets(folderName);
+if isempty(targets)
+    error('No PTU files were found inside subfolders of %s', folderName);
+end
+
+batchSummary = repmat(struct( ...
+    'ptuPath', '', ...
+    'outputDir', '', ...
+    'nCells', NaN, ...
+    'backgroundTauNs', NaN, ...
+    'status', '', ...
+    'message', ''), numel(targets), 1);
+
+for k = 1:numel(targets)
+    target = targets(k);
+    fprintf('Processing %d/%d: %s\n', k, numel(targets), target.ptuPath);
+
+    localCfg = cfg;
+    localCfg.outputDir = fullfile(target.folderPath, resultFolderName);
+    localCfg.outputStem = target.baseName;
+
+    batchSummary(k).ptuPath = target.ptuPath;
+    batchSummary(k).outputDir = localCfg.outputDir;
+
+    try
+        res = PTU_CellSeg2ColorLifetime(target.ptuPath, localCfg);
+        batchSummary(k).nCells = numel(res.rois);
+        batchSummary(k).backgroundTauNs = res.background.fitCh2D2.tauIntNs;
+        batchSummary(k).status = 'ok';
+        batchSummary(k).message = '';
+    catch ME
+        batchSummary(k).status = 'failed';
+        batchSummary(k).message = ME.message;
+        fprintf('Failed: %s\n', ME.message);
+        for s = 1:numel(ME.stack)
+            fprintf('  at %s (line %d)\n', ME.stack(s).name, ME.stack(s).line);
+        end
+    end
+end
+
+summaryTable = struct2table(batchSummary);
+summaryPath = fullfile(folderName, 'CellSeg2Color_batch_summary.csv');
+if exist('writetable', 'file') == 2
+    writetable(summaryTable, summaryPath);
+else
+    writecell([summaryTable.Properties.VariableNames; table2cell(summaryTable)], summaryPath);
+end
+
+
+function targets = collectBatchTargets(folderName)
+targets = struct('ptuPath', {}, 'folderPath', {}, 'baseName', {});
+
+entries = dir(folderName);
+for k = 1:numel(entries)
+    if ~entries(k).isdir
+        continue;
+    end
+    entryName = entries(k).name;
+    if strcmp(entryName, '.') || strcmp(entryName, '..')
+        continue;
+    end
+
+    subfolder = fullfile(folderName, entryName);
+    ptuFiles = dir(fullfile(subfolder, '*.ptu'));
+    for j = 1:numel(ptuFiles)
+        ptuPath = fullfile(subfolder, ptuFiles(j).name);
+        [~, stem] = fileparts(ptuFiles(j).name);
+        targets(end+1).ptuPath = ptuPath; %#ok<AGROW>
+        targets(end).folderPath = subfolder;
+        targets(end).baseName = stem;
+    end
+end
+end

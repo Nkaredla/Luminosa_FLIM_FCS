@@ -63,6 +63,8 @@ anzch = 32;
 Resolution = max([1e9 * head.MeasDesc_Resolution, 0.128]); % ns
 chDiv = 1e-9 * Resolution / head.MeasDesc_Resolution;
 Ngate = ceil(1e9 * head.MeasDesc_GlobalResolution ./ Resolution) + 1;
+head.MeasDesc_Resolution_Original = head.MeasDesc_Resolution;
+head.TCSPC_chDiv = chDiv;
 head.MeasDesc_Resolution = Resolution * 1e-9;
 
 % Marker definitions

@@ -146,7 +146,8 @@ function Luminosa_GUI
         rowNsub.Padding = [0 0 0 0];
         uilabel(rowNsub, 'Text', 'Log bins / octave');
         app.txtBins = uieditfield(rowNsub, 'numeric', 'Value', 8, 'Limits', [2 32], ...
-            'LowerLimitInclusive', 'on', 'UpperLimitInclusive', 'on');
+            'LowerLimitInclusive', 'on', 'UpperLimitInclusive', 'on', ...
+            'ValueChangedFcn', @onTcspcBinningChanged);
 
         % Row 7
         rowTau0 = uigridlayout(ctlGrid, [1 2]);
@@ -448,21 +449,16 @@ function Luminosa_GUI
                             for frameIdx = 1:numFrames
                                 addStatus(sprintf('  -> Processing frame %d/%d...', frameIdx, numFrames));
                                 
-                                % Create frame-specific data structure
-                                frameData = struct();
-                                
-                                % Copy essential header and metadata
-                                if isfield(app.ptuOut, 'head')
-                                    frameData.head = app.ptuOut.head;
-                                end
+                                % Create frame-specific data structure without inheriting global cubes
+                                frameData = prepareExtractedFrameStruct(app.ptuOut);
                                 
                                 % Extract frame-specific intensity data
                                 intensityImg = [];
                                 if isfield(app.ptuOut, 'tag') && size(app.ptuOut.tag, 4) >= frameIdx
                                     frameData.tag = app.ptuOut.tag(:,:,:,frameIdx);
-                                    frameData.tags = sum(frameData.tag, 3);  % Create tags field for intensity
-                                    intensityImg = frameData.tags;
-                                    addStatus(sprintf('    Frame %d intensity: %dx%d pixels, %d total counts', frameIdx, size(frameData.tags,1), size(frameData.tags,2), sum(frameData.tags(:))));
+                                    frameData.tags = frameData.tag;
+                                    intensityImg = sum(frameData.tag, 3);
+                                    addStatus(sprintf('    Frame %d intensity: %dx%d pixels, %d total counts', frameIdx, size(intensityImg,1), size(intensityImg,2), sum(intensityImg(:))));
                                 elseif isfield(app.ptuOut, 'tags') && ~isempty(app.ptuOut.tags)
                                     % Fallback to global tags if per-frame not available
                                     frameData.tags = app.ptuOut.tags;
@@ -489,19 +485,12 @@ function Luminosa_GUI
                                     frameData.tau = app.ptuOut.tau(:,:,:,frameIdx);
                                     frameData.taus = frameData.tau;  % Ensure taus field exists
                                 end
+                                app.seriesFlimCache{frameIdx} = getTauMeanMapFromPTUData(frameData);
                                 
-                                % For TCSPC, use the existing tcspc_pix if available, or try to extract photon lists
+                                % Keep frame-specific photons for per-frame TCSPC/ROI work.
                                 if storeTCSPC
                                     tcspcDataAssigned = false;
-                                    
-                                    % Try to use existing tcspc_pix first
-                                    if isfield(app.ptuOut, 'tcspc_pix') && ~isempty(app.ptuOut.tcspc_pix)
-                                        % Use existing tcspc_pix directly
-                                        frameData.tcspc_pix = app.ptuOut.tcspc_pix;
-                                        app.seriesTcspcPixCache{frameIdx} = app.ptuOut.tcspc_pix;
-                                        addStatus(sprintf('    Frame %d: Using existing tcspc_pix (%s)', frameIdx, mat2str(size(app.ptuOut.tcspc_pix))));
-                                        tcspcDataAssigned = true;
-                                    elseif isfield(app.ptuOut, 'im_frame') && ~isempty(app.ptuOut.im_frame)
+                                    if isfield(app.ptuOut, 'im_frame') && ~isempty(app.ptuOut.im_frame)
                                         framePhotonMask = (app.ptuOut.im_frame == frameIdx);
                                         if any(framePhotonMask)
                                             frameData.im_sync = app.ptuOut.im_sync(framePhotonMask);
@@ -510,52 +499,26 @@ function Luminosa_GUI
                                             frameData.im_line = app.ptuOut.im_line(framePhotonMask);
                                             frameData.im_col = app.ptuOut.im_col(framePhotonMask);
                                             frameData.im_frame = ones(sum(framePhotonMask), 1, 'like', app.ptuOut.im_frame);
-                                            
-                                            % Create per-frame TCSPC pixel data using mHist4
-                                            try
-                                                if exist('mHist4', 'file') == 2 && ~isempty(frameData.im_col) && ~isempty(frameData.im_tcspc)
-                                                    maxCol = max(frameData.im_col);
-                                                    maxLine = max(frameData.im_line);
-                                                    maxChan = max(frameData.im_chan);
-                                                    maxTcspc = round(app.ptuOut.head.MeasDesc_Resolution*1e12);
-                                                    
-                                                    [h, ~, ~, ~, ~] = mHist4(double(frameData.im_col), double(frameData.im_line), ...
-                                                        double(frameData.im_chan), double(frameData.im_tcspc), ...
-                                                        1:maxCol, 1:maxLine, 1:maxChan, 1:maxTcspc);
-                                                    frameData.tcspc_pix = h;
-                                                    app.seriesTcspcPixCache{frameIdx} = h;
-                                                    addStatus(sprintf('    Frame %d: Generated TCSPC data (%dx%dx%dx%d)', frameIdx, size(h,1), size(h,2), size(h,3), size(h,4)));
-                                                    tcspcDataAssigned = true;
-                                                end
-                                            catch ME
-                                                addStatus(sprintf('    Frame %d: mHist4 failed: %s', frameIdx, ME.message));
-                                                % Fallback: use frame-specific tag data for TCSPC
-                                                if isfield(frameData, 'tag') && ~isempty(frameData.tag)
-                                                    frameData.tcspc_pix = frameData.tag;
-                                                    app.seriesTcspcPixCache{frameIdx} = frameData.tag;
-                                                    tcspcDataAssigned = true;
-                                                    addStatus(sprintf('    Frame %d: Using tag data as TCSPC fallback', frameIdx));
-                                                end
-                                            end
+                                            tcspcDataAssigned = true;
+                                            addStatus(sprintf('    Frame %d: Extracted %d photons for frame-specific TCSPC', frameIdx, numel(frameData.im_tcspc)));
                                         else
                                             addStatus(sprintf('    Frame %d: No photons found for this frame', frameIdx));
                                         end
                                     end
                                     
-                                    % Final fallback: ensure each frame has some TCSPC structure even if empty
+                                    app.seriesTcspcPixCache{frameIdx} = [];
                                     if ~tcspcDataAssigned
-                                        if isfield(frameData, 'tag') && ~isempty(frameData.tag)
-                                            frameData.tcspc_pix = frameData.tag;
-                                            app.seriesTcspcPixCache{frameIdx} = frameData.tag;
-                                            addStatus(sprintf('    Frame %d: Using tag as final TCSPC fallback', frameIdx));
-                                        else
-                                            % Create minimal empty TCSPC structure
-                                            frameData.tcspc_pix = [];
-                                            app.seriesTcspcPixCache{frameIdx} = [];
-                                            addStatus(sprintf('    Frame %d: No TCSPC data available', frameIdx));
-                                        end
+                                        frameData.im_sync = [];
+                                        frameData.im_tcspc = uint16([]);
+                                        frameData.im_chan = uint8([]);
+                                        frameData.im_line = uint16([]);
+                                        frameData.im_col = uint16([]);
+                                        frameData.im_frame = uint16([]);
+                                        addStatus(sprintf('    Frame %d: No frame-specific TCSPC data available', frameIdx));
                                     end
                                 end
+                                [frameData.cachedGlobalDecayCounts, frameData.cachedGlobalDecayDtNs, frameData.cachedGlobalDecaySrcInfo] = ...
+                                    cachedFrameWholeDecay(frameData);
                                 
                                 app.seriesData{frameIdx} = frameData;
                             end
@@ -678,6 +641,7 @@ function Luminosa_GUI
         app.seriesFolderPath = folderPath;
         app.seriesFiles = files;
         app.currentFrame = 1;
+        app.ptuOutOriginal = [];
         
         % Initialize variables for frame extraction
         addStatus(sprintf('Found %d PTU files. Extracting multiframes...', numel(files)));
@@ -707,7 +671,7 @@ function Luminosa_GUI
                     opts = struct();
                     opts.computePerFrame = true;  % Enable per-frame computation
                     opts.storeTcspcPix = storeTCSPC;
-                    opts.storePhotonLists = false;
+                    opts.storePhotonLists = storeTCSPC;
                     opts.storeTimeCell = false;
                     opts.useGPU = useGPU;
                     ptuData = PTU_FLIM_GPU(filename, opts);
@@ -755,18 +719,20 @@ function Luminosa_GUI
                         totalFrameCount = totalFrameCount + 1;
                         frameFileMap(totalFrameCount) = fileIdx;
                         
-                        % Create individual frame data structure
-                        frameData = ptuData;  % Copy the base structure
+                        % Create individual frame data structure without inheriting global cubes
+                        frameData = prepareExtractedFrameStruct(ptuData);
                         
                         % Extract frame-specific data
                         if isfield(ptuData, 'tag') && size(ptuData.tag, 4) >= frameIdx
-                            frameData.tags = ptuData.tag(:,:,:,frameIdx);  % Single frame intensity
+                            frameData.tag = ptuData.tag(:,:,:,frameIdx);
+                            frameData.tags = frameData.tag;  % Single frame intensity
                         elseif isfield(ptuData, 'tags')
                             frameData.tags = ptuData.tags;  % Use accumulated if per-frame not available
                         end
                         
                         if isfield(ptuData, 'tau') && size(ptuData.tau, 4) >= frameIdx
-                            frameData.taus = ptuData.tau(:,:,:,frameIdx);  % Single frame tau
+                            frameData.tau = ptuData.tau(:,:,:,frameIdx);
+                            frameData.taus = frameData.tau;  % Single frame tau
                         elseif isfield(ptuData, 'taus')
                             frameData.taus = ptuData.taus;  % Use accumulated if per-frame not available
                         end
@@ -791,6 +757,8 @@ function Luminosa_GUI
                                 frameData.im_frame = uint16([]);
                             end
                         end
+                        [frameData.cachedGlobalDecayCounts, frameData.cachedGlobalDecayDtNs, frameData.cachedGlobalDecaySrcInfo] = ...
+                            cachedFrameWholeDecay(frameData);
                         
                         % Store the extracted frame
                         allFrameData{totalFrameCount} = frameData;
@@ -799,27 +767,8 @@ function Luminosa_GUI
                         intensityImg = getIntensityMapFromPTUData(frameData);
                         allIntensityCache{totalFrameCount} = intensityImg;
                         
-                        % Cache tcspc_pix for fast ROI access (use original full data)
-                        if isfield(ptuData, 'tcspc_pix') && ~isempty(ptuData.tcspc_pix)
-                            allTcspcPixCache{totalFrameCount} = ptuData.tcspc_pix;
-                        elseif isfield(ptuData, 'tcspc_pix_mt') && ~isempty(ptuData.tcspc_pix_mt)
-                            allTcspcPixCache{totalFrameCount} = ptuData.tcspc_pix_mt;
-                        end
-                        
-                        % Pre-compute and cache quick FLIM if possible
-                        if ~isempty(allTcspcPixCache{totalFrameCount})
-                            try
-                                flimData = quickFLIMFromTCSPCFlexible(frameData, useGPU);
-                                if isfield(flimData, 'total') && isfield(flimData.total, 'tauMean')
-                                    allFlimCache{totalFrameCount} = flimData.total.tauMean;
-                                end
-                            catch
-                                % FLIM computation failed, skip caching
-                                allFlimCache{totalFrameCount} = [];
-                            end
-                        else
-                            allFlimCache{totalFrameCount} = [];
-                        end
+                        allTcspcPixCache{totalFrameCount} = [];
+                        allFlimCache{totalFrameCount} = getTauMeanMapFromPTUData(frameData);
                     end
                 else
                     % Single frame file - treat as one frame
@@ -972,47 +921,38 @@ function Luminosa_GUI
             end
             showGlobalTCSPC();
             
-            % Automatically calculate FLIM for current frame if TCSPC data available
-            if ~isempty(app.seriesTcspcPixCache) && frameNum <= numel(app.seriesTcspcPixCache) && ...
-               ~isempty(app.seriesTcspcPixCache{frameNum})
-                % Check if FLIM is already cached for this frame
-                if isempty(app.seriesFlimCache) || frameNum > numel(app.seriesFlimCache) || ...
-                   isempty(app.seriesFlimCache{frameNum})
-                    addStatus(sprintf('Computing FLIM for frame %d...', frameNum));
-                    drawnow;
+            % Prefer the per-frame FLIM extracted with the frame data.
+            cachedTau = [];
+            if ~isempty(app.seriesFlimCache) && frameNum <= numel(app.seriesFlimCache)
+                cachedTau = app.seriesFlimCache{frameNum};
+            end
+            if ~isempty(cachedTau)
+                app.flim = flimStructFromTauMap(cachedTau, getIntensityMapFromPTUData(app.ptuOut));
+                addStatus(sprintf('Using cached FLIM for frame %d.', frameNum));
+            elseif hasQuickFLIMData(app.ptuOut)
+                addStatus(sprintf('Computing FLIM for frame %d...', frameNum));
+                drawnow;
+                
+                try
+                    useGPU = app.chkUseGPU.Value && gpuIsAvailable();
+                    flimData = quickFLIMFromTCSPCFlexible(app.ptuOut, useGPU);
                     
-                    try
-                        % Use GPU if available for FLIM computation
-                        useGPU = app.chkUseGPU.Value && gpuIsAvailable();
-                        flimData = quickFLIMFromTCSPCFlexible(app.ptuOut, useGPU);
-                        
-                        % Cache the FLIM result
-                        if numel(app.seriesFlimCache) < frameNum
-                            app.seriesFlimCache{frameNum} = [];
-                        end
-                        if isfield(flimData, 'total') && isfield(flimData.total, 'tauMean')
-                            app.seriesFlimCache{frameNum} = flimData.total.tauMean;
-                        end
-                        
-                        % Store FLIM result
-                        app.flim = flimData;
-                        addStatus(sprintf('FLIM computed for frame %d.', frameNum));
-                    catch ME
-                        addStatus(sprintf('FLIM computation failed for frame %d: %s', frameNum, ME.message));
-                        app.flim = [];
+                    if numel(app.seriesFlimCache) < frameNum
+                        app.seriesFlimCache{frameNum} = [];
                     end
-                else
-                    % Use cached FLIM
-                    if ~isempty(app.seriesFlimCache{frameNum})
-                        app.flim = struct();
-                        app.flim.total = struct();
-                        app.flim.total.tauMean = app.seriesFlimCache{frameNum};
-                        addStatus(sprintf('Using cached FLIM for frame %d.', frameNum));
+                    if isfield(flimData, 'total') && isfield(flimData.total, 'tauMean')
+                        app.seriesFlimCache{frameNum} = flimData.total.tauMean;
                     end
+                    
+                    app.flim = flimData;
+                    addStatus(sprintf('FLIM computed for frame %d.', frameNum));
+                catch ME
+                    addStatus(sprintf('FLIM computation failed for frame %d: %s', frameNum, ME.message));
+                    app.flim = [];
                 end
             else
                 app.flim = [];
-                addStatus(sprintf('No TCSPC data available for quick FLIM on frame %d.', frameNum));
+                addStatus(sprintf('No frame-specific FLIM data available for frame %d.', frameNum));
             end
             
             % Update title to show frame info with source file
@@ -1053,10 +993,14 @@ function Luminosa_GUI
             return;
         end
 
-        hasLinear = isfield(app.ptuOut, 'tcspc_pix') && ~isempty(app.ptuOut.tcspc_pix);
-        hasMultiTau = isfield(app.ptuOut, 'tcspc_pix_mt') && ~isempty(app.ptuOut.tcspc_pix_mt);
-        if ~hasLinear && ~hasMultiTau
-            addStatus('No TCSPC data available for quick FLIM.');
+        if ~hasQuickFLIMData(app.ptuOut)
+            app.flim = flimStructFromTauMap(getTauMeanMapFromPTUData(app.ptuOut), getIntensityMapFromPTUData(app.ptuOut));
+            if isempty(app.flim)
+                addStatus('No frame-specific FLIM data available.');
+                return;
+            end
+            addStatus('Using cached per-frame FLIM map.');
+            showTauMean();
             return;
         end
 
@@ -1174,6 +1118,41 @@ function Luminosa_GUI
         end
     end
 
+    function onTcspcBinningChanged(~, ~)
+        if isempty(app.ptuOut)
+            return;
+        end
+        setBusy(true);
+        cleanupBusy = onCleanup(@() setBusy(false)); %#ok<NASGU>
+
+        try
+            switch app.tcspcDisplayMode
+                case 'roi_fit'
+                    if ~isempty(app.roi) && isvalid(app.roi)
+                        onShowTCSPC();
+                        onFitTCSPC();
+                    else
+                        showGlobalTCSPC();
+                    end
+                case 'roi'
+                    if ~isempty(app.roi) && isvalid(app.roi)
+                        onShowTCSPC();
+                    else
+                        showGlobalTCSPC();
+                    end
+                case 'global'
+                    showGlobalTCSPC();
+                otherwise
+                    if ~isempty(app.tcspcGlobal) || ~isempty(app.ptuOut)
+                        showGlobalTCSPC();
+                    end
+            end
+            addStatus(sprintf('TCSPC display updated to %.0f log bins/octave.', app.txtBins.Value));
+        catch ME
+            addStatus(['Failed to update TCSPC log binning: ' ME.message]);
+        end
+    end
+
     function onSelectROI(~, ~)
         if isempty(app.axImage) || isempty(app.axImage.Children)
             addStatus('Display an image first.');
@@ -1220,7 +1199,7 @@ function Luminosa_GUI
         end
 
         binsPerOct = app.txtBins.Value;
-        [countsShift, shiftBins, shiftNs, peakIdx, displayStartIdx] = shiftDecayForIRFDisplay(countsNative, dtNsNative);
+        [countsShift, shiftBins, shiftNs, peakIdx, riseIdx] = shiftDecayForIRFDisplay(countsNative, dtNsNative);
         [tBinNs, cDensity, cInt, edgesNs, widthNs] = logBinTCSPC(countsShift, dtNsNative, binsPerOct);
 
         app.tcspc = struct();
@@ -1235,7 +1214,8 @@ function Luminosa_GUI
         app.tcspc.shiftBins = shiftBins;
         app.tcspc.shiftNs = shiftNs;
         app.tcspc.peakIdx = peakIdx;
-        app.tcspc.displayStartIdx = displayStartIdx;
+        app.tcspc.riseIdx = riseIdx;
+        app.tcspc.displayStartIdx = riseIdx;
         app.tcspc.source = srcInfo;
 
         layoutTcspcAxes(false);
@@ -1247,11 +1227,9 @@ function Luminosa_GUI
         hold(app.axTCSPC, 'on');
 
         legendLines = {'ROI TCSPC'};
-        if ensureGlobalIRF(false) && ~isempty(app.irfGlobal) && (isempty(app.irfGlobalDtNs) || abs(app.irfGlobalDtNs - dtNsNative) < 1e-6)
-            irfDisp = app.irfGlobal(:);
-            if shiftBins < numel(irfDisp)
-                irfDisp = irfDisp(shiftBins+1:end);
-            end
+        [irfDispBase, ~, ~] = getWholeFileIRFForTargetGrid(dtNsNative, numel(countsNative));
+        if ~isempty(irfDispBase)
+            irfDisp = applyDisplayShiftToDecay(irfDispBase(:), shiftBins);
             irfDisp = max(irfDisp, 0);
             if ~isempty(irfDisp) && max(irfDisp) > 0
                 irfScale = max(countsShift) / max(irfDisp);
@@ -1302,17 +1280,11 @@ function Luminosa_GUI
         includeBG = app.chkIncludeBG.Value;
         optimizeTau = app.chkOptimizeTau.Value;
 
-        if ~ensureGlobalIRF(false)
-            addStatus('Whole-file IRF unavailable. Load a PTU with native TCSPC and try again.');
+        [irfROI, irfMeta, ~] = getWholeFileIRFForTargetGrid(app.tcspc.dtNs, numel(app.tcspc.rawCountsNative));
+        if isempty(irfROI)
+            addStatus('Whole-file IRF unavailable for ROI TCSPC resolution.');
             return;
         end
-        if ~isempty(app.irfGlobalDtNs) && abs(app.tcspc.dtNs - app.irfGlobalDtNs) > 1e-6
-            addStatus('Whole-file IRF resolution does not match ROI TCSPC resolution.');
-            return;
-        end
-
-        irfROI = app.irfGlobal(:);
-        irfMeta = app.irfGlobalMeta;
 
         [tauFit, coeff, fitCountsRawFull, fitCountsShift, edgesRawNs] = fitRoiTCSPCWithIRF(...
             app.tcspc.rawCountsNative, app.tcspc.shiftBins, app.tcspc.dtNs, tau0, irfROI, includeBG, optimizeTau);
@@ -1338,10 +1310,7 @@ function Luminosa_GUI
         plot(app.axTCSPC, tFitNs*1e-9, fitDensity, 'r-', 'LineWidth', 1.3);
 
         legendLines = {'ROI TCSPC', 'Reconvolution fit'};
-        irfDisp = irfROI(:);
-        if app.tcspc.shiftBins < numel(irfDisp)
-            irfDisp = irfDisp(app.tcspc.shiftBins+1:end);
-        end
+        irfDisp = applyDisplayShiftToDecay(irfROI(:), app.tcspc.shiftBins);
         irfDisp = max(irfDisp, 0);
         if ~isempty(irfDisp) && max(irfDisp) > 0
             irfScale = max(app.tcspc.rawCountsShift) / max(irfDisp);
@@ -1438,10 +1407,6 @@ function Luminosa_GUI
         end
         setBusy(true);
         cleanupBusy = onCleanup(@() setBusy(false)); %#ok<NASGU>
-        if isempty(app.ptuOut.tcspc_pix)
-            addStatus('No tcspc_pix. Reload with "Store TCSPC".');
-            return;
-        end
 
         tau0 = parseTau0(app.editTau0.Value);
         if isempty(tau0)
@@ -1457,26 +1422,29 @@ function Luminosa_GUI
                 && isfield(app.flim.reassigned, 'total') && isfield(app.flim.reassigned.total, 'xyT') ...
                 && ~isempty(app.flim.reassigned.total.xyT)
             tcspc_pix = app.flim.reassigned.total.xyT;
+            tcspcSrc = 'ISM reassigned TCSPC';
+            dtNs = app.ptuOut.head.MeasDesc_Resolution * 1e9;
         else
-            tcspc_pix = app.ptuOut.tcspc_pix;
+            [tcspc_pix, dtNs, tcspcSrc, cubeErr] = resolvePatternMatchTcspcCube();
+            if isempty(tcspc_pix)
+                addStatus(cubeErr);
+                return;
+            end
         end
 
         head = app.ptuOut.head;
-        dtNs = head.MeasDesc_Resolution * 1e9;
         pulsePeriodNs = head.MeasDesc_GlobalResolution * 1e9;
 
-        if ~ensureGlobalIRF(false)
-            addStatus('Whole-file IRF unavailable. Cannot run pattern matching.');
+        [irf, irfMeta, irfNote] = getWholeFileIRFForTargetGrid(dtNs, size(tcspc_pix, 3));
+        if isempty(irf)
+            addStatus('Whole-file IRF unavailable for pattern-matching TCSPC resolution.');
             return;
         end
-        if ~isempty(app.irfGlobalDtNs) && abs(app.irfGlobalDtNs - dtNs) > 1e-6
-            addStatus('Whole-file IRF resolution does not match pattern-matching TCSPC resolution.');
-            return;
+        if ~isempty(irfNote) && ~strcmp(irfNote, 'native')
+            addStatus(sprintf('Pattern matching using %s whole-file IRF.', irfNote));
         end
-        irf = app.irfGlobal(:);
-        irfMeta = app.irfGlobalMeta;
 
-        addStatus('Running global fit + pattern match with whole-file IRF...');
+        addStatus(sprintf('Running global fit + pattern match with whole-file IRF using %s...', tcspcSrc));
         drawnow;
 
         opts = struct();
@@ -1507,7 +1475,8 @@ function Luminosa_GUI
         end
 
         showPatternOverlay();
-        addStatus(sprintf('Pattern match complete using whole-file %s IRF. GUI Tau0 was used only for fit components.', app.dropIRF.Value));
+        addStatus(sprintf('Pattern match complete using whole-file %s IRF (%s). GUI Tau0 was used only for fit components.', ...
+            app.dropIRF.Value, tcspcSrc));
     end
     function onPointFCS(~, ~)
         if isempty(app.ptuOut)
@@ -1800,7 +1769,7 @@ function Luminosa_GUI
         if isempty(t)
             return;
         end
-        left = min(t) - 0.5e-9;
+        left = max(0, min(t));
         right = max(t);
         if ~isfinite(left) || ~isfinite(right)
             return;
@@ -1987,6 +1956,175 @@ function Luminosa_GUI
         end
     end
 
+    function frameData = prepareExtractedFrameStruct(ptuData)
+        frameData = struct();
+        metaFields = {'head', 'dind', 'Ngate', 'Resolution_ns', 'options', ...
+            'tcspc_mt_centers_ns', 'tcspc_mt_width_ns'};
+        for ii = 1:numel(metaFields)
+            if isfield(ptuData, metaFields{ii})
+                frameData.(metaFields{ii}) = ptuData.(metaFields{ii});
+            end
+        end
+        frameData.nFrames = 1;
+    end
+
+    function tauMean = getTauMeanMapFromPTUData(ptuData)
+        tauMean = [];
+        tauCube = [];
+        tagCube = [];
+
+        if isfield(ptuData, 'taus') && ~isempty(ptuData.taus)
+            tauCube = double(ptuData.taus);
+        elseif isfield(ptuData, 'tau') && ~isempty(ptuData.tau)
+            tauCube = double(ptuData.tau);
+        end
+
+        if isempty(tauCube)
+            return;
+        end
+
+        if ndims(tauCube) >= 4 && size(tauCube, 4) == 1
+            tauCube = tauCube(:,:,:,1);
+        end
+
+        if isfield(ptuData, 'tags') && ~isempty(ptuData.tags)
+            tagCube = double(ptuData.tags);
+        elseif isfield(ptuData, 'tag') && ~isempty(ptuData.tag)
+            tagCube = double(ptuData.tag);
+        end
+
+        if ndims(tagCube) >= 4 && size(tagCube, 4) == 1
+            tagCube = tagCube(:,:,:,1);
+        end
+
+        if ndims(tauCube) <= 2
+            tauMean = double(tauCube);
+            return;
+        end
+
+        if ~isempty(tagCube) && size(tagCube, 1) == size(tauCube, 1) && ...
+                size(tagCube, 2) == size(tauCube, 2) && size(tagCube, 3) == size(tauCube, 3)
+            denom = sum(tagCube, 3);
+            tauMean = sum(tauCube .* tagCube, 3) ./ max(denom, 1);
+            zeroMask = denom <= 0;
+            if any(zeroMask(:))
+                tauFallback = mean(tauCube, 3, 'omitnan');
+                tauMean(zeroMask) = tauFallback(zeroMask);
+            end
+        else
+            tauMean = mean(tauCube, 3, 'omitnan');
+        end
+    end
+
+    function flim = flimStructFromTauMap(tauMean, intensityImg)
+        flim = [];
+        if isempty(tauMean)
+            return;
+        end
+
+        flim = struct();
+        flim.total = struct();
+        flim.total.tauMean = double(tauMean);
+        flim.total.meanArrival = double(tauMean);
+        flim.total.tauRMS = zeros(size(tauMean), 'double');
+        flim.total.globalDecay = [];
+        flim.total.tAxisNs = [];
+        flim.total.t0Bin = [];
+        if nargin >= 2 && ~isempty(intensityImg)
+            flim.total.tag = double(intensityImg);
+        else
+            flim.total.tag = [];
+        end
+    end
+
+    function tf = hasQuickFLIMData(ptuData)
+        tf = false;
+        if isempty(ptuData)
+            return;
+        end
+
+        tf = (isfield(ptuData, 'tcspc_pix') && ~isempty(ptuData.tcspc_pix)) || ...
+             (isfield(ptuData, 'tcspc_pix_mt') && ~isempty(ptuData.tcspc_pix_mt)) || ...
+             (isfield(ptuData, 'im_tcspc') && ~isempty(ptuData.im_tcspc) && ...
+              isfield(ptuData, 'im_col') && ~isempty(ptuData.im_col) && ...
+              isfield(ptuData, 'im_line') && ~isempty(ptuData.im_line) && ...
+              isfield(ptuData, 'im_chan') && ~isempty(ptuData.im_chan));
+    end
+
+    function [tcspcPix, dtNs, srcLabel, errMsg] = resolvePatternMatchTcspcCube()
+        tcspcPix = [];
+        dtNs = [];
+        srcLabel = '';
+        errMsg = '';
+
+        if isempty(app.ptuOut)
+            errMsg = 'Load a PTU first.';
+            return;
+        end
+
+        if isfield(app.ptuOut, 'tcspc_pix') && ~isempty(app.ptuOut.tcspc_pix)
+            tcspcPix = app.ptuOut.tcspc_pix;
+            dtNs = app.ptuOut.head.MeasDesc_Resolution * 1e9;
+            srcLabel = 'stored tcspc_pix';
+            return;
+        end
+
+        if iscell(app.seriesTcspcPixCache) && ~isempty(app.currentFrame) && app.currentFrame >= 1 && ...
+                app.currentFrame <= numel(app.seriesTcspcPixCache) && ...
+                ~isempty(app.seriesTcspcPixCache{app.currentFrame})
+            tcspcPix = app.seriesTcspcPixCache{app.currentFrame};
+            app.ptuOut.tcspc_pix = tcspcPix;
+            dtNs = app.ptuOut.head.MeasDesc_Resolution * 1e9;
+            srcLabel = sprintf('cached frame %d tcspc_pix', app.currentFrame);
+            return;
+        end
+
+        if isfield(app.ptuOut, 'im_tcspc') && ~isempty(app.ptuOut.im_tcspc) && ...
+                isfield(app.ptuOut, 'im_col') && ~isempty(app.ptuOut.im_col) && ...
+                isfield(app.ptuOut, 'im_line') && ~isempty(app.ptuOut.im_line) && ...
+                isfield(app.ptuOut, 'im_chan') && ~isempty(app.ptuOut.im_chan)
+            addStatus('Reconstructing linear tcspc_pix from photon lists for pattern matching...');
+            drawnow;
+            try
+                [tcspcPix, dtNs] = buildLinearTcspcCubeFromPhotonLists(app.ptuOut);
+                app.ptuOut.tcspc_pix = tcspcPix;
+                srcLabel = 'photon-list reconstructed tcspc_pix';
+                return;
+            catch ME
+                errMsg = ['Pattern-match TCSPC reconstruction failed: ' ME.message];
+                return;
+            end
+        end
+
+        if isfield(app.ptuOut, 'tcspc_pix_mt') && ~isempty(app.ptuOut.tcspc_pix_mt)
+            errMsg = 'Pattern matching requires linear tcspc_pix. Current data only has tcspc_pix_mt; reload with "Store TCSPC".';
+            return;
+        end
+
+        errMsg = 'No linear tcspc_pix is available. Reload with "Store TCSPC".';
+    end
+
+    function [counts, dtNs, srcInfo] = cachedFrameWholeDecay(ptuData)
+        counts = [];
+        dtNs = [];
+        srcInfo = struct('mode', 'unknown', 'native', false, 'binned', false, 'tAxisNs', [], 'widthNs', []);
+        try
+            [counts, dtNs, srcInfo] = tcspcFromWholeFile_native(ptuData);
+        catch
+            counts = [];
+            dtNs = [];
+        end
+    end
+
+    function lbl = currentTcspcLabel()
+        if ~isempty(app.seriesData) && numel(app.seriesData) > 1 && ...
+                ~isempty(app.currentFrame) && app.currentFrame >= 1 && app.currentFrame <= numel(app.seriesData)
+            lbl = sprintf('Frame %d', app.currentFrame);
+        else
+            lbl = 'Whole-file';
+        end
+    end
+
     function showTauMean()
         if isempty(app.flim)
             addStatus('No FLIM result available.');
@@ -2059,24 +2197,33 @@ function Luminosa_GUI
                 'widthNs', widthNs, 'dtNs', [], 'rawCountsNative', countsNative(:), 'source', srcInfo);
         else
             binsPerOct = app.txtBins.Value;
-            [countsShift, shiftBins, shiftNs, peakIdx, displayStartIdx] = shiftDecayForIRFDisplay(countsNative, dtNs);
+            [countsShift, shiftBins, shiftNs, peakIdx, riseIdx] = shiftDecayForIRFDisplay(countsNative, dtNs);
             [tBinNs, cDensity, cInt, edgesNs, widthNs] = logBinTCSPC(countsShift, dtNs, binsPerOct);
             app.tcspcGlobal = struct('tBinNs', tBinNs, 'cDensity', cDensity, 'cBin', cInt, ...
                 'edgesNs', edgesNs, 'widthNs', widthNs, 'dtNs', dtNs, 'rawCountsNative', countsNative(:), ...
                 'rawCountsShift', countsShift(:), 'shiftBins', shiftBins, 'shiftNs', shiftNs, ...
-                'peakIdx', peakIdx, 'displayStartIdx', displayStartIdx, 'source', srcInfo);
+                'peakIdx', peakIdx, 'riseIdx', riseIdx, 'displayStartIdx', riseIdx, 'source', srcInfo);
         end
 
         residualDensity = [];
         fitDensityPlot = [];
+        if ~isempty(app.globalFit)
+            app.globalFit = refreshGlobalFitDisplayCache(app.globalFit, app.tcspcGlobal, app.txtBins.Value);
+        end
         if ~isempty(app.globalFit) && isfield(app.globalFit, 'fitDensity') && ~isempty(app.globalFit.fitDensity)
             fitDensityPlot = app.globalFit.fitDensity(:);
             n = min(numel(app.tcspcGlobal.cDensity), numel(fitDensityPlot));
             residualDensity = app.tcspcGlobal.cDensity(1:n) - fitDensityPlot(1:n);
-            setFitSummary(app.globalFit.summaryLines);
+            summaryLines = app.globalFit.summaryLines;
+            if isfield(app.globalFit, 'displayChi2red') && ~isempty(app.globalFit.displayChi2red) && isfinite(app.globalFit.displayChi2red)
+                summaryLines = [{sprintf('Display chi2/ndf = %.4g', app.globalFit.displayChi2red)}, summaryLines];
+            end
+            summaryLines{end+1} = sprintf('Display bins/octave = %.0f', app.txtBins.Value);
+            setFitSummary(summaryLines);
         else
-            setFitSummary({sprintf('Whole-file source: %s', srcInfo.mode), ...
+            setFitSummary({sprintf('%s source: %s', currentTcspcLabel(), srcInfo.mode), ...
                            sprintf('IRF model: %s', app.dropIRF.Value), ...
+                           sprintf('Display bins/octave = %.0f', app.txtBins.Value), ...
                            'No automatic fit available.'});
         end
 
@@ -2090,17 +2237,14 @@ function Luminosa_GUI
         hold(app.axTCSPC, 'on');
         legendLines = {'Whole-file TCSPC'};
 
-        if ensureGlobalIRF(false) && isfield(app.tcspcGlobal, 'dtNs') && ~isempty(app.tcspcGlobal.dtNs) ...
-                && abs(app.irfGlobalDtNs - app.tcspcGlobal.dtNs) < 1e-6
-            irfDisp = app.irfGlobal(:);
-            if isfield(app.tcspcGlobal, 'shiftBins') && app.tcspcGlobal.shiftBins < numel(irfDisp)
-                irfDisp = irfDisp(app.tcspcGlobal.shiftBins+1:end);
-            end
+        [irfDispBase, ~, ~] = getWholeFileIRFForTargetGrid(app.tcspcGlobal.dtNs, numel(app.tcspcGlobal.rawCountsNative));
+        if ~isempty(irfDispBase)
+            irfDisp = applyDisplayShiftToDecay(irfDispBase(:), app.tcspcGlobal.shiftBins);
             irfDisp = max(irfDisp, 0);
             if ~isempty(irfDisp) && max(irfDisp) > 0
                 irfScale = max(app.tcspcGlobal.cBin) / max(irfDisp);
                 irfScaled = irfDisp * irfScale;
-                [tIRFNs, irfDensity] = logBinTCSPC(irfScaled, app.irfGlobalDtNs, app.txtBins.Value);
+                [tIRFNs, irfDensity] = logBinTCSPC(irfScaled, app.tcspcGlobal.dtNs, app.txtBins.Value);
                 irfDensity = clipIrfDisplay(irfDensity, 1e-1);
                 plot(app.axTCSPC, tIRFNs*1e-9, irfDensity, 'b--', 'LineWidth', 1.1);
                 legendLines{end+1} = 'Whole-file IRF (scaled)';
@@ -2117,7 +2261,7 @@ function Luminosa_GUI
         app.axTCSPC.XScale = 'linear';
         ylabel(app.axTCSPC, 'Counts / ns');
         applyLogYGrid(app.axTCSPC);
-        title(app.axTCSPC, sprintf('Whole-file TCSPC + whole-file IRF (%s)', app.dropIRF.Value));
+        title(app.axTCSPC, sprintf('%s TCSPC + whole-file IRF (%s)', currentTcspcLabel(), app.dropIRF.Value));
         setSmallTitles();
         setTcspcXLim(app.tcspcGlobal.tBinNs*1e-9);
 
@@ -2199,6 +2343,84 @@ function Luminosa_GUI
         end
     end
 
+    function [irfUse, irfMetaUse, note] = getWholeFileIRFForTargetGrid(targetDtNs, targetNBins)
+        irfUse = [];
+        irfMetaUse = struct();
+        note = '';
+
+        if nargin < 2 || isempty(targetNBins)
+            targetNBins = [];
+        end
+        if isempty(targetDtNs) || ~isfinite(targetDtNs) || targetDtNs <= 0
+            return;
+        end
+        if ~ensureGlobalIRF(false) || isempty(app.irfGlobal)
+            return;
+        end
+
+        if isempty(targetNBins)
+            targetNBins = numel(app.irfGlobal);
+        else
+            targetNBins = max(1, round(double(targetNBins)));
+        end
+
+        irfMetaUse = app.irfGlobalMeta;
+        sameDt = isempty(app.irfGlobalDtNs) || abs(app.irfGlobalDtNs - targetDtNs) < 1e-6;
+        if sameDt && numel(app.irfGlobal) == targetNBins
+            irfUse = app.irfGlobal(:);
+            note = 'native';
+            return;
+        end
+
+        [irfUse, okRebin] = rebinIRFToTargetGrid(app.irfGlobal(:), app.irfGlobalDtNs, targetDtNs, targetNBins);
+        if ~okRebin
+            irfUse = [];
+            irfMetaUse = struct();
+            note = '';
+            return;
+        end
+
+        if isstruct(irfMetaUse)
+            irfMetaUse.rebinnedFromDtNs = app.irfGlobalDtNs;
+            irfMetaUse.rebinnedToDtNs = targetDtNs;
+            irfMetaUse.rebinnedToNBins = targetNBins;
+        end
+        note = sprintf('rebinned from %.3f ps to %.3f ps', 1e3*app.irfGlobalDtNs, 1e3*targetDtNs);
+    end
+
+    function [irfDst, ok] = rebinIRFToTargetGrid(irfSrc, dtSrcNs, dtDstNs, nDst)
+        irfDst = [];
+        ok = false;
+
+        irfSrc = max(double(irfSrc(:)), 0);
+        if isempty(irfSrc) || ~isfinite(dtSrcNs) || ~isfinite(dtDstNs) || dtSrcNs <= 0 || dtDstNs <= 0 || ...
+                isempty(nDst) || ~isfinite(nDst) || nDst < 1
+            return;
+        end
+
+        nDst = max(1, round(double(nDst)));
+        srcEdges = (0:numel(irfSrc))' * dtSrcNs;
+        srcCum = [0; cumsum(irfSrc)];
+        dstEdges = (0:nDst)' * dtDstNs;
+
+        dstCum = zeros(size(dstEdges));
+        inRange = dstEdges > srcEdges(1) & dstEdges < srcEdges(end);
+        if any(inRange)
+            dstCum(inRange) = interp1(srcEdges, srcCum, dstEdges(inRange), 'linear');
+        end
+        dstCum(dstEdges >= srcEdges(end)) = srcCum(end);
+
+        irfDst = diff(dstCum);
+        irfDst = max(irfDst(:), 0);
+        s = sum(irfDst);
+        if ~(isfinite(s) && s > 0)
+            irfDst = [];
+            return;
+        end
+        irfDst = irfDst ./ s;
+        ok = true;
+    end
+
     function ok = autoFitGlobalTCSPC()
         ok = false;
         app.globalFit = [];
@@ -2222,12 +2444,41 @@ function Luminosa_GUI
         [bestFit, summaryLines] = chooseBestDecayModel(fitAll);
         bestFit.summaryLines = summaryLines;
         bestFit.source = srcInfo;
-        [countsShift, shiftBins, shiftNs, peakIdx, displayStartIdx] = shiftDecayForIRFDisplay(countsNative, dtNs); %#ok<ASGLU>
-        [tFitNs, fitDensity] = logBinTCSPC(bestFit.fitCountsRawFull(shiftBins+1:end), dtNs, app.txtBins.Value);
-        bestFit.tBinNs = tFitNs;
-        bestFit.fitDensity = fitDensity;
+        [countsShift, shiftBins, shiftNs, peakIdx, riseIdx] = shiftDecayForIRFDisplay(countsNative, dtNs); %#ok<ASGLU>
+        tcspcGlobalTmp = struct('dtNs', dtNs, 'rawCountsNative', countsNative(:), 'rawCountsShift', countsShift(:), ...
+            'shiftBins', shiftBins, 'shiftNs', shiftNs, 'peakIdx', peakIdx, 'riseIdx', riseIdx, 'cBin', [], 'cDensity', []);
+        bestFit = refreshGlobalFitDisplayCache(bestFit, tcspcGlobalTmp, app.txtBins.Value);
         app.globalFit = bestFit;
         ok = true;
+    end
+
+    function fitOut = refreshGlobalFitDisplayCache(fitIn, tcspcGlobalData, binsPerOct)
+        fitOut = fitIn;
+        if isempty(fitIn) || ~isfield(fitIn, 'fitCountsRawFull') || isempty(fitIn.fitCountsRawFull) || ...
+                isempty(tcspcGlobalData) || ~isfield(tcspcGlobalData, 'dtNs') || isempty(tcspcGlobalData.dtNs) || ...
+                ~isfield(tcspcGlobalData, 'shiftBins') || isempty(tcspcGlobalData.shiftBins)
+            return;
+        end
+
+        fitCountsShift = applyDisplayShiftToDecay(fitIn.fitCountsRawFull, tcspcGlobalData.shiftBins);
+        [tFitNs, fitDensity, fitCountsLog, fitEdgesNs] = logBinTCSPC(fitCountsShift, tcspcGlobalData.dtNs, binsPerOct);
+        fitOut.fitCountsShift = fitCountsShift(:);
+        fitOut.tBinNs = tFitNs(:);
+        fitOut.fitDensity = fitDensity(:);
+        fitOut.fitCountsLog = fitCountsLog(:);
+        fitOut.fitEdgesNs = fitEdgesNs(:);
+        fitOut.displayBinsPerOct = binsPerOct;
+        fitOut.displayChi2red = NaN;
+
+        if isfield(tcspcGlobalData, 'cBin') && ~isempty(tcspcGlobalData.cBin) && isfield(fitOut, 'coeff')
+            n = min(numel(tcspcGlobalData.cBin), numel(fitCountsLog));
+            if n > 0
+                nParams = numel(fitOut.coeff);
+                chi2 = sum((double(tcspcGlobalData.cBin(1:n)) - double(fitCountsLog(1:n))).^2 ./ max(double(fitCountsLog(1:n)), 1));
+                ndf = max(n - nParams, 1);
+                fitOut.displayChi2red = chi2 / ndf;
+            end
+        end
     end
 
     function addGlobalFitSummaryText()
@@ -2546,6 +2797,9 @@ function flim = quickFLIMFromTCSPCFlexible(ptuOut, useGPU)
         else
             error('tcspc_pix_mt exists but tcspc_mt_centers_ns is missing.');
         end
+    elseif isfield(ptuOut, 'im_tcspc') && ~isempty(ptuOut.im_tcspc)
+        [cube, dt_ns] = buildLinearTcspcCubeFromPhotonLists(ptuOut);
+        tAxisNs = ((1:size(cube, 3)) - 0.5) * dt_ns;
     else
         error('No TCSPC cube available.');
     end
@@ -2605,6 +2859,59 @@ function flim = quickFLIMFromTCSPCFlexible(ptuOut, useGPU)
     flim.total.globalDecay = double(globalDecay(:));
     flim.total.tAxisNs = double(tAxisNs(:));
     flim.total.t0Bin = t0Bin;
+end
+
+function [cube, dt_ns] = buildLinearTcspcCubeFromPhotonLists(ptuOut)
+    if ~isfield(ptuOut, 'im_col') || ~isfield(ptuOut, 'im_line') || ~isfield(ptuOut, 'im_chan') || ...
+            ~isfield(ptuOut, 'im_tcspc') || isempty(ptuOut.im_tcspc)
+        error('Per-photon TCSPC data is missing.');
+    end
+
+    nx = double(ptuOut.head.ImgHdr_PixX);
+    ny = double(ptuOut.head.ImgHdr_PixY);
+    nPix = nx * ny;
+    dt_ns = ptuOut.head.MeasDesc_Resolution * 1e9;
+
+    if isfield(ptuOut, 'dind') && ~isempty(ptuOut.dind)
+        dind = double(ptuOut.dind(:));
+    else
+        dind = unique(double(ptuOut.im_chan(:)));
+    end
+    nCh = numel(dind);
+
+    if isfield(ptuOut, 'Ngate') && ~isempty(ptuOut.Ngate)
+        Ngate = double(ptuOut.Ngate);
+    else
+        Ngate = double(max(ptuOut.im_tcspc(:)));
+    end
+    Ngate = max(1, Ngate);
+
+    chMapLUT = zeros(1, 256, 'double');
+    chMapLUT(double(dind) + 1) = 1:nCh;
+
+    x = double(ptuOut.im_col(:));
+    y = double(ptuOut.im_line(:));
+    g = double(ptuOut.im_tcspc(:));
+    chLocal = chMapLUT(double(ptuOut.im_chan(:)) + 1);
+    chLocal = chLocal(:);
+
+    x = x(:);
+    y = y(:);
+    g = g(:);
+
+    valid = (chLocal >= 1) & (chLocal <= nCh) & ...
+            (x >= 1) & (x <= nx) & ...
+            (y >= 1) & (y <= ny) & ...
+            (g >= 1) & (g <= Ngate);
+
+    x = x(valid);
+    y = y(valid);
+    g = g(valid);
+    chLocal = chLocal(valid);
+
+    grp3 = x + (y - 1) * nx + (g - 1) * nPix + (chLocal - 1) * (nPix * Ngate);
+    counts = accumarray(grp3, 1, [nPix * Ngate * nCh, 1], @sum, 0);
+    cube = reshape(counts, [nx, ny, Ngate, nCh]);
 end
 
 function [counts, dtNs, srcInfo] = tcspcFromROI_native(ptuOut, roi)
@@ -2674,6 +2981,21 @@ end
 function [counts, dtNs, srcInfo] = tcspcFromWholeFile_native(ptuOut)
 % Whole-file TCSPC with best available resolution.
     srcInfo = struct('mode', 'unknown', 'native', false, 'binned', false, 'tAxisNs', [], 'widthNs', []);
+
+    if isfield(ptuOut, 'cachedGlobalDecayCounts') && ~isempty(ptuOut.cachedGlobalDecayCounts)
+        counts = double(ptuOut.cachedGlobalDecayCounts(:));
+        if isfield(ptuOut, 'cachedGlobalDecayDtNs') && ~isempty(ptuOut.cachedGlobalDecayDtNs)
+            dtNs = ptuOut.cachedGlobalDecayDtNs;
+        else
+            dtNs = [];
+        end
+        if isfield(ptuOut, 'cachedGlobalDecaySrcInfo') && ~isempty(ptuOut.cachedGlobalDecaySrcInfo)
+            srcInfo = ptuOut.cachedGlobalDecaySrcInfo;
+        else
+            srcInfo.mode = 'cached frame decay';
+        end
+        return;
+    end
 
     if isfield(ptuOut, 'im_tcspc_native') && ~isempty(ptuOut.im_tcspc_native)
         dtNs = getNativeTcspcResolutionNs(ptuOut.head);
@@ -2747,35 +3069,105 @@ function dtNs = getNativeTcspcResolutionNs(head)
     end
 end
 
-function [countsShift, shiftBins, shiftNs, peakIdx, startIdx] = shiftDecayForIRFDisplay(counts, dtNs)
-% Shift the decay for display, but keep a short pre-peak region so the IRF
-% leading edge remains visible on the plot. Fitting still uses the full decay.
+function [countsShift, shiftBins, shiftNs, peakIdx, riseIdx] = shiftDecayForIRFDisplay(counts, dtNs)
+% Circular-shift the decay for display while preserving the full TCSPC.
+% The rise onset is moved left so no more than ~0.5 ns precedes it.
     counts = double(counts(:));
-    if isempty(counts)
+    if isempty(counts) || isempty(dtNs) || ~isfinite(dtNs) || dtNs <= 0
         countsShift = counts;
         shiftBins = 0;
         shiftNs = 0;
         peakIdx = 1;
-        startIdx = 1;
+        riseIdx = 1;
         return;
     end
 
     [~, peakIdx] = max(counts);
     peakIdx = max(1, peakIdx);
+    riseIdx = estimateDecayRiseStartIdx(counts, dtNs, peakIdx);
 
-    prePeakNs = 0.30;
-    prePeakBins = max(8, round(prePeakNs / max(dtNs, eps)));
-    prePeakBins = min(prePeakBins, peakIdx - 1);
-
-    startIdx = max(1, peakIdx - prePeakBins);
-    countsShift = counts(startIdx:end);
-    shiftBins = startIdx - 1;
+    preRiseNs = 0.50;
+    preRiseBins = max(0, round(preRiseNs / max(dtNs, eps)));
+    targetRiseIdx = min(numel(counts), preRiseBins + 1);
+    shiftBins = max(0, riseIdx - targetRiseIdx);
     shiftNs = shiftBins * dtNs;
+    countsShift = applyDisplayShiftToDecay(counts, shiftBins);
+end
+
+function riseIdx = estimateDecayRiseStartIdx(counts, dtNs, peakIdx)
+    y = max(double(counts(:)), 0);
+    n = numel(y);
+    if n < 2
+        riseIdx = 1;
+        return;
+    end
+
+    peakIdx = max(1, min(n, round(peakIdx)));
+    if peakIdx <= 1
+        riseIdx = 1;
+        return;
+    end
+
+    smoothBins = max(1, min(n, ceil(0.08 / max(dtNs, eps))));
+    if smoothBins > 1 && mod(smoothBins, 2) == 0
+        smoothBins = smoothBins - 1;
+    end
+    if smoothBins > 1
+        kernel = ones(smoothBins, 1) / smoothBins;
+        ySmooth = conv(y, kernel, 'same');
+    else
+        ySmooth = y;
+    end
+
+    ySorted = sort(ySmooth);
+    nBase = max(1, min(numel(ySorted), round(0.25 * numel(ySorted))));
+    baselineSlice = ySorted(1:nBase);
+    baseline = mean(baselineSlice);
+    noise = std(baselineSlice);
+    amp = max(ySmooth(peakIdx) - baseline, 0);
+    if amp <= 0
+        riseIdx = peakIdx;
+        return;
+    end
+
+    runBins = max(2, min([12, peakIdx, ceil(0.08 / max(dtNs, eps))]));
+    riseIdx = sustainedThresholdCrossing(ySmooth, peakIdx, baseline + max(4 * noise, 0.02 * amp), runBins);
+    if isempty(riseIdx)
+        riseIdx = sustainedThresholdCrossing(ySmooth, peakIdx, baseline + max(2 * noise, 0.01 * amp), runBins);
+    end
+    if isempty(riseIdx)
+        riseIdx = find(ySmooth(1:peakIdx) >= (baseline + 0.01 * amp), 1, 'first');
+    end
+    if isempty(riseIdx)
+        riseIdx = peakIdx;
+    end
+    riseIdx = max(1, min(peakIdx, riseIdx));
+end
+
+function idx = sustainedThresholdCrossing(y, peakIdx, threshold, runBins)
+    idx = [];
+    if peakIdx < 1
+        return;
+    end
+
+    above = y(1:peakIdx) >= threshold;
+    if isempty(above)
+        return;
+    end
+
+    runBins = max(1, min(numel(above), round(runBins)));
+    if runBins == 1
+        idx = find(above, 1, 'first');
+        return;
+    end
+
+    runHits = conv(double(above), ones(runBins, 1), 'valid');
+    idx = find(runHits >= runBins, 1, 'first');
 end
 
 function [tBinNs, cDensity, cInt, edgesNs, widthNs] = logBinTCSPC(counts, dtNs, binsPerOct)
-% Logarithmic binning for decay display after left-shifting.
-% Display quantity is count density (counts / ns), not integrated counts.
+% Mixed linear/log binning for decay display.
+% The first 0.5 ns remain at native resolution; later bins expand logarithmically.
     if nargin < 3 || isempty(binsPerOct)
         binsPerOct = 8;
     end
@@ -2792,12 +3184,22 @@ function [tBinNs, cDensity, cInt, edgesNs, widthNs] = logBinTCSPC(counts, dtNs, 
         return;
     end
 
-    nOct = max(1, log2(Nt));
-    nBins = max(16, ceil(nOct * binsPerOct));
-    edgesIdx = unique(round(logspace(0, log10(Nt + 1), nBins + 1)));
-    edgesIdx(1) = 1;
-    edgesIdx(end) = Nt + 1;
-    edgesIdx = unique(edgesIdx(:));
+    linearNs = 0.50;
+    nLinear = min(Nt, max(1, ceil(linearNs / max(dtNs, eps))));
+    linearEdgesIdx = (1:(nLinear + 1)).';
+
+    if nLinear < Nt
+        remNt = Nt - nLinear;
+        nOct = max(1, log2(remNt));
+        nBinsLog = max(16, ceil(nOct * binsPerOct));
+        logEdgesRel = unique(round(logspace(0, log10(remNt + 1), nBinsLog + 1)));
+        logEdgesRel(1) = 1;
+        logEdgesRel(end) = remNt + 1;
+        logEdgesIdx = nLinear + logEdgesRel(:);
+        edgesIdx = unique([linearEdgesIdx; logEdgesIdx(2:end)]);
+    else
+        edgesIdx = linearEdgesIdx;
+    end
 
     nBins = numel(edgesIdx) - 1;
     cInt = zeros(nBins, 1);
@@ -2812,7 +3214,9 @@ function [tBinNs, cDensity, cInt, edgesNs, widthNs] = logBinTCSPC(counts, dtNs, 
         widthNs(i) = (b - a + 1) * dtNs;
         t0 = (a - 1) * dtNs;
         t1 = b * dtNs;
-        if t0 <= 0
+        if widthNs(i) <= (1 + 1e-12) * dtNs || t0 < linearNs
+            tBinNs(i) = 0.5 * (t0 + t1);
+        elseif t0 <= 0
             tBinNs(i) = max(dtNs/2, t1/2);
         else
             tBinNs(i) = sqrt(t0 * t1);
@@ -2871,11 +3275,21 @@ function [tauFit, coeff, fitCountsRawFull, fitCountsShift, edgesRawNs] = fitRoiT
     tauFit = pfit(:).';
 
     shiftBins = max(0, round(shiftBins));
-    if shiftBins >= numel(fitCountsRawFull)
-        fitCountsShift = fitCountsRawFull(:);
-    else
-        fitCountsShift = fitCountsRawFull(shiftBins+1:end);
+    fitCountsShift = applyDisplayShiftToDecay(fitCountsRawFull, shiftBins);
+end
+
+function countsShift = applyDisplayShiftToDecay(counts, shiftBins)
+    counts = double(counts(:));
+    if isempty(counts)
+        countsShift = counts;
+        return;
     end
+    shiftBins = max(0, round(shiftBins));
+    if shiftBins == 0
+        countsShift = counts;
+        return;
+    end
+    countsShift = circshift(counts, -shiftBins);
 end
 
 function [err, coeff, fitCounts] = roiTcspcErrRawIRF(tau, counts, dtNs, irf, includeBG)
