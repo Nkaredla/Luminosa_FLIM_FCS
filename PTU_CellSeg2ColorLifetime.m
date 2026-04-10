@@ -112,6 +112,8 @@ function res = PTU_CellSeg2ColorLifetime(name, cfg)
 
     segImage = countsImageFromGated(gatedCh1D1, nx, ny);
     fitImage = countsImageFromGated(gatedCh2D2, nx, ny);
+    [fastTauIntensityCh1D1, fastTauImageCh1D1] = buildFastTauImageFromGated(gatedCh1D1, nx, ny, rawDtNs, cfg.fastTauMinPhotonCount);
+    [fastTauIntensityCh2D2, fastTauImageCh2D2] = buildFastTauImageFromGated(gatedCh2D2, nx, ny, rawDtNs, cfg.fastTauMinPhotonCount);
     updateProgressState(progressState, 'Gated images built', struct('segImage', segImage, 'fitImage', fitImage));
     logVerbose(cfg, 'Built gated images for d%d/pulse%d and d%d/pulse%d.', ...
         cfg.segDetectorIndex, cfg.segPulseIndex, cfg.fitDetectorIndex, cfg.fitPulseIndex);
@@ -239,6 +241,10 @@ function res = PTU_CellSeg2ColorLifetime(name, cfg)
         'labelImage', labelImage, ...
         'averageLifetimeImageNs', tauImage, ...
         'intensityAveragedLifetimeImageNs', tauImage, ...
+        'fastTauIntensityCh1D1', fastTauIntensityCh1D1, ...
+        'fastTauIntensityCh2D2', fastTauIntensityCh2D2, ...
+        'fastTauImageCh1D1Ns', fastTauImageCh1D1, ...
+        'fastTauImageCh2D2Ns', fastTauImageCh2D2, ...
         'componentAmplitudeMapsCh2D2', componentAmpMaps, ...
         'componentFractionMapsCh2D2', componentFracMaps, ...
         'segmentationDebug', segDebug);
@@ -323,6 +329,11 @@ function cfg = setDefaultCfg(cfg)
     defaults.fillWholeCellArea = true;
     defaults.useWatershed = true;
     defaults.watershedH = 0.5;
+    defaults.fastTauMinPhotonCount = 1;
+    defaults.fastTauRangeNs = [];
+    defaults.fastTauIntensityLowerPct = 30;
+    defaults.fastTauIntensityUpperPct = 99.5;
+    defaults.saveFastTauOverlays = true;
 
     defaults.gateThresholdFrac = 0.15;
     defaults.gatePreBins = 100;
@@ -632,6 +643,44 @@ function img = countsImageFromGated(gated, nx, ny)
     end
     cnt = accumarray(round(gated.pix(:)), 1, [nx * ny, 1], @sum, 0);
     img = reshape(cnt, [nx, ny]);
+end
+
+function [intensityMap, tauMap] = buildFastTauImageFromGated(gated, nx, ny, resolutionNs, minPhotons)
+    intensityMap = zeros(nx, ny);
+    tauMap = nan(nx, ny);
+    if nargin < 5 || isempty(minPhotons) || ~isfinite(minPhotons) || minPhotons < 1
+        minPhotons = 1;
+    end
+    if isempty(gated) || ~isfield(gated, 'pix') || isempty(gated.pix) || ~isfield(gated, 't') || isempty(gated.t)
+        return;
+    end
+
+    pix = round(double(gated.pix(:)));
+    t = double(gated.t(:));
+    valid = isfinite(pix) & isfinite(t) & pix >= 1 & pix <= (nx * ny);
+    if ~any(valid)
+        return;
+    end
+
+    pix = pix(valid);
+    t = t(valid);
+    cnt = accumarray(pix, 1, [nx * ny, 1], @sum, 0);
+    sum1 = accumarray(pix, t, [nx * ny, 1], @sum, 0);
+    sum2 = accumarray(pix, t.^2, [nx * ny, 1], @sum, 0);
+
+    tauFlat = nan(nx * ny, 1);
+    validTau = cnt >= minPhotons;
+    if any(validTau)
+        mean1 = zeros(nx * ny, 1);
+        mean2 = zeros(nx * ny, 1);
+        mean1(validTau) = (sum1(validTau) ./ cnt(validTau)) * resolutionNs;
+        mean2(validTau) = (sum2(validTau) ./ cnt(validTau)) * (resolutionNs^2);
+        varT = max(mean2 - mean1.^2, 0);
+        tauFlat(validTau) = sqrt(varT(validTau));
+    end
+
+    intensityMap = reshape(cnt, [nx, ny]);
+    tauMap = reshape(tauFlat, [nx, ny]);
 end
 
 function [labelImage, segMask, roiStats, segDebug] = segmentSparseCells(segImage, cfg)
@@ -1513,6 +1562,18 @@ function saved = saveResultOutputs(res, name, cfg, figHandles)
         saved.roiSummaryCsv = '';
     end
 
+    if isfield(cfg, 'saveFastTauOverlays') && cfg.saveFastTauOverlays
+        saved.fastTauOverlayCh1Png = fullfile(outputDir, [outputStem '_fasttau_ch1d1_overlay.png']);
+        saved.fastTauOverlayCh2Png = fullfile(outputDir, [outputStem '_fasttau_ch2d2_overlay.png']);
+        saveFastTauOverlayLocal(res.images.fastTauIntensityCh1D1, res.images.fastTauImageCh1D1Ns, ...
+            saved.fastTauOverlayCh1Png, sprintf('Fast \\tau: d%d/pulse%d', res.segDetectorIndex, res.config.segPulseIndex), cfg);
+        saveFastTauOverlayLocal(res.images.fastTauIntensityCh2D2, res.images.fastTauImageCh2D2Ns, ...
+            saved.fastTauOverlayCh2Png, sprintf('Fast \\tau: d%d/pulse%d', res.fitDetectorIndex, res.config.fitPulseIndex), cfg);
+    else
+        saved.fastTauOverlayCh1Png = '';
+        saved.fastTauOverlayCh2Png = '';
+    end
+
     if cfg.saveFigures && ~isempty(figHandles)
         saved.summaryFigurePng = fullfile(outputDir, [outputStem '_summary.png']);
         saved.fitFigurePng = fullfile(outputDir, [outputStem '_fits.png']);
@@ -1619,6 +1680,100 @@ function saveFigurePng(figHandle, outPath)
     catch
         print(figHandle, outPath, '-dpng', '-r200');
     end
+end
+
+function saveFastTauOverlayLocal(intensityMap, tauMap, outPath, titleText, cfg)
+    if isempty(intensityMap) || isempty(tauMap)
+        return;
+    end
+    validTau = isfinite(tauMap);
+    if ~any(validTau(:))
+        return;
+    end
+
+    alphaMap = normalizeIntensityMapLocal(intensityMap, cfg.fastTauIntensityLowerPct, cfg.fastTauIntensityUpperPct);
+    brightnessMap = log10(0.001 + alphaMap.^2);
+    tauRangeNs = resolveFastTauRangeLocal(tauMap, cfg.fastTauRangeNs);
+
+    cmap = jet(256);
+    cmap = cmap(30:end-30, :);
+
+    fig = figure('Visible', 'off', 'Color', 'w', 'Position', [100 100 900 760]);
+    cleanupFig = onCleanup(@() close(fig)); %#ok<NASGU>
+    try
+        hIm = cim(double(tauMap), brightnessMap, tauRangeNs, 'v', cmap);
+        ax = ancestor(hIm, 'axes');
+    catch
+        ax = axes('Parent', fig);
+        imagesc(ax, tauMap', 'AlphaData', alphaMap');
+        axis(ax, 'image');
+        colormap(ax, cmap);
+        colorbar(ax);
+    end
+    title(ax, titleText, 'Interpreter', 'none');
+    set(fig, 'InvertHardcopy', 'off');
+    drawnow;
+    print(fig, outPath, '-dpng', '-r300');
+end
+
+function intensityNorm = normalizeIntensityMapLocal(intensityMap, lowerPct, upperPct)
+    intensityMap = double(intensityMap);
+    intensityNorm = zeros(size(intensityMap));
+    validVals = intensityMap(isfinite(intensityMap));
+    if isempty(validVals)
+        return;
+    end
+
+    lb = prctile(validVals, lowerPct);
+    ub = prctile(validVals, upperPct);
+    if ~isfinite(lb)
+        lb = min(validVals);
+    end
+    if ~isfinite(ub)
+        ub = max(validVals);
+    end
+    if ub <= lb
+        ub = lb + eps;
+    end
+
+    intensityMap = min(max(intensityMap, lb), ub);
+    intensityMap = intensityMap - lb;
+    scale = max(intensityMap(:));
+    if scale > 0
+        intensityNorm = intensityMap ./ scale;
+    end
+end
+
+function tauRangeNs = resolveFastTauRangeLocal(tauMap, tauRangeCfg)
+    if nargin >= 2 && isnumeric(tauRangeCfg) && numel(tauRangeCfg) == 2 && ...
+            all(isfinite(tauRangeCfg(:))) && tauRangeCfg(2) > tauRangeCfg(1)
+        tauRangeNs = double(tauRangeCfg(:)).';
+        return;
+    end
+
+    vals = double(tauMap(isfinite(tauMap)));
+    vals = vals(vals > 0);
+    if isempty(vals)
+        tauRangeNs = [0 1];
+        return;
+    end
+
+    lo = prctile(vals, 5);
+    hi = prctile(vals, 95);
+    if ~isfinite(lo)
+        lo = min(vals);
+    end
+    if ~isfinite(hi)
+        hi = max(vals);
+    end
+    if hi <= lo
+        hi = max(vals);
+        lo = min(vals);
+    end
+    if hi <= lo
+        hi = lo + eps;
+    end
+    tauRangeNs = [lo hi];
 end
 
 function out = ternaryString(cond, trueVal, falseVal)
