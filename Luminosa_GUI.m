@@ -59,6 +59,22 @@ function Luminosa_GUI
     app.seriesFlimCache = [];       % Pre-computed FLIM images for fast scrolling
     app.seriesFrameFileMap = [];    % Map each frame to its source PTU file
     app.ptuOutOriginal = [];        % Original full-file data for global IRF calculation
+    app.mietSourceEntries = struct([]);
+    app.mietResultEntries = struct([]);
+    app.mietCalibration = struct('file', '', 'label', '', 'heightNm', [], 'lifetimeNs', []);
+    app.mietDisplayMode = 'height';
+    app.axMIET = [];
+    app.cbMIET = [];
+    app.dropMietDataset = [];
+    app.txtMietInfo = [];
+    app.lblMietStatus = [];
+    app.editMietCalibPath = [];
+    app.editMietCalibMin = [];
+    app.editMietCalibMax = [];
+    app.chkMietAutoRange = [];
+    app.editMietMin = [];
+    app.editMietMax = [];
+    app.lastMietExportFile = '';
 
     app.fig = uifigure('Name','Luminosa FLIM / ISM-FLIM / FCS', 'Position',[80 60 1080 680]);
     app.grid = uigridlayout(app.fig, [1 1]);
@@ -67,9 +83,11 @@ function Luminosa_GUI
 
     tabFLIM = uitab(app.tg, 'Title', 'FLIM / ISM-FLIM');
     tabFCS  = uitab(app.tg, 'Title', 'FCS');
+    tabMIET = uitab(app.tg, 'Title', 'MIET');
 
     buildFLIMTab(tabFLIM);
     buildFCSTab(tabFCS);
+    buildMIETTab(tabMIET);
 
     function buildFLIMTab(parent)
         g = uigridlayout(parent, [1 2]);
@@ -129,7 +147,7 @@ function Luminosa_GUI
         app.btnQuickFLIM = uibutton(rowRun, 'Text', 'FLIM', 'ButtonPushedFcn', @onQuickFLIM, 'FontSize', 11);
         app.btnISMFLIM = uibutton(rowRun, 'Text', 'ISM', 'ButtonPushedFcn', @onISMFLIM, 'FontSize', 11);
         app.btnShowIntensity = uibutton(rowRun, 'Text', 'Intensity', 'ButtonPushedFcn', @onShowIntensity, 'FontSize', 11);
-        app.btnShowTau = uibutton(rowRun, 'Text', 'Tau', 'ButtonPushedFcn', @onShowTauMean, 'FontSize', 11);
+        app.btnShowTau = uibutton(rowRun, 'Text', 'Sum FLIM', 'ButtonPushedFcn', @onShowTauMean, 'FontSize', 11);
 
         % Row 5
         rowROI = uigridlayout(ctlGrid, [1 3]);
@@ -313,6 +331,98 @@ function Luminosa_GUI
         title(app.axFCS, 'FCS');
     end
 
+    function buildMIETTab(parent)
+        g = uigridlayout(parent, [1 2]);
+        g.ColumnWidth = {440, '1x'};
+        g.RowHeight = {'1x'};
+        g.Padding = [4 4 4 4];
+        g.ColumnSpacing = 6;
+
+        ctl = uipanel(g, 'Title', 'Controls');
+        axp = uipanel(g, 'Title', 'Display');
+
+        try
+            ctl.Scrollable = 'on';
+        catch
+        end
+
+        ctlInner = uipanel(ctl, 'BorderType', 'none');
+        ctlInner.Units = 'pixels';
+
+        rowHeights = [42, 42, 34, 30, 30, 30, 36, 36, 36, 90];
+        ctlGrid = uigridlayout(ctlInner, [numel(rowHeights) 1]);
+        ctlGrid.RowHeight = num2cell(rowHeights);
+        ctlGrid.RowSpacing = 6;
+        ctlGrid.Padding = [8 8 8 8];
+
+        innerH = sum(rowHeights) + ctlGrid.RowSpacing*(numel(rowHeights)-1) + ctlGrid.Padding(2) + ctlGrid.Padding(4) + 8;
+        ctlInner.Position = [0 0 415 innerH];
+
+        rowSource = uigridlayout(ctlGrid, [1 2]);
+        rowSource.ColumnWidth = {'1x','1x'};
+        rowSource.Padding = [0 0 0 0];
+        uibutton(rowSource, 'Text', 'Use Current Exports', 'ButtonPushedFcn', @onMietUseCurrentExports, 'FontSize', 11);
+        uibutton(rowSource, 'Text', 'Load Export MAT', 'ButtonPushedFcn', @onMietLoadExportMAT, 'FontSize', 11);
+
+        rowVendor = uigridlayout(ctlGrid, [1 2]);
+        rowVendor.ColumnWidth = {'1x','1x'};
+        rowVendor.Padding = [0 0 0 0];
+        uibutton(rowVendor, 'Text', 'Load Calibration', 'ButtonPushedFcn', @onMietLoadCalibration, 'FontSize', 11);
+        uibutton(rowVendor, 'Text', 'Launch MIET-GUI', 'ButtonPushedFcn', @onMietLaunchVendor, 'FontSize', 11);
+
+        rowDataset = uigridlayout(ctlGrid, [1 2]);
+        rowDataset.ColumnWidth = {95, '1x'};
+        rowDataset.Padding = [0 0 0 0];
+        uilabel(rowDataset, 'Text', 'Dataset');
+        app.dropMietDataset = uidropdown(rowDataset, ...
+            'Items', {'No MIET source loaded'}, 'Value', 'No MIET source loaded', ...
+            'ValueChangedFcn', @onMietDatasetChanged);
+
+        rowCalibPath = uigridlayout(ctlGrid, [1 2]);
+        rowCalibPath.ColumnWidth = {95,'1x'};
+        rowCalibPath.Padding = [0 0 0 0];
+        uilabel(rowCalibPath, 'Text', 'Calibration');
+        app.editMietCalibPath = uieditfield(rowCalibPath, 'text', 'Value', '', 'Editable', 'off');
+
+        rowCalibRange = uigridlayout(ctlGrid, [1 3]);
+        rowCalibRange.ColumnWidth = {95,'1x','1x'};
+        rowCalibRange.Padding = [0 0 0 0];
+        uilabel(rowCalibRange, 'Text', 'Calib z (nm)');
+        app.editMietCalibMin = uieditfield(rowCalibRange, 'numeric', 'Value', 0, 'Limits', [-1e6 1e6]);
+        app.editMietCalibMax = uieditfield(rowCalibRange, 'numeric', 'Value', 250, 'Limits', [-1e6 1e6]);
+
+        rowDisplayRange = uigridlayout(ctlGrid, [1 4]);
+        rowDisplayRange.ColumnWidth = {80,55,'1x','1x'};
+        rowDisplayRange.Padding = [0 0 0 0];
+        uilabel(rowDisplayRange, 'Text', 'Height range');
+        app.chkMietAutoRange = uicheckbox(rowDisplayRange, 'Text', 'Auto', 'Value', true, 'ValueChangedFcn', @onMietApplyRange);
+        app.editMietMin = uieditfield(rowDisplayRange, 'numeric', 'Value', 0, 'Limits', [-1e6 1e6], 'ValueChangedFcn', @onMietApplyRange);
+        app.editMietMax = uieditfield(rowDisplayRange, 'numeric', 'Value', 200, 'Limits', [-1e6 1e6], 'ValueChangedFcn', @onMietApplyRange);
+
+        rowCompute = uigridlayout(ctlGrid, [1 2]);
+        rowCompute.ColumnWidth = {'1x','1x'};
+        rowCompute.Padding = [0 0 0 0];
+        uibutton(rowCompute, 'Text', 'Compute Height', 'ButtonPushedFcn', @onMietCompute, 'FontSize', 11);
+        uibutton(rowCompute, 'Text', 'Save MIET MAT', 'ButtonPushedFcn', @onMietSaveMAT, 'FontSize', 11);
+
+        rowDisplayMode = uigridlayout(ctlGrid, [1 2]);
+        rowDisplayMode.ColumnWidth = {'1x','1x'};
+        rowDisplayMode.Padding = [0 0 0 0];
+        uibutton(rowDisplayMode, 'Text', 'Show Lifetime', 'ButtonPushedFcn', @onMietShowLifetime, 'FontSize', 11);
+        uibutton(rowDisplayMode, 'Text', 'Show Height', 'ButtonPushedFcn', @onMietShowHeight, 'FontSize', 11);
+
+        app.lblMietStatus = uilabel(ctlGrid, 'Text', 'Ready.');
+        app.lblMietStatus.WordWrap = 'on';
+
+        app.txtMietInfo = uitextarea(ctlGrid, 'Editable', 'off', ...
+            'Value', {'No MIET source loaded.'});
+
+        axGrid = uigridlayout(axp, [1 1]);
+        axGrid.Padding = [6 6 6 6];
+        app.axMIET = uiaxes(axGrid);
+        title(app.axMIET, 'MIET');
+    end
+
 
     function onLoadPTU(~, ~)
         if isfolder(app.defaultDataPath)
@@ -352,10 +462,13 @@ function Luminosa_GUI
             
             % Clear series data (switch to single file mode)
             app.seriesData = {};
+            app.seriesFolderPath = '';
+            app.seriesFiles = [];
             app.seriesIntensityCache = {};
             app.seriesTcspcPixCache = {};
             app.seriesFlimCache = {};
             app.seriesFrameFileMap = [];
+            app.currentFrame = 1;
             app.currentFrameIndex = 1;
 
             if ~isempty(app.roi) && isvalid(app.roi)
@@ -965,7 +1078,9 @@ function Luminosa_GUI
                 title(app.axImage, sprintf('Frame %d/%d', frameNum, totalFrames));
             end
 
-            if strcmp(requestedDisplayMode, 'tau') && ~isempty(app.flim)
+            if strcmp(requestedDisplayMode, 'file_tau')
+                showFileSummaryOverlay();
+            elseif strcmp(requestedDisplayMode, 'tau') && ~isempty(app.flim)
                 showTauMean();
             end
             
@@ -1058,7 +1173,7 @@ function Luminosa_GUI
     end
 
     function onShowTauMean(~, ~)
-        showTauMean();
+        showFileSummaryOverlay();
     end
 
     function onGammaChanged(~, ~)
@@ -1067,6 +1182,8 @@ function Luminosa_GUI
         switch app.displayMode
             case 'tau'
                 showTauMean();
+            case 'file_tau'
+                showFileSummaryOverlay();
             case 'pattern'
                 showPatternOverlay();
             otherwise
@@ -1088,6 +1205,8 @@ function Luminosa_GUI
     function onApplyTauRange(~, ~)
         if strcmp(app.displayMode, 'tau')
             showTauMean();
+        elseif strcmp(app.displayMode, 'file_tau')
+            showFileSummaryOverlay();
         elseif strcmp(app.displayMode, 'pattern')
             showPatternOverlay();
         end
@@ -1381,8 +1500,19 @@ function Luminosa_GUI
         pattern = app.pattern; %#ok<NASGU>
         tcspc = app.tcspc; %#ok<NASGU>
         tcspcFit = app.tcspcFit; %#ok<NASGU>
-        save(outFile, 'ptuOut', 'flim', 'ismRes', 'pattern', 'tcspc', 'tcspcFit');
-        addStatus(['Saved: ' outFile]);
+        frameMapExports = buildFrameMapExports(); %#ok<NASGU>
+        fileSummaryMapExports = buildFileSummaryMapExports(); %#ok<NASGU>
+        exportLabels = struct( ... %#ok<NASGU>
+            'frameMapsVariable', 'frameMapExports', ...
+            'fileSummaryVariable', 'fileSummaryMapExports', ...
+            'intensityField', 'intensity', ...
+            'lifetimeField', 'lifetimeNs', ...
+            'lifetimeUnits', 'ns');
+        save(outFile, 'ptuOut', 'flim', 'ismRes', 'pattern', 'tcspc', 'tcspcFit', ...
+            'frameMapExports', 'fileSummaryMapExports', 'exportLabels', '-v7.3');
+        app.lastMietExportFile = outFile;
+        addStatus(sprintf('Saved: %s | %d frame map(s), %d file summary map(s).', ...
+            outFile, numel(frameMapExports), numel(fileSummaryMapExports)));
     end
 
     function onSavePNG(~, ~)
@@ -1568,6 +1698,628 @@ function Luminosa_GUI
         fcs = app.fcs; %#ok<NASGU>
         save(outFile, 'fcs');
         app.statusFCS.Text = ['Saved: ' outFile];
+    end
+
+    function onMietUseCurrentExports(~, ~)
+        if isempty(app.ptuOut)
+            setMietStatus('Load a PTU or series first, or load a saved export MAT.');
+            return;
+        end
+
+        entries = combineMietSourceEntries(buildFrameMapExports(), buildFileSummaryMapExports());
+        if isempty(entries)
+            setMietStatus('No lifetime/intensity exports are available for MIET.');
+            return;
+        end
+
+        app.mietSourceEntries = entries;
+        app.mietResultEntries = struct([]);
+        refreshMietDatasetItems();
+        app.mietDisplayMode = 'lifetime';
+        showCurrentMietMap();
+        setMietStatus(sprintf('Loaded %d MIET source map(s) from the current Luminosa session.', numel(entries)));
+    end
+
+    function onMietLoadExportMAT(~, ~)
+        [f, p] = uigetfile('*.mat', 'Load Luminosa export MAT for MIET');
+        if isequal(f, 0)
+            return;
+        end
+
+        fileName = fullfile(p, f);
+        try
+            s = load(fileName, 'frameMapExports', 'fileSummaryMapExports');
+        catch ME
+            setMietStatus(['Failed to load MIET export MAT: ' ME.message]);
+            return;
+        end
+
+        frameMapExports = [];
+        fileSummaryMapExports = [];
+        if isfield(s, 'frameMapExports')
+            frameMapExports = s.frameMapExports;
+        end
+        if isfield(s, 'fileSummaryMapExports')
+            fileSummaryMapExports = s.fileSummaryMapExports;
+        end
+
+        entries = combineMietSourceEntries(frameMapExports, fileSummaryMapExports);
+        if isempty(entries)
+            setMietStatus('Selected MAT file does not contain frameMapExports or fileSummaryMapExports.');
+            return;
+        end
+
+        app.mietSourceEntries = entries;
+        app.mietResultEntries = struct([]);
+        app.lastMietExportFile = fileName;
+        refreshMietDatasetItems();
+        app.mietDisplayMode = 'lifetime';
+        showCurrentMietMap();
+        setMietStatus(sprintf('Loaded %d MIET source map(s) from %s.', numel(entries), f));
+    end
+
+    function onMietLoadCalibration(~, ~)
+        [f, p] = uigetfile({'*.mat;*.csv;*.txt;*.dat', 'Calibration files (*.mat,*.csv,*.txt,*.dat)'}, ...
+            'Load MIET calibration');
+        if isequal(f, 0)
+            return;
+        end
+
+        fileName = fullfile(p, f);
+        [calib, errMsg] = loadMietCalibrationFile(fileName);
+        if ~isempty(errMsg)
+            setMietStatus(errMsg);
+            return;
+        end
+
+        app.mietCalibration = calib;
+        app.editMietCalibPath.Value = fileName;
+        if ~isempty(calib.heightNm)
+            app.editMietCalibMin.Value = min(calib.heightNm);
+            app.editMietCalibMax.Value = max(calib.heightNm);
+        end
+        setMietStatus(sprintf('Loaded MIET calibration: %s (%d samples).', calib.label, numel(calib.heightNm)));
+        setMietInfoLines(buildMietInfoLines());
+    end
+
+    function onMietLaunchVendor(~, ~)
+        vendorRoots = { ...
+            fullfile(fileparts(mfilename('fullpath')), 'external', 'miet-gui'), ...
+            fullfile(fileparts(mfilename('fullpath')), 'vendor', 'miet-gui')};
+        for ii = 1:numel(vendorRoots)
+            if isfolder(vendorRoots{ii})
+                addpath(genpath(vendorRoots{ii}));
+            end
+        end
+
+        candidates = {'MIET_GUI', 'MIETGUI', 'miet_gui'};
+        for ii = 1:numel(candidates)
+            if exist(candidates{ii}, 'file') == 2
+                try
+                    feval(candidates{ii});
+                    setMietStatus(sprintf('Launched external MIET-GUI via %s.', candidates{ii}));
+                    return;
+                catch ME
+                    setMietStatus(sprintf('Found %s, but launch failed: %s', candidates{ii}, ME.message));
+                    return;
+                end
+            end
+        end
+
+        setMietStatus('MIET-GUI was not found on the MATLAB path. Put it in external/miet-gui or add it to the MATLAB path first.');
+    end
+
+    function onMietCompute(~, ~)
+        if isempty(app.mietSourceEntries)
+            setMietStatus('Load current exports or a saved export MAT before computing MIET.');
+            return;
+        end
+
+        [calibHeightNm, calibLifetimeNs, calibMeta, errMsg] = getActiveMietCalibration();
+        if ~isempty(errMsg)
+            setMietStatus(errMsg);
+            return;
+        end
+
+        results = app.mietSourceEntries;
+        for idx = 1:numel(results)
+            lifetimeMap = [];
+            if isfield(results(idx), 'lifetimeNs')
+                lifetimeMap = results(idx).lifetimeNs;
+            end
+            heightMap = lifetimeMapToHeightMap(lifetimeMap, calibLifetimeNs, calibHeightNm);
+            results(idx).heightNm = heightMap;
+            results(idx).heightLabel = 'MIET height (nm)';
+            results(idx).calibrationLabel = calibMeta.label;
+            results(idx).calibrationFile = calibMeta.file;
+            results(idx).calibrationHeightRangeNm = calibMeta.heightRangeNm;
+            results(idx).calibrationLifetimeRangeNs = calibMeta.lifetimeRangeNs;
+        end
+
+        app.mietResultEntries = results;
+        app.mietDisplayMode = 'height';
+        refreshMietDatasetItems();
+        showCurrentMietMap();
+        setMietStatus(sprintf('Computed MIET height maps for %d dataset(s) using %s.', numel(results), calibMeta.label));
+    end
+
+    function onMietSaveMAT(~, ~)
+        if isempty(app.mietSourceEntries) && isempty(app.mietResultEntries)
+            setMietStatus('No MIET data is available to save.');
+            return;
+        end
+
+        [f, p] = uiputfile('*.mat', 'Save MIET MAT');
+        if isequal(f, 0)
+            return;
+        end
+
+        outFile = fullfile(p, f);
+        mietSourceEntries = app.mietSourceEntries; %#ok<NASGU>
+        mietResultEntries = app.mietResultEntries; %#ok<NASGU>
+        mietCalibration = app.mietCalibration; %#ok<NASGU>
+        save(outFile, 'mietSourceEntries', 'mietResultEntries', 'mietCalibration', '-v7.3');
+        setMietStatus(['Saved MIET results: ' outFile]);
+    end
+
+    function onMietShowLifetime(~, ~)
+        app.mietDisplayMode = 'lifetime';
+        showCurrentMietMap();
+    end
+
+    function onMietShowHeight(~, ~)
+        app.mietDisplayMode = 'height';
+        showCurrentMietMap();
+    end
+
+    function onMietDatasetChanged(~, ~)
+        showCurrentMietMap();
+    end
+
+    function onMietApplyRange(~, ~)
+        if strcmp(app.mietDisplayMode, 'height')
+            showCurrentMietMap();
+        end
+    end
+
+    function setMietStatus(msg)
+        if isempty(msg)
+            msg = 'Ready.';
+        end
+        if ~isempty(app.lblMietStatus) && isvalid(app.lblMietStatus)
+            app.lblMietStatus.Text = msg;
+        end
+        addStatus(['MIET: ' msg]);
+    end
+
+    function setMietInfoLines(lines)
+        if nargin < 1 || isempty(lines)
+            lines = {'No MIET source loaded.'};
+        end
+        if ischar(lines)
+            lines = cellstr(lines);
+        end
+        if ~isempty(app.txtMietInfo) && isvalid(app.txtMietInfo)
+            app.txtMietInfo.Value = lines(:);
+        end
+    end
+
+    function entries = combineMietSourceEntries(frameMapExports, fileSummaryMapExports)
+        entries = struct([]);
+        if nargin < 1 || isempty(frameMapExports)
+            frameMapExports = struct([]);
+        end
+        if nargin < 2 || isempty(fileSummaryMapExports)
+            fileSummaryMapExports = struct([]);
+        end
+
+        frameMapExports = reshape(frameMapExports, [], 1);
+        fileSummaryMapExports = reshape(fileSummaryMapExports, [], 1);
+        if isempty(frameMapExports)
+            entries = fileSummaryMapExports;
+        elseif isempty(fileSummaryMapExports)
+            entries = frameMapExports;
+        else
+            entries = [frameMapExports; fileSummaryMapExports];
+        end
+    end
+
+    function entries = getActiveMietEntries()
+        if ~isempty(app.mietResultEntries)
+            entries = app.mietResultEntries;
+        else
+            entries = app.mietSourceEntries;
+        end
+    end
+
+    function refreshMietDatasetItems()
+        entries = getActiveMietEntries();
+        if isempty(entries)
+            app.dropMietDataset.Items = {'No MIET source loaded'};
+            app.dropMietDataset.Value = 'No MIET source loaded';
+            setMietInfoLines({'No MIET source loaded.'});
+            cla(app.axMIET);
+            clearMietColorbar();
+            return;
+        end
+
+        items = {entries.label};
+        prevValue = app.dropMietDataset.Value;
+        app.dropMietDataset.Items = items;
+        if any(strcmp(items, prevValue))
+            app.dropMietDataset.Value = prevValue;
+        else
+            app.dropMietDataset.Value = items{1};
+        end
+        setMietInfoLines(buildMietInfoLines());
+    end
+
+    function idx = currentMietEntryIndex()
+        entries = getActiveMietEntries();
+        if isempty(entries)
+            idx = [];
+            return;
+        end
+        value = app.dropMietDataset.Value;
+        items = {entries.label};
+        idx = find(strcmp(items, value), 1, 'first');
+        if isempty(idx)
+            idx = 1;
+        end
+    end
+
+    function lines = buildMietInfoLines()
+        lines = {'No MIET source loaded.'};
+        entries = getActiveMietEntries();
+        idx = currentMietEntryIndex();
+        if isempty(entries) || isempty(idx)
+            return;
+        end
+
+        entry = entries(idx);
+        lines = { ...
+            sprintf('Label: %s', getStructText(entry, 'label', '')), ...
+            sprintf('Type: %s', getStructText(entry, 'mapType', '')), ...
+            sprintf('Source file: %s', getStructText(entry, 'sourceFile', '')), ...
+            sprintf('Frames represented: %s', scalarFieldText(entry, 'nFrames')), ...
+            sprintf('Frame index in file: %s', scalarFieldText(entry, 'fileFrameIndex'))};
+
+        if isfield(entry, 'calibrationLabel') && ~isempty(entry.calibrationLabel)
+            lines{end+1} = sprintf('Calibration: %s', entry.calibrationLabel);
+        elseif ~isempty(app.mietCalibration.label)
+            lines{end+1} = sprintf('Calibration: %s', app.mietCalibration.label);
+        else
+            lines{end+1} = 'Calibration: not loaded';
+        end
+
+        if isfield(entry, 'lifetimeNs') && ~isempty(entry.lifetimeNs)
+            tauVals = double(entry.lifetimeNs(isfinite(entry.lifetimeNs)));
+            if ~isempty(tauVals)
+                lines{end+1} = sprintf('Lifetime range (ns): %.3f .. %.3f', min(tauVals), max(tauVals));
+            end
+        end
+
+        if isfield(entry, 'heightNm') && ~isempty(entry.heightNm)
+            hVals = double(entry.heightNm(isfinite(entry.heightNm)));
+            if ~isempty(hVals)
+                lines{end+1} = sprintf('Height range (nm): %.3f .. %.3f', min(hVals), max(hVals));
+            end
+        end
+    end
+
+    function txt = getStructText(s, fieldName, defaultValue)
+        if nargin < 3
+            defaultValue = '';
+        end
+        if isfield(s, fieldName) && ~isempty(s.(fieldName))
+            txt = s.(fieldName);
+        else
+            txt = defaultValue;
+        end
+    end
+
+    function txt = scalarFieldText(s, fieldName)
+        txt = 'n/a';
+        if isfield(s, fieldName) && ~isempty(s.(fieldName))
+            val = s.(fieldName);
+            if isscalar(val) && isfinite(double(val))
+                txt = sprintf('%.0f', double(val));
+            end
+        end
+    end
+
+    function showCurrentMietMap()
+        entries = getActiveMietEntries();
+        idx = currentMietEntryIndex();
+        if isempty(entries) || isempty(idx)
+            return;
+        end
+
+        entry = entries(idx);
+        intensityMap = [];
+        if isfield(entry, 'intensity')
+            intensityMap = entry.intensity;
+        end
+
+        if strcmp(app.mietDisplayMode, 'height') && isfield(entry, 'heightNm') && ~isempty(entry.heightNm)
+            showMietScalarMap(entry.heightNm, intensityMap, sprintf('MIET height: %s', entry.label), 'height');
+        elseif isfield(entry, 'lifetimeNs') && ~isempty(entry.lifetimeNs)
+            showMietScalarMap(entry.lifetimeNs, intensityMap, sprintf('Lifetime source: %s', entry.label), 'lifetime');
+        else
+            cla(app.axMIET);
+            clearMietColorbar();
+            title(app.axMIET, 'MIET');
+        end
+
+        setMietInfoLines(buildMietInfoLines());
+    end
+
+    function showMietScalarMap(mapData, intensityMap, titleStr, modeName)
+        if isempty(app.axMIET) || ~isvalid(app.axMIET) || isempty(mapData)
+            return;
+        end
+
+        mapData = double(mapData);
+        clearMietColorbar();
+        cla(app.axMIET);
+
+        switch modeName
+            case 'height'
+                cmap = parula(256);
+                valueRange = getMietHeightRange(mapData);
+                cbarLabel = 'Height (nm)';
+            otherwise
+                cmap = jet(256);
+                cmap = cmap(30:end-30, :);
+                valueRange = getTauRange(mapData);
+                cbarLabel = 'Lifetime (ns)';
+        end
+
+        if nargin >= 2 && ~isempty(intensityMap) && isequal(size(intensityMap), size(mapData))
+            bright = applyGamma(double(intensityMap), app.gamma);
+            rgb = flim_rgb(mapData, bright, valueRange, cmap);
+            image(app.axMIET, rgb);
+            axis(app.axMIET, 'image');
+            axis(app.axMIET, 'off');
+        else
+            imagesc(app.axMIET, mapData);
+            axis(app.axMIET, 'image');
+            axis(app.axMIET, 'on');
+        end
+        colormap(app.axMIET, cmap);
+        caxis(app.axMIET, valueRange);
+        app.cbMIET = colorbar(app.axMIET);
+        ylabel(app.cbMIET, cbarLabel);
+        title(app.axMIET, titleStr, 'Interpreter', 'none');
+    end
+
+    function clearMietColorbar()
+        if ~isempty(app.cbMIET) && isvalid(app.cbMIET)
+            delete(app.cbMIET);
+        end
+        app.cbMIET = [];
+    end
+
+    function trange = getMietHeightRange(heightMap)
+        vals = double(heightMap(isfinite(heightMap)));
+        if isempty(vals)
+            trange = [0 1];
+            return;
+        end
+
+        if app.chkMietAutoRange.Value
+            trange = prctile(vals, [5 95]);
+        else
+            trange = [app.editMietMin.Value, app.editMietMax.Value];
+        end
+
+        if trange(1) == trange(2)
+            trange = [min(vals) max(vals)];
+        end
+        if trange(2) <= trange(1)
+            trange(2) = trange(1) + eps;
+        end
+    end
+
+    function [calib, errMsg] = loadMietCalibrationFile(fileName)
+        calib = struct('file', fileName, 'label', '', 'heightNm', [], 'lifetimeNs', []);
+        errMsg = '';
+
+        [~, baseName, ext] = fileparts(fileName);
+        ext = lower(ext);
+
+        try
+            switch ext
+                case '.mat'
+                    s = load(fileName);
+                    [heightNm, lifetimeNs, label] = parseMietCalibrationFromLoadedData(s, baseName);
+                case {'.csv', '.txt', '.dat'}
+                    [heightNm, lifetimeNs, label] = parseMietCalibrationFromTextFile(fileName, baseName);
+                otherwise
+                    errMsg = sprintf('Unsupported calibration format: %s', ext);
+                    return;
+            end
+        catch ME
+            errMsg = sprintf('Failed to load calibration: %s', ME.message);
+            return;
+        end
+
+        if isempty(heightNm) || isempty(lifetimeNs)
+            errMsg = 'Could not find height/lifetime calibration vectors in the selected file.';
+            return;
+        end
+
+        [heightNm, order] = sort(double(heightNm(:)), 'ascend');
+        lifetimeNs = double(lifetimeNs(:));
+        lifetimeNs = lifetimeNs(order);
+        valid = isfinite(heightNm) & isfinite(lifetimeNs);
+        heightNm = heightNm(valid);
+        lifetimeNs = lifetimeNs(valid);
+        if numel(heightNm) < 2
+            errMsg = 'Calibration file contains fewer than two valid samples.';
+            return;
+        end
+
+        calib.label = label;
+        calib.heightNm = heightNm;
+        calib.lifetimeNs = lifetimeNs;
+    end
+
+    function [heightNm, lifetimeNs, label] = parseMietCalibrationFromLoadedData(s, defaultLabel)
+        heightNm = [];
+        lifetimeNs = [];
+        label = defaultLabel;
+
+        [heightNm, lifetimeNs] = parseMietCalibrationCandidate(s);
+        if ~isempty(heightNm)
+            return;
+        end
+
+        fields = fieldnames(s);
+        for ii = 1:numel(fields)
+            candidate = s.(fields{ii});
+            [heightNm, lifetimeNs] = parseMietCalibrationCandidate(candidate);
+            if ~isempty(heightNm)
+                label = sprintf('%s:%s', defaultLabel, fields{ii});
+                return;
+            end
+        end
+    end
+
+    function [heightNm, lifetimeNs] = parseMietCalibrationCandidate(candidate)
+        heightNm = [];
+        lifetimeNs = [];
+
+        if istable(candidate)
+            names = lower(candidate.Properties.VariableNames);
+            heightIdx = find(contains(names, 'height') | contains(names, 'distance') | contains(names, 'znm') | strcmp(names, 'z'), 1, 'first');
+            lifetimeIdx = find(contains(names, 'lifetime') | contains(names, 'tau'), 1, 'first');
+            if ~isempty(heightIdx) && ~isempty(lifetimeIdx)
+                heightNm = candidate{:, heightIdx};
+                lifetimeNs = candidate{:, lifetimeIdx};
+            end
+            return;
+        end
+
+        if isstruct(candidate)
+            heightFields = {'heightNm', 'height', 'distanceNm', 'distance', 'zNm', 'z'};
+            lifetimeFields = {'lifetimeNs', 'lifetime', 'tauNs', 'tau'};
+            h = [];
+            t = [];
+            for ii = 1:numel(heightFields)
+                if isfield(candidate, heightFields{ii})
+                    h = candidate.(heightFields{ii});
+                    break;
+                end
+            end
+            for ii = 1:numel(lifetimeFields)
+                if isfield(candidate, lifetimeFields{ii})
+                    t = candidate.(lifetimeFields{ii});
+                    break;
+                end
+            end
+            if ~isempty(h) && ~isempty(t)
+                heightNm = h;
+                lifetimeNs = t;
+            end
+            return;
+        end
+
+        if isnumeric(candidate) && ismatrix(candidate) && size(candidate, 2) >= 2
+            heightNm = candidate(:, 1);
+            lifetimeNs = candidate(:, 2);
+        end
+    end
+
+    function [heightNm, lifetimeNs, label] = parseMietCalibrationFromTextFile(fileName, defaultLabel)
+        heightNm = [];
+        lifetimeNs = [];
+        label = defaultLabel;
+
+        try
+            tbl = readtable(fileName);
+            [heightNm, lifetimeNs] = parseMietCalibrationCandidate(tbl);
+        catch
+            heightNm = [];
+            lifetimeNs = [];
+        end
+
+        if isempty(heightNm) || isempty(lifetimeNs)
+            mat = readmatrix(fileName);
+            if size(mat, 2) < 2
+                error('Calibration text file must have at least two columns.');
+            end
+            heightNm = mat(:, 1);
+            lifetimeNs = mat(:, 2);
+            label = sprintf('%s (col1=height nm, col2=lifetime ns)', defaultLabel);
+        end
+    end
+
+    function [heightNm, lifetimeNs, meta, errMsg] = getActiveMietCalibration()
+        heightNm = [];
+        lifetimeNs = [];
+        meta = struct('label', '', 'file', '', 'heightRangeNm', [], 'lifetimeRangeNs', []);
+        errMsg = '';
+
+        if isempty(app.mietCalibration.heightNm) || isempty(app.mietCalibration.lifetimeNs)
+            errMsg = 'Load a MIET calibration first.';
+            return;
+        end
+
+        zMin = min(app.editMietCalibMin.Value, app.editMietCalibMax.Value);
+        zMax = max(app.editMietCalibMin.Value, app.editMietCalibMax.Value);
+        mask = app.mietCalibration.heightNm >= zMin & app.mietCalibration.heightNm <= zMax;
+        if nnz(mask) < 2
+            errMsg = 'Calibration height window contains fewer than two samples.';
+            return;
+        end
+
+        heightNm = double(app.mietCalibration.heightNm(mask));
+        lifetimeNs = double(app.mietCalibration.lifetimeNs(mask));
+
+        if all(diff(lifetimeNs) >= 0)
+            % already monotonic
+        elseif all(diff(lifetimeNs) <= 0)
+            lifetimeNs = flipud(lifetimeNs(:));
+            heightNm = flipud(heightNm(:));
+        else
+            errMsg = 'Selected calibration height window is not monotonic in lifetime. Restrict the z-range to a monotonic branch before computing MIET.';
+            return;
+        end
+
+        [lifetimeNs, ia] = unique(lifetimeNs(:), 'stable');
+        heightNm = heightNm(ia);
+        if numel(lifetimeNs) < 2
+            errMsg = 'Calibration needs at least two unique lifetime samples after cropping.';
+            return;
+        end
+
+        meta.label = app.mietCalibration.label;
+        meta.file = app.mietCalibration.file;
+        meta.heightRangeNm = [min(heightNm) max(heightNm)];
+        meta.lifetimeRangeNs = [min(lifetimeNs) max(lifetimeNs)];
+    end
+
+    function heightMap = lifetimeMapToHeightMap(lifetimeMap, calibLifetimeNs, calibHeightNm)
+        heightMap = [];
+        if isempty(lifetimeMap)
+            return;
+        end
+
+        lifetimeMap = double(lifetimeMap);
+        heightMap = nan(size(lifetimeMap), 'double');
+        valid = isfinite(lifetimeMap);
+        if ~any(valid(:))
+            return;
+        end
+
+        if numel(calibLifetimeNs) >= 3
+            method = 'pchip';
+        else
+            method = 'linear';
+        end
+
+        heightMap(valid) = interp1(calibLifetimeNs, calibHeightNm, lifetimeMap(valid), method, NaN);
     end
 
     function addStatus(msg)
@@ -2016,6 +2768,374 @@ function Luminosa_GUI
         end
     end
 
+    function [tauMap, intensityMap, titleStr, statusMsg] = resolveFileSummaryOverlay()
+        tauMap = [];
+        intensityMap = [];
+        titleStr = 'Summed intensity + FLIM overlay';
+        statusMsg = '';
+
+        if ~isempty(app.ptuOutOriginal)
+            intensityMap = getIntensityMapFromPTUData(app.ptuOutOriginal);
+            tauMap = getTauMeanMapFromPTUData(app.ptuOutOriginal);
+            if ~isempty(tauMap) && ~isempty(intensityMap)
+                sourceName = currentSourceFileName();
+                titleStr = buildFileSummaryTitle(sourceName);
+                statusMsg = sprintf('Showing summed intensity + FLIM overlay for all frames in %s.', sourceName);
+                return;
+            end
+        end
+
+        if ~isempty(app.seriesData)
+            [tauMap, intensityMap, sourceName, nFramesUsed] = aggregateCurrentSourceFileOverlay();
+            if ~isempty(tauMap) && ~isempty(intensityMap)
+                titleStr = buildFileSummaryTitle(sourceName);
+                statusMsg = sprintf('Showing summed intensity + FLIM overlay for %d frame(s) in %s.', nFramesUsed, sourceName);
+                return;
+            end
+        end
+
+        if ~isempty(app.ptuOut)
+            intensityMap = getIntensityMapFromPTUData(app.ptuOut);
+            tauMap = getTauMeanMapFromPTUData(app.ptuOut);
+            if ~isempty(tauMap) && ~isempty(intensityMap)
+                sourceName = currentSourceFileName();
+                titleStr = buildFileSummaryTitle(sourceName);
+                statusMsg = sprintf('Showing summed intensity + FLIM overlay for %s.', sourceName);
+            end
+        end
+    end
+
+    function [tauMap, intensityMap, sourceName, nFramesUsed] = aggregateCurrentSourceFileOverlay()
+        tauMap = [];
+        intensityMap = [];
+        sourceName = currentSourceFileName();
+        nFramesUsed = 0;
+
+        if isempty(app.seriesData)
+            return;
+        end
+
+        frameIdx = [];
+        if ~isempty(app.seriesFrameFileMap) && ~isempty(app.currentFrame) && ...
+                app.currentFrame >= 1 && app.currentFrame <= numel(app.seriesFrameFileMap)
+            sourceIdx = app.seriesFrameFileMap(app.currentFrame);
+            if isfinite(sourceIdx)
+                frameIdx = find(app.seriesFrameFileMap == sourceIdx);
+                if ~isempty(app.seriesFiles) && sourceIdx >= 1 && sourceIdx <= numel(app.seriesFiles)
+                    sourceName = app.seriesFiles(sourceIdx).name;
+                end
+            end
+        end
+
+        if isempty(frameIdx)
+            frameIdx = 1:numel(app.seriesData);
+        end
+
+        nFramesUsed = numel(frameIdx);
+        [tauMap, intensityMap] = aggregateFrameOverlayMaps(frameIdx);
+    end
+
+    function [tauMap, intensityMap] = aggregateFrameOverlayMaps(frameIdx)
+        tauMap = [];
+        intensityMap = [];
+        weightedTau = [];
+        tauWeight = [];
+        tauFallback = [];
+        tauCount = [];
+
+        for ii = 1:numel(frameIdx)
+            idx = frameIdx(ii);
+            if idx < 1 || idx > numel(app.seriesData)
+                continue;
+            end
+
+            if idx <= numel(app.seriesIntensityCache)
+                frameIntensity = app.seriesIntensityCache{idx};
+            else
+                frameIntensity = [];
+            end
+            if isempty(frameIntensity) && ~isempty(app.seriesData{idx})
+                frameIntensity = getIntensityMapFromPTUData(app.seriesData{idx});
+            end
+            if isempty(frameIntensity)
+                continue;
+            end
+
+            frameIntensity = double(frameIntensity);
+            if isempty(intensityMap)
+                intensityMap = zeros(size(frameIntensity), 'double');
+                weightedTau = zeros(size(frameIntensity), 'double');
+                tauWeight = zeros(size(frameIntensity), 'double');
+                tauFallback = zeros(size(frameIntensity), 'double');
+                tauCount = zeros(size(frameIntensity), 'double');
+            elseif ~isequal(size(frameIntensity), size(intensityMap))
+                continue;
+            end
+
+            intensityMap = intensityMap + frameIntensity;
+
+            if idx <= numel(app.seriesFlimCache)
+                frameTau = app.seriesFlimCache{idx};
+            else
+                frameTau = [];
+            end
+            if isempty(frameTau) && ~isempty(app.seriesData{idx})
+                frameTau = getTauMeanMapFromPTUData(app.seriesData{idx});
+            end
+            if isempty(frameTau) || ~isequal(size(frameTau), size(intensityMap))
+                continue;
+            end
+
+            frameTau = double(frameTau);
+            finiteTau = isfinite(frameTau);
+            if any(finiteTau(:))
+                tauFallback(finiteTau) = tauFallback(finiteTau) + frameTau(finiteTau);
+                tauCount(finiteTau) = tauCount(finiteTau) + 1;
+            end
+
+            validWeighted = finiteTau & isfinite(frameIntensity) & frameIntensity > 0;
+            if any(validWeighted(:))
+                weightedTau(validWeighted) = weightedTau(validWeighted) + frameTau(validWeighted) .* frameIntensity(validWeighted);
+                tauWeight(validWeighted) = tauWeight(validWeighted) + frameIntensity(validWeighted);
+            end
+        end
+
+        if isempty(intensityMap)
+            return;
+        end
+
+        tauMap = nan(size(intensityMap), 'double');
+        weightedMask = tauWeight > 0;
+        tauMap(weightedMask) = weightedTau(weightedMask) ./ tauWeight(weightedMask);
+
+        fallbackMask = ~weightedMask & tauCount > 0;
+        if any(fallbackMask(:))
+            tauMap(fallbackMask) = tauFallback(fallbackMask) ./ tauCount(fallbackMask);
+        end
+    end
+
+    function sourceName = currentSourceFileName()
+        sourceName = '';
+        if ~isempty(app.seriesData) && ~isempty(app.seriesFrameFileMap) && ~isempty(app.currentFrame) && ...
+                app.currentFrame >= 1 && app.currentFrame <= numel(app.seriesFrameFileMap)
+            sourceIdx = app.seriesFrameFileMap(app.currentFrame);
+            if isfinite(sourceIdx) && ~isempty(app.seriesFiles) && sourceIdx >= 1 && sourceIdx <= numel(app.seriesFiles)
+                sourceName = app.seriesFiles(sourceIdx).name;
+            end
+        end
+
+        if isempty(sourceName) && ~isempty(app.lastFile)
+            [~, name, ext] = fileparts(app.lastFile);
+            sourceName = [name ext];
+        end
+
+        if isempty(sourceName)
+            sourceName = 'the active file';
+        end
+    end
+
+    function titleStr = buildFileSummaryTitle(sourceName)
+        if nargin < 1 || isempty(sourceName)
+            titleStr = 'Summed intensity + FLIM overlay';
+        else
+            titleStr = sprintf('Summed intensity + FLIM overlay (%s)', sourceName);
+        end
+    end
+
+    function frameMapExports = buildFrameMapExports()
+        frameMapExports = emptyMapExport();
+
+        if ~isempty(app.seriesData)
+            outIdx = 0;
+            for idx = 1:numel(app.seriesData)
+                frameData = app.seriesData{idx};
+                if isempty(frameData)
+                    continue;
+                end
+
+                intensityMap = [];
+                if idx <= numel(app.seriesIntensityCache)
+                    intensityMap = app.seriesIntensityCache{idx};
+                end
+                if isempty(intensityMap)
+                    intensityMap = getIntensityMapFromPTUData(frameData);
+                end
+
+                lifetimeMap = [];
+                if idx <= numel(app.seriesFlimCache)
+                    lifetimeMap = app.seriesFlimCache{idx};
+                end
+                if isempty(lifetimeMap)
+                    lifetimeMap = getTauMeanMapFromPTUData(frameData);
+                end
+
+                if isempty(intensityMap) && isempty(lifetimeMap)
+                    continue;
+                end
+
+                [sourceName, sourceIdx, fileFrameIndex] = frameSourceInfo(idx);
+                outIdx = outIdx + 1;
+                frameMapExports(outIdx) = makeMapExportEntry( ...
+                    sprintf('%s | frame %d', sourceName, fileFrameIndex), ...
+                    'per_frame', sourceName, sourceIdx, idx, fileFrameIndex, 1, intensityMap, lifetimeMap);
+            end
+            return;
+        end
+
+        intensityMap = getIntensityMapFromPTUData(app.ptuOut);
+        lifetimeMap = getTauMeanMapFromPTUData(app.ptuOut);
+        if isempty(intensityMap) && isempty(lifetimeMap)
+            return;
+        end
+
+        sourceName = currentSourceFileName();
+        frameMapExports(1) = makeMapExportEntry( ...
+            sprintf('%s | frame 1', sourceName), ...
+            'per_frame', sourceName, NaN, 1, 1, 1, intensityMap, lifetimeMap);
+    end
+
+    function fileSummaryMapExports = buildFileSummaryMapExports()
+        fileSummaryMapExports = emptyMapExport();
+
+        if ~isempty(app.ptuOutOriginal)
+            intensityMap = getIntensityMapFromPTUData(app.ptuOutOriginal);
+            lifetimeMap = getTauMeanMapFromPTUData(app.ptuOutOriginal);
+            if isempty(intensityMap) && isempty(lifetimeMap)
+                return;
+            end
+
+            sourceName = currentSourceFileName();
+            nFrames = max(1, numel(app.seriesData));
+            fileSummaryMapExports(1) = makeMapExportEntry( ...
+                sprintf('%s | total summed', sourceName), ...
+                'summed_file', sourceName, 1, [], [], nFrames, intensityMap, lifetimeMap);
+            return;
+        end
+
+        if ~isempty(app.seriesData)
+            if ~isempty(app.seriesFrameFileMap)
+                sourceIdxList = unique(app.seriesFrameFileMap(:).', 'stable');
+            else
+                sourceIdxList = NaN;
+            end
+
+            outIdx = 0;
+            for ii = 1:numel(sourceIdxList)
+                sourceIdx = sourceIdxList(ii);
+                if isfinite(sourceIdx)
+                    frameIdx = find(app.seriesFrameFileMap == sourceIdx);
+                else
+                    frameIdx = 1:numel(app.seriesData);
+                end
+
+                [lifetimeMap, intensityMap] = aggregateFrameOverlayMaps(frameIdx);
+                if isempty(intensityMap) && isempty(lifetimeMap)
+                    continue;
+                end
+
+                sourceName = sourceFileNameFromIndex(sourceIdx);
+                outIdx = outIdx + 1;
+                fileSummaryMapExports(outIdx) = makeMapExportEntry( ...
+                    sprintf('%s | total summed', sourceName), ...
+                    'summed_file', sourceName, sourceIdx, [], [], numel(frameIdx), intensityMap, lifetimeMap);
+            end
+            return;
+        end
+
+        intensityMap = getIntensityMapFromPTUData(app.ptuOut);
+        lifetimeMap = getTauMeanMapFromPTUData(app.ptuOut);
+        if isempty(intensityMap) && isempty(lifetimeMap)
+            return;
+        end
+
+        sourceName = currentSourceFileName();
+        fileSummaryMapExports(1) = makeMapExportEntry( ...
+            sprintf('%s | total summed', sourceName), ...
+            'summed_file', sourceName, NaN, [], [], 1, intensityMap, lifetimeMap);
+    end
+
+    function [sourceName, sourceIdx, fileFrameIndex] = frameSourceInfo(globalFrameIndex)
+        sourceIdx = NaN;
+        fileFrameIndex = globalFrameIndex;
+
+        if ~isempty(app.seriesFrameFileMap) && globalFrameIndex >= 1 && globalFrameIndex <= numel(app.seriesFrameFileMap)
+            sourceIdx = double(app.seriesFrameFileMap(globalFrameIndex));
+            if isfinite(sourceIdx)
+                sourceFrames = find(app.seriesFrameFileMap == sourceIdx);
+                localIdx = find(sourceFrames == globalFrameIndex, 1, 'first');
+                if ~isempty(localIdx)
+                    fileFrameIndex = localIdx;
+                end
+            end
+        end
+
+        sourceName = sourceFileNameFromIndex(sourceIdx);
+    end
+
+    function sourceName = sourceFileNameFromIndex(sourceIdx)
+        sourceName = '';
+
+        if nargin >= 1 && isfinite(sourceIdx) && ~isempty(app.seriesFiles) && ...
+                sourceIdx >= 1 && sourceIdx <= numel(app.seriesFiles)
+            sourceName = app.seriesFiles(sourceIdx).name;
+        end
+
+        if isempty(sourceName) && ~isempty(app.lastFile)
+            [~, name, ext] = fileparts(app.lastFile);
+            sourceName = [name ext];
+        end
+
+        if isempty(sourceName)
+            sourceName = 'the active file';
+        end
+    end
+
+    function entry = makeMapExportEntry(label, mapType, sourceName, sourceIdx, globalFrameIndex, fileFrameIndex, nFrames, intensityMap, lifetimeMap)
+        if strcmp(mapType, 'summed_file')
+            intensityLabel = 'summed intensity';
+            lifetimeLabel = 'summed lifetime (ns)';
+        else
+            intensityLabel = 'frame intensity';
+            lifetimeLabel = 'frame lifetime (ns)';
+        end
+
+        entry = struct( ...
+            'label', label, ...
+            'mapType', mapType, ...
+            'sourceFile', sourceName, ...
+            'sourceFileIndex', sourceIdx, ...
+            'globalFrameIndex', globalFrameIndex, ...
+            'fileFrameIndex', fileFrameIndex, ...
+            'nFrames', nFrames, ...
+            'intensityLabel', intensityLabel, ...
+            'lifetimeLabel', lifetimeLabel, ...
+            'intensity', doubleOrEmpty(intensityMap), ...
+            'lifetimeNs', doubleOrEmpty(lifetimeMap));
+    end
+
+    function exports = emptyMapExport()
+        exports = struct( ...
+            'label', {}, ...
+            'mapType', {}, ...
+            'sourceFile', {}, ...
+            'sourceFileIndex', {}, ...
+            'globalFrameIndex', {}, ...
+            'fileFrameIndex', {}, ...
+            'nFrames', {}, ...
+            'intensityLabel', {}, ...
+            'lifetimeLabel', {}, ...
+            'intensity', {}, ...
+            'lifetimeNs', {});
+    end
+
+    function arr = doubleOrEmpty(arrIn)
+        if isempty(arrIn)
+            arr = [];
+        else
+            arr = double(arrIn);
+        end
+    end
+
     function flim = flimStructFromTauMap(tauMean, intensityImg)
         flim = [];
         if isempty(tauMean)
@@ -2158,6 +3278,19 @@ function Luminosa_GUI
             showTauOverlay(img, intensity, 'Tau mean (ns)');
         end
         app.displayMode = 'tau';
+    end
+
+    function showFileSummaryOverlay()
+        [tauMap, intensityMap, titleStr, statusMsg] = resolveFileSummaryOverlay();
+        if isempty(tauMap) || isempty(intensityMap)
+            addStatus('No summed file FLIM overlay is available.');
+            return;
+        end
+        showTauOverlay(tauMap, intensityMap, titleStr);
+        app.displayMode = 'file_tau';
+        if ~isempty(statusMsg)
+            addStatus(statusMsg);
+        end
     end
 
     function showPatternOverlay()
