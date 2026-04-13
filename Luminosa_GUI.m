@@ -45,7 +45,7 @@ function Luminosa_GUI
     app.roiUpdateBusy = false;
     app.roiUpdateTic = tic;
     app.lastRoiUpdateSec = -inf;
-    app.defaultDataPath = 'D:\Luminosa\Data\260323\t1_20260323-103604\t1_20260323-103604';
+    app.defaultDataPath = 'D:\Luminosa\Data\260323\t1_20260323-104842\test\';
     app.smallTitleFont = 8;
     
     % Series (video) related variables
@@ -66,6 +66,7 @@ function Luminosa_GUI
     app.axMIET = [];
     app.cbMIET = [];
     app.dropMietDataset = [];
+    app.dropMietColormap = [];
     app.txtMietInfo = [];
     app.lblMietStatus = [];
     app.editMietCalibPath = [];
@@ -75,6 +76,7 @@ function Luminosa_GUI
     app.editMietMin = [];
     app.editMietMax = [];
     app.lastMietExportFile = '';
+    app.mietVendorApp = [];
 
     app.fig = uifigure('Name','Luminosa FLIM / ISM-FLIM / FCS', 'Position',[80 60 1080 680]);
     app.grid = uigridlayout(app.fig, [1 1]);
@@ -183,9 +185,9 @@ function Luminosa_GUI
 
         % Row 9
         rowRange = uigridlayout(ctlGrid, [1 5]);
-        rowRange.ColumnWidth = {80,60,'1x','1x',70};
+        rowRange.ColumnWidth = {135,55,'1x','1x',60};
         rowRange.Padding = [0 0 0 0];
-        uilabel(rowRange, 'Text', 'Tau range');
+        uilabel(rowRange, 'Text', 'Tau range to display');
         app.chkAutoTauRange = uicheckbox(rowRange, 'Text', 'Auto', 'Value', true);
         app.editTauMin = uieditfield(rowRange, 'numeric', 'Value', 1.0, 'Limits', [0 1e3]);
         app.editTauMax = uieditfield(rowRange, 'numeric', 'Value', 7.0, 'Limits', [0 1e3]);
@@ -217,8 +219,14 @@ function Luminosa_GUI
         app.editChunkM = uieditfield(rowChunk, 'numeric', 'Value', 1, 'Limits', [0.1 50]);
 
         % Row 13
-        app.btnPatternMatch = uibutton(ctlGrid, 'Text', 'Global Fit + Pattern Match', ...
-            'ButtonPushedFcn', @onPatternMatch, 'FontSize', 12);
+        rowAnalysis = uigridlayout(ctlGrid, [1 2]);
+        rowAnalysis.ColumnWidth = {120,'1x'};
+        rowAnalysis.Padding = [0 0 0 0];
+        uibutton(rowAnalysis, 'Text', 'Fit TCSPC', ...
+            'ButtonPushedFcn', @onFitDisplayedTCSPC, 'FontSize', 11, ...
+            'Tooltip', 'Fit the TCSPC currently shown in the bottom display.');
+        app.btnPatternMatch = uibutton(rowAnalysis, 'Text', 'Global Fit + Pattern Match', ...
+            'ButtonPushedFcn', @onPatternMatch, 'FontSize', 11);
 
         % Row 14
         rowSave = uigridlayout(ctlGrid, [1 2]);
@@ -349,7 +357,7 @@ function Luminosa_GUI
         ctlInner = uipanel(ctl, 'BorderType', 'none');
         ctlInner.Units = 'pixels';
 
-        rowHeights = [42, 42, 34, 30, 30, 30, 36, 36, 36, 90];
+        rowHeights = [42, 42, 34, 30, 30, 30, 34, 36, 36, 36, 90];
         ctlGrid = uigridlayout(ctlInner, [numel(rowHeights) 1]);
         ctlGrid.RowHeight = num2cell(rowHeights);
         ctlGrid.RowSpacing = 6;
@@ -398,6 +406,16 @@ function Luminosa_GUI
         app.chkMietAutoRange = uicheckbox(rowDisplayRange, 'Text', 'Auto', 'Value', true, 'ValueChangedFcn', @onMietApplyRange);
         app.editMietMin = uieditfield(rowDisplayRange, 'numeric', 'Value', 0, 'Limits', [-1e6 1e6], 'ValueChangedFcn', @onMietApplyRange);
         app.editMietMax = uieditfield(rowDisplayRange, 'numeric', 'Value', 200, 'Limits', [-1e6 1e6], 'ValueChangedFcn', @onMietApplyRange);
+
+        rowColormap = uigridlayout(ctlGrid, [1 3]);
+        rowColormap.ColumnWidth = {80,'1x',110};
+        rowColormap.Padding = [0 0 0 0];
+        uilabel(rowColormap, 'Text', 'Colormap');
+        app.dropMietColormap = uidropdown(rowColormap, ...
+            'Items', {'MIET Bronze', 'Parula', 'Hot', 'Copper', 'Gray', 'Bone', 'Jet'}, ...
+            'Value', 'MIET Bronze', ...
+            'ValueChangedFcn', @onMietColormapChanged);
+        uibutton(rowColormap, 'Text', 'Nice Image', 'ButtonPushedFcn', @onMietNiceImage, 'FontSize', 11);
 
         rowCompute = uigridlayout(ctlGrid, [1 2]);
         rowCompute.ColumnWidth = {'1x','1x'};
@@ -1342,7 +1360,9 @@ function Luminosa_GUI
         if ~isempty(app.axResidual) && isvalid(app.axResidual)
             cla(app.axResidual);
         end
-        plot(app.axTCSPC, tBinNs*1e-9, cDensity, 'k.', 'MarkerSize', 10);
+        tcspcDensityDisp = clipIrfDisplay(cDensity, 1e-1);
+        maskTcspc = isfinite(tBinNs(:)) & isfinite(tcspcDensityDisp(:));
+        plot(app.axTCSPC, tBinNs(maskTcspc)*1e-9, tcspcDensityDisp(maskTcspc), 'k.', 'MarkerSize', 10);
         hold(app.axTCSPC, 'on');
 
         legendLines = {'ROI TCSPC'};
@@ -1354,9 +1374,9 @@ function Luminosa_GUI
                 irfScale = max(countsShift) / max(irfDisp);
                 irfScaled = irfDisp * irfScale;
                 [tIRFNs, irfDensity] = logBinTCSPC(irfScaled, dtNsNative, binsPerOct);
-                irfDensity = clipIrfDisplay(irfDensity, 1e-1);
-                plot(app.axTCSPC, tIRFNs*1e-9, irfDensity, 'b--', 'LineWidth', 1.1);
-                legendLines{end+1} = 'Whole-file IRF (scaled)';
+                if plotClippedIrfDensity(app.axTCSPC, tIRFNs, irfDensity, 1e-1, 'b--', 1.1)
+                    legendLines{end+1} = 'Whole-file IRF (scaled)';
+                end
             end
         end
         hold(app.axTCSPC, 'off');
@@ -1373,7 +1393,7 @@ function Luminosa_GUI
         setLegendEntries(legendLines);
         setFitSummary({sprintf('ROI source: %s', srcInfo.mode), ...
                        sprintf('Native dt = %.3f ps', 1e3*dtNsNative), ...
-                       sprintf('Shift = %.3f ns', shiftNs), ...
+                       sprintf('Display shift = %.3f ns (full measured curve shown)', shiftNs), ...
                        'Reconvolution fit will run automatically when ROI changes.'});
         app.tcspcDisplayMode = 'roi';
 
@@ -1424,9 +1444,13 @@ function Luminosa_GUI
         if ~isempty(app.axResidual) && isvalid(app.axResidual)
             cla(app.axResidual);
         end
-        plot(app.axTCSPC, app.tcspc.tBinNs*1e-9, app.tcspc.cDensity, 'k.', 'MarkerSize', 10);
+        tcspcDensityDisp = clipIrfDisplay(app.tcspc.cDensity, 1e-1);
+        maskTcspc = isfinite(app.tcspc.tBinNs(:)) & isfinite(tcspcDensityDisp(:));
+        plot(app.axTCSPC, app.tcspc.tBinNs(maskTcspc)*1e-9, tcspcDensityDisp(maskTcspc), 'k.', 'MarkerSize', 10);
         hold(app.axTCSPC, 'on');
-        plot(app.axTCSPC, tFitNs*1e-9, fitDensity, 'r-', 'LineWidth', 1.3);
+        fitDensityDisp = clipIrfDisplay(fitDensity, 1e-1);
+        maskFit = isfinite(tFitNs(:)) & isfinite(fitDensityDisp(:));
+        plot(app.axTCSPC, tFitNs(maskFit)*1e-9, fitDensityDisp(maskFit), 'r-', 'LineWidth', 1.3);
 
         legendLines = {'ROI TCSPC', 'Reconvolution fit'};
         irfDisp = applyDisplayShiftToDecay(irfROI(:), app.tcspc.shiftBins);
@@ -1435,9 +1459,9 @@ function Luminosa_GUI
             irfScale = max(app.tcspc.rawCountsShift) / max(irfDisp);
             irfScaled = irfDisp * irfScale;
             [tIRFNs, irfDensity] = logBinTCSPC(irfScaled, app.tcspc.dtNs, app.txtBins.Value);
-            irfDensity = clipIrfDisplay(irfDensity, 1e-1);
-            plot(app.axTCSPC, tIRFNs*1e-9, irfDensity, 'b--', 'LineWidth', 1.1);
-            legendLines{end+1} = 'Whole-file IRF (scaled)';
+            if plotClippedIrfDensity(app.axTCSPC, tIRFNs, irfDensity, 1e-1, 'b--', 1.1)
+                legendLines{end+1} = 'Whole-file IRF (scaled)';
+            end
         end
         hold(app.axTCSPC, 'off');
         grid(app.axTCSPC, 'on');
@@ -1472,15 +1496,95 @@ function Luminosa_GUI
         ampFrac = amps ./ max(sum(amps), eps);
 
         setLegendEntries(legendLines);
-        setFitSummary({sprintf('ROI fit | model: %d-exp', numel(tauFit)), ...
-                       sprintf('tau (ns): [%s]', strtrim(num2str(tauFit(:).', '%.4g '))), ...
-                       sprintf('amp frac: [%s]', strtrim(num2str(ampFrac(:).', '%.4g '))), ...
-                       sprintf('chi2/ndf = %.4g', chi2red), ...
-                       sprintf('IRF model: %s', app.dropIRF.Value), ...
-                       sprintf('IRF source: whole file | dt = %.3f ps', 1e3*app.tcspc.dtNs)});
+        summaryLines = {sprintf('ROI fit | model: %d-exp', numel(tauFit)), ...
+                        sprintf('tau (ns): [%s]', strtrim(num2str(tauFit(:).', '%.4g '))), ...
+                        sprintf('amp frac: [%s]', strtrim(num2str(ampFrac(:).', '%.4g ')))};
+        if includeBG
+            bgOffset = fittedBackgroundOffsetPerBin(coeff, numel(app.tcspc.rawCountsNative), includeBG);
+            summaryLines{end+1} = sprintf('bg offset ~= %.4g counts/bin', bgOffset);
+        end
+        summaryLines = [summaryLines, {sprintf('chi2/ndf = %.4g', chi2red), ...
+                        sprintf('IRF model: %s', app.dropIRF.Value), ...
+                        sprintf('IRF source: whole file | dt = %.3f ps', 1e3*app.tcspc.dtNs)}];
+        setFitSummary(summaryLines);
 
         app.tcspcDisplayMode = 'roi_fit';
         addStatus(sprintf('ROI fit tau (ns): %s | whole-file IRF model: %s', num2str(tauFit(:).', '%.3g '), app.dropIRF.Value));
+    end
+
+    function onFitDisplayedTCSPC(~, ~)
+        if isempty(app.ptuOut)
+            addStatus('Load a PTU first.');
+            return;
+        end
+
+        switch app.tcspcDisplayMode
+            case {'roi', 'roi_fit'}
+                onFitTCSPC();
+            case 'global'
+                onFitGlobalTCSPC();
+            otherwise
+                if ~isempty(app.roi) && isvalid(app.roi)
+                    onShowTCSPC();
+                    onFitTCSPC();
+                else
+                    showGlobalTCSPC();
+                    onFitGlobalTCSPC();
+                end
+            end
+    end
+
+    function onFitGlobalTCSPC(~, ~)
+        if isempty(app.ptuOut)
+            addStatus('Load a PTU first.');
+            return;
+        end
+        setBusy(true);
+        cleanupBusy = onCleanup(@() setBusy(false)); %#ok<NASGU>
+
+        if ~ensureGlobalIRF(false) || isempty(app.irfGlobal)
+            addStatus('Whole-file IRF unavailable for fitting the displayed TCSPC.');
+            return;
+        end
+
+        tau0 = parseTau0(app.editTau0.Value);
+        if isempty(tau0)
+            addStatus('Enter tau0 (ns), e.g. "0.35 1.5 5".');
+            return;
+        end
+
+        includeBG = app.chkIncludeBG.Value;
+        optimizeTau = app.chkOptimizeTau.Value;
+
+        [countsNative, dtNs, srcInfo] = tcspcFromWholeFile_native(app.ptuOut);
+        if isempty(countsNative) || isempty(dtNs)
+            addStatus('Whole-file TCSPC unavailable for fitting.');
+            return;
+        end
+
+        addStatus(sprintf('Fitting displayed whole-file TCSPC as %d-exp using %s IRF...', numel(tau0), app.dropIRF.Value));
+        try
+            [fitOut, summaryLines] = fitWholeDecayModelWithTau0(countsNative, dtNs, app.irfGlobal, tau0, includeBG, optimizeTau);
+        catch ME
+            addStatus(['Whole-file TCSPC fit failed: ' ME.message]);
+            return;
+        end
+
+        if isempty(fitOut)
+            addStatus('Whole-file TCSPC fit failed.');
+            return;
+        end
+
+        fitOut.summaryLines = summaryLines;
+        fitOut.source = srcInfo;
+        [countsShift, shiftBins, shiftNs, peakIdx, riseIdx] = shiftDecayForIRFDisplay(countsNative, dtNs); %#ok<ASGLU>
+        tcspcGlobalTmp = struct('dtNs', dtNs, 'rawCountsNative', countsNative(:), 'rawCountsShift', countsShift(:), ...
+            'shiftBins', shiftBins, 'shiftNs', shiftNs, 'peakIdx', peakIdx, 'riseIdx', riseIdx, 'cBin', [], 'cDensity', []);
+        fitOut = refreshGlobalFitDisplayCache(fitOut, tcspcGlobalTmp, app.txtBins.Value);
+        app.globalFit = fitOut;
+
+        showGlobalTCSPC();
+        addStatus(sprintf('Whole-file TCSPC fit updated using the %d-component model from Tau0.', app.globalFit.nExp));
     end
 
     function onSaveMAT(~, ~)
@@ -1783,30 +1887,36 @@ function Luminosa_GUI
     end
 
     function onMietLaunchVendor(~, ~)
-        vendorRoots = { ...
-            fullfile(fileparts(mfilename('fullpath')), 'external', 'miet-gui'), ...
-            fullfile(fileparts(mfilename('fullpath')), 'vendor', 'miet-gui')};
-        for ii = 1:numel(vendorRoots)
-            if isfolder(vendorRoots{ii})
-                addpath(genpath(vendorRoots{ii}));
-            end
+        vendorRoot = luminosa_miet_vendor_root();
+        if isempty(vendorRoot)
+            setMietStatus('MIET-GUI was not found on the MATLAB path. Put it in external/miet-gui or add it to the MATLAB path first.');
+            return;
         end
 
-        candidates = {'MIET_GUI', 'MIETGUI', 'miet_gui'};
+        candidates = {'Luminosa_MIET_gui', 'MIET_gui', 'MIETGUI', 'miet_gui', 'MIET_GUI'};
         for ii = 1:numel(candidates)
-            if exist(candidates{ii}, 'file') == 2
+            name = candidates{ii};
+            if exist(name, 'class') == 8 || exist(name, 'file') == 2
                 try
-                    feval(candidates{ii});
-                    setMietStatus(sprintf('Launched external MIET-GUI via %s.', candidates{ii}));
+                    switch name
+                        case 'Luminosa_MIET_gui'
+                            app.mietVendorApp = Luminosa_MIET_gui();
+                        case 'MIET_gui'
+                            app.mietVendorApp = MIET_gui();
+                        otherwise
+                            app.mietVendorApp = [];
+                            feval(name);
+                    end
+                    setMietStatus(sprintf('Launched external MIET-GUI via %s.', name));
                     return;
                 catch ME
-                    setMietStatus(sprintf('Found %s, but launch failed: %s', candidates{ii}, ME.message));
+                    setMietStatus(sprintf('Found %s, but launch failed: %s', name, ME.message));
                     return;
                 end
             end
         end
 
-        setMietStatus('MIET-GUI was not found on the MATLAB path. Put it in external/miet-gui or add it to the MATLAB path first.');
+        setMietStatus(sprintf('MIET-GUI launch entry point was not found after adding %s to the MATLAB path.', vendorRoot));
     end
 
     function onMietCompute(~, ~)
@@ -1876,9 +1986,32 @@ function Luminosa_GUI
         showCurrentMietMap();
     end
 
+    function onMietColormapChanged(~, ~)
+        showCurrentMietMap();
+    end
+
     function onMietApplyRange(~, ~)
         if strcmp(app.mietDisplayMode, 'height')
             showCurrentMietMap();
+        end
+    end
+
+    function onMietNiceImage(~, ~)
+        [mapData, intensityMap, titleStr, modeName, valueRange, errMsg] = getCurrentMietViewData();
+        if ~isempty(errMsg)
+            setMietStatus(errMsg);
+            return;
+        end
+
+        cmapName = getSelectedMietColormapName();
+        try
+            luminosa_miet_nice_image(intensityMap, mapData, titleStr, ...
+                'Mode', modeName, ...
+                'ColormapName', cmapName, ...
+                'ValueRange', valueRange);
+            setMietStatus(sprintf('Opened %s nice image using %s.', modeName, cmapName));
+        catch ME
+            setMietStatus(sprintf('Failed to create nice image: %s', ME.message));
         end
     end
 
@@ -2029,28 +2162,12 @@ function Luminosa_GUI
     end
 
     function showCurrentMietMap()
-        entries = getActiveMietEntries();
-        idx = currentMietEntryIndex();
-        if isempty(entries) || isempty(idx)
+        [mapData, intensityMap, titleStr, modeName, ~, errMsg] = getCurrentMietViewData();
+        if ~isempty(errMsg)
             return;
         end
 
-        entry = entries(idx);
-        intensityMap = [];
-        if isfield(entry, 'intensity')
-            intensityMap = entry.intensity;
-        end
-
-        if strcmp(app.mietDisplayMode, 'height') && isfield(entry, 'heightNm') && ~isempty(entry.heightNm)
-            showMietScalarMap(entry.heightNm, intensityMap, sprintf('MIET height: %s', entry.label), 'height');
-        elseif isfield(entry, 'lifetimeNs') && ~isempty(entry.lifetimeNs)
-            showMietScalarMap(entry.lifetimeNs, intensityMap, sprintf('Lifetime source: %s', entry.label), 'lifetime');
-        else
-            cla(app.axMIET);
-            clearMietColorbar();
-            title(app.axMIET, 'MIET');
-        end
-
+        showMietScalarMap(mapData, intensityMap, titleStr, modeName);
         setMietInfoLines(buildMietInfoLines());
     end
 
@@ -2063,16 +2180,12 @@ function Luminosa_GUI
         clearMietColorbar();
         cla(app.axMIET);
 
-        switch modeName
-            case 'height'
-                cmap = parula(256);
-                valueRange = getMietHeightRange(mapData);
-                cbarLabel = 'Height (nm)';
-            otherwise
-                cmap = jet(256);
-                cmap = cmap(30:end-30, :);
-                valueRange = getTauRange(mapData);
-                cbarLabel = 'Lifetime (ns)';
+        valueRange = getMietDisplayRange(mapData, modeName);
+        cmap = luminosa_miet_colormap(getSelectedMietColormapName(), 256, 'display');
+        if strcmp(modeName, 'height')
+            cbarLabel = 'Height (nm)';
+        else
+            cbarLabel = 'Lifetime (ns)';
         end
 
         if nargin >= 2 && ~isempty(intensityMap) && isequal(size(intensityMap), size(mapData))
@@ -2091,6 +2204,57 @@ function Luminosa_GUI
         app.cbMIET = colorbar(app.axMIET);
         ylabel(app.cbMIET, cbarLabel);
         title(app.axMIET, titleStr, 'Interpreter', 'none');
+    end
+
+    function [mapData, intensityMap, titleStr, modeName, valueRange, errMsg] = getCurrentMietViewData()
+        mapData = [];
+        intensityMap = [];
+        titleStr = 'MIET';
+        modeName = 'height';
+        valueRange = [0 1];
+        errMsg = 'No MIET source loaded.';
+
+        entries = getActiveMietEntries();
+        idx = currentMietEntryIndex();
+        if isempty(entries) || isempty(idx)
+            return;
+        end
+
+        entry = entries(idx);
+        if isfield(entry, 'intensity')
+            intensityMap = entry.intensity;
+        end
+
+        if strcmp(app.mietDisplayMode, 'height') && isfield(entry, 'heightNm') && ~isempty(entry.heightNm)
+            mapData = entry.heightNm;
+            titleStr = sprintf('MIET height: %s', entry.label);
+            modeName = 'height';
+        elseif isfield(entry, 'lifetimeNs') && ~isempty(entry.lifetimeNs)
+            mapData = entry.lifetimeNs;
+            titleStr = sprintf('Lifetime source: %s', entry.label);
+            modeName = 'lifetime';
+        else
+            errMsg = 'Selected dataset does not contain a displayable MIET map.';
+            return;
+        end
+
+        valueRange = getMietDisplayRange(mapData, modeName);
+        errMsg = '';
+    end
+
+    function cmapName = getSelectedMietColormapName()
+        cmapName = 'MIET Bronze';
+        if ~isempty(app.dropMietColormap) && isvalid(app.dropMietColormap) && ~isempty(app.dropMietColormap.Value)
+            cmapName = app.dropMietColormap.Value;
+        end
+    end
+
+    function valueRange = getMietDisplayRange(mapData, modeName)
+        if strcmp(modeName, 'height')
+            valueRange = getMietHeightRange(mapData);
+        else
+            valueRange = getTauRange(mapData);
+        end
     end
 
     function clearMietColorbar()
@@ -2563,6 +2727,7 @@ function Luminosa_GUI
         if isempty(ax) || ~isvalid(ax)
             return;
         end
+        floorVal = 1e-1;
         try
             drawnow limitrate;
         catch
@@ -2570,16 +2735,58 @@ function Luminosa_GUI
         ax.YScale = 'log';
         ax.YGrid = 'on';
         ax.YMinorGrid = 'off';
-        yLim = ax.YLim;
-        if numel(yLim) < 2 || any(~isfinite(yLim)) || yLim(1) <= 0
-            return;
+        yMax = findMaxPositiveYData(ax, floorVal);
+        if ~isfinite(yMax) || yMax <= floorVal
+            yLim = ax.YLim;
+            if numel(yLim) >= 2 && isfinite(yLim(2)) && yLim(2) > floorVal
+                yMax = yLim(2);
+            else
+                yMax = 10 * floorVal;
+            end
         end
-        p1 = floor(log10(yLim(1)));
-        p2 = ceil(log10(yLim(2)));
+        ax.YLim = [floorVal yMax];
+        p1 = floor(log10(floorVal));
+        p2 = ceil(log10(yMax));
         if p2 < p1
             p2 = p1;
         end
-        ax.YTick = 10.^(p1:p2);
+        yTicks = 10.^(p1:p2);
+        yTicks = yTicks(yTicks >= floorVal & yTicks <= yMax * (1 + 1e-12));
+        if isempty(yTicks) || yTicks(1) > floorVal * (1 + 1e-12)
+            yTicks = [floorVal, yTicks];
+        end
+        ax.YTick = unique(yTicks);
+    end
+
+    function yMax = findMaxPositiveYData(ax, floorVal)
+        yMax = NaN;
+        if nargin < 2 || isempty(floorVal)
+            floorVal = 1e-1;
+        end
+        if isempty(ax) || ~isvalid(ax)
+            return;
+        end
+
+        kids = ax.Children;
+        for k = 1:numel(kids)
+            child = kids(k);
+            if ~isprop(child, 'YData')
+                continue;
+            end
+            try
+                y = double(child.YData(:));
+            catch
+                continue;
+            end
+            y = y(isfinite(y) & y >= floorVal);
+            if isempty(y)
+                continue;
+            end
+            ymaxChild = max(y);
+            if ~isfinite(yMax) || ymaxChild > yMax
+                yMax = ymaxChild;
+            end
+        end
     end
 
     function y = clipIrfDisplay(y, floorVal)
@@ -2587,7 +2794,33 @@ function Luminosa_GUI
             floorVal = 1e-1;
         end
         y = double(y);
-        y(y < floorVal) = NaN;
+        y(~isfinite(y) | y < floorVal) = NaN;
+    end
+
+    function didPlot = plotClippedIrfDensity(ax, tNs, yDensity, floorVal, lineSpec, lineWidth)
+        didPlot = false;
+        if nargin < 4 || isempty(floorVal)
+            floorVal = 1e-1;
+        end
+        if nargin < 5 || isempty(lineSpec)
+            lineSpec = 'b--';
+        end
+        if nargin < 6 || isempty(lineWidth)
+            lineWidth = 1.1;
+        end
+        if isempty(ax) || ~isvalid(ax)
+            return;
+        end
+
+        tNs = double(tNs(:));
+        yDensity = clipIrfDisplay(yDensity, floorVal);
+        mask = isfinite(tNs) & isfinite(yDensity) & (yDensity > 0);
+        if ~any(mask)
+            return;
+        end
+
+        plot(ax, tNs(mask)*1e-9, yDensity(mask), lineSpec, 'LineWidth', lineWidth);
+        didPlot = true;
     end
 
 
@@ -3366,7 +3599,9 @@ function Luminosa_GUI
         if ~isempty(app.axResidual) && isvalid(app.axResidual)
             cla(app.axResidual);
         end
-        plot(app.axTCSPC, app.tcspcGlobal.tBinNs*1e-9, app.tcspcGlobal.cDensity, 'k.', 'MarkerSize', 10);
+        tcspcDensityDisp = clipIrfDisplay(app.tcspcGlobal.cDensity, 1e-1);
+        maskTcspc = isfinite(app.tcspcGlobal.tBinNs(:)) & isfinite(tcspcDensityDisp(:));
+        plot(app.axTCSPC, app.tcspcGlobal.tBinNs(maskTcspc)*1e-9, tcspcDensityDisp(maskTcspc), 'k.', 'MarkerSize', 10);
         hold(app.axTCSPC, 'on');
         legendLines = {'Whole-file TCSPC'};
 
@@ -3378,15 +3613,27 @@ function Luminosa_GUI
                 irfScale = max(app.tcspcGlobal.cBin) / max(irfDisp);
                 irfScaled = irfDisp * irfScale;
                 [tIRFNs, irfDensity] = logBinTCSPC(irfScaled, app.tcspcGlobal.dtNs, app.txtBins.Value);
-                irfDensity = clipIrfDisplay(irfDensity, 1e-1);
-                plot(app.axTCSPC, tIRFNs*1e-9, irfDensity, 'b--', 'LineWidth', 1.1);
-                legendLines{end+1} = 'Whole-file IRF (scaled)';
+                if plotClippedIrfDensity(app.axTCSPC, tIRFNs, irfDensity, 1e-1, 'b--', 1.1)
+                    legendLines{end+1} = 'Whole-file IRF (scaled)';
+                end
             end
         end
 
         if ~isempty(fitDensityPlot)
-            plot(app.axTCSPC, app.globalFit.tBinNs*1e-9, fitDensityPlot, 'r-', 'LineWidth', 1.3);
-            legendLines{end+1} = sprintf('Best fit (%d-exp)', app.globalFit.nExp);
+            fitDensityDisp = clipIrfDisplay(fitDensityPlot, 1e-1);
+            maskFit = isfinite(app.globalFit.tBinNs(:)) & isfinite(fitDensityDisp(:));
+            plot(app.axTCSPC, app.globalFit.tBinNs(maskFit)*1e-9, fitDensityDisp(maskFit), 'r-', 'LineWidth', 1.3);
+            fitLegend = sprintf('Fit (%d-exp)', app.globalFit.nExp);
+            if isfield(app.globalFit, 'selectionMode')
+                selectionMode = lower(char(string(app.globalFit.selectionMode)));
+                switch selectionMode
+                    case 'bic'
+                        fitLegend = sprintf('Best fit (%d-exp)', app.globalFit.nExp);
+                    case 'tau0'
+                        fitLegend = sprintf('Tau0-selected fit (%d-exp)', app.globalFit.nExp);
+                end
+            end
+            legendLines{end+1} = fitLegend;
         end
         hold(app.axTCSPC, 'off');
 
@@ -3576,6 +3823,7 @@ function Luminosa_GUI
         end
         [bestFit, summaryLines] = chooseBestDecayModel(fitAll);
         bestFit.summaryLines = summaryLines;
+        bestFit.selectionMode = 'bic';
         bestFit.source = srcInfo;
         [countsShift, shiftBins, shiftNs, peakIdx, riseIdx] = shiftDecayForIRFDisplay(countsNative, dtNs); %#ok<ASGLU>
         tcspcGlobalTmp = struct('dtNs', dtNs, 'rawCountsNative', countsNative(:), 'rawCountsShift', countsShift(:), ...
@@ -3780,6 +4028,41 @@ function fitAll = fitWholeDecayModelSweep(countsRawFull, dtNs, irf, maxExp, incl
     end
 end
 
+function [fitOut, summaryLines] = fitWholeDecayModelWithTau0(countsRawFull, dtNs, irf, tau0, includeBG, optimizeTau)
+    tau0 = double(tau0(:).');
+    if isempty(tau0)
+        fitOut = [];
+        summaryLines = {};
+        return;
+    end
+
+    [tauFit, coeff, fitCountsRawFull, stats] = fitDecayIRFModelMultiStart(countsRawFull, dtNs, tau0, irf, includeBG, optimizeTau);
+    fitOut = struct();
+    fitOut.nExp = numel(tau0);
+    fitOut.tau0 = tau0;
+    fitOut.tauFit = tauFit(:).';
+    fitOut.coeff = coeff(:).';
+    fitOut.fitCountsRawFull = fitCountsRawFull(:);
+    fitOut.stats = stats;
+    fitOut.selectionMode = 'tau0';
+
+    amps = fitOut.coeff(1 + double(fitOut.stats.includeBG):end);
+    ampFrac = amps ./ max(sum(amps), eps);
+    summaryLines = { ...
+        sprintf('Selected model: %d-exp (from Tau0)', fitOut.nExp), ...
+        sprintf('tau0 (ns): [%s]', strtrim(num2str(fitOut.tau0, '%.4g '))), ...
+        sprintf('tau fit (ns): [%s]', strtrim(num2str(fitOut.tauFit, '%.4g '))), ...
+        sprintf('amp frac: [%s]', strtrim(num2str(ampFrac(:).', '%.4g '))), ...
+        sprintf('chi2/ndf = %.4g', fitOut.stats.chi2red)};
+    if fitOut.stats.includeBG
+        summaryLines{end+1} = sprintf('bg offset ~= %.4g counts/bin', ...
+            fittedBackgroundOffsetPerBin(fitOut.coeff, numel(fitOut.fitCountsRawFull), fitOut.stats.includeBG));
+        summaryLines{end+1} = 'Background term included';
+    else
+        summaryLines{end+1} = 'Background term excluded';
+    end
+end
+
 function [bestFit, summaryLines] = chooseBestDecayModel(fitAll)
     if isempty(fitAll)
         bestFit = [];
@@ -3807,6 +4090,12 @@ function [bestFit, summaryLines] = chooseBestDecayModel(fitAll)
         sprintf('chi2/ndf = %.4g', bestFit.stats.chi2red), ...
         sprintf('BIC-like = %.4g', bestFit.stats.bic), ...
         'Model sweep:'};
+    if bestFit.stats.includeBG
+        summaryLines = [summaryLines(1:3), ...
+            {sprintf('bg offset ~= %.4g counts/bin', ...
+            fittedBackgroundOffsetPerBin(bestFit.coeff, numel(bestFit.fitCountsRawFull), bestFit.stats.includeBG))}, ...
+            summaryLines(4:end)];
+    end
     for k = 1:numel(fitAll)
         summaryLines{end+1} = sprintf('  %d-exp: chi2/ndf=%.4g  BIC=%.4g', ...
             fitAll(k).nExp, fitAll(k).stats.chi2red, fitAll(k).stats.bic); %#ok<AGROW>
@@ -4047,9 +4336,9 @@ function [cube, dt_ns] = buildLinearTcspcCubeFromPhotonLists(ptuOut)
     cube = reshape(counts, [nx, ny, Ngate, nCh]);
 end
 
-function [counts, dtNs, srcInfo] = tcspcFromROI_native(ptuOut, roi)
+    function [counts, dtNs, srcInfo] = tcspcFromROI_native(ptuOut, roi)
 % Prefer per-photon native TCSPC when available. Fall back to tcspc_pix.
-    srcInfo = struct('mode', 'unknown', 'native', false);
+        srcInfo = struct('mode', 'unknown', 'native', false);
 
     if isfield(ptuOut, 'im_col') && isfield(ptuOut, 'im_line')
         idx = roiPhotonMask(ptuOut, roi);
@@ -4058,19 +4347,20 @@ function [counts, dtNs, srcInfo] = tcspcFromROI_native(ptuOut, roi)
     end
 
     % Native per-photon TCSPC preserved by the patched reader
-    if ~isempty(idx) && any(idx) && isfield(ptuOut, 'im_tcspc_native') && ~isempty(ptuOut.im_tcspc_native)
-        dtNs = getNativeTcspcResolutionNs(ptuOut.head);
-        tNative = double(ptuOut.im_tcspc_native(idx));
-        if isempty(tNative)
-            counts = [];
+        if ~isempty(idx) && any(idx) && isfield(ptuOut, 'im_tcspc_native') && ~isempty(ptuOut.im_tcspc_native)
+            dtNs = getNativeTcspcResolutionNs(ptuOut.head);
+            tNative = double(ptuOut.im_tcspc_native(idx));
+            if isempty(tNative)
+                counts = [];
             return;
         end
-        nT = max(max(tNative), ceil((ptuOut.head.MeasDesc_GlobalResolution * 1e9) / dtNs) + 1);
-        counts = accumarray(max(1, round(tNative(:))), 1, [nT, 1], @sum, 0);
-        srcInfo.mode = 'native photon list';
-        srcInfo.native = true;
-        return;
-    end
+            nT = max(max(tNative), ceil((ptuOut.head.MeasDesc_GlobalResolution * 1e9) / dtNs) + 1);
+            counts = accumarray(max(1, round(tNative(:))), 1, [nT, 1], @sum, 0);
+            srcInfo.mode = 'native photon list';
+            srcInfo.native = true;
+            [counts, srcInfo] = trimTrailingTcspcSupport(counts, srcInfo);
+            return;
+        end
 
     % Fallback to native-like photon list if resolution fields are present
     if ~isempty(idx) && any(idx) && isfield(ptuOut, 'im_tcspc') && ~isempty(ptuOut.im_tcspc) && isfield(ptuOut.head, 'MeasDesc_Resolution_Original')
@@ -4085,6 +4375,7 @@ function [counts, dtNs, srcInfo] = tcspcFromROI_native(ptuOut, roi)
         counts = accumarray(max(1, round(tNative(:))), 1, [nT, 1], @sum, 0);
         srcInfo.mode = 'expanded coarse photon list';
         srcInfo.native = false;
+        [counts, srcInfo] = trimTrailingTcspcSupport(counts, srcInfo);
         return;
     end
 
@@ -4104,6 +4395,7 @@ function [counts, dtNs, srcInfo] = tcspcFromROI_native(ptuOut, roi)
         counts = double(counts(:));
         srcInfo.mode = 'tcspc cube';
         srcInfo.native = false;
+        [counts, srcInfo] = trimTrailingTcspcSupport(counts, srcInfo);
         return;
     end
 
@@ -4111,11 +4403,11 @@ function [counts, dtNs, srcInfo] = tcspcFromROI_native(ptuOut, roi)
     dtNs = [];
 end
 
-function [counts, dtNs, srcInfo] = tcspcFromWholeFile_native(ptuOut)
+    function [counts, dtNs, srcInfo] = tcspcFromWholeFile_native(ptuOut)
 % Whole-file TCSPC with best available resolution.
-    srcInfo = struct('mode', 'unknown', 'native', false, 'binned', false, 'tAxisNs', [], 'widthNs', []);
+        srcInfo = struct('mode', 'unknown', 'native', false, 'binned', false, 'tAxisNs', [], 'widthNs', []);
 
-    if isfield(ptuOut, 'cachedGlobalDecayCounts') && ~isempty(ptuOut.cachedGlobalDecayCounts)
+        if isfield(ptuOut, 'cachedGlobalDecayCounts') && ~isempty(ptuOut.cachedGlobalDecayCounts)
         counts = double(ptuOut.cachedGlobalDecayCounts(:));
         if isfield(ptuOut, 'cachedGlobalDecayDtNs') && ~isempty(ptuOut.cachedGlobalDecayDtNs)
             dtNs = ptuOut.cachedGlobalDecayDtNs;
@@ -4127,6 +4419,7 @@ function [counts, dtNs, srcInfo] = tcspcFromWholeFile_native(ptuOut)
         else
             srcInfo.mode = 'cached frame decay';
         end
+        [counts, srcInfo] = trimTrailingTcspcSupport(counts, srcInfo);
         return;
     end
 
@@ -4141,6 +4434,7 @@ function [counts, dtNs, srcInfo] = tcspcFromWholeFile_native(ptuOut)
         counts = accumarray(max(1, round(tNative(:))), 1, [nT, 1], @sum, 0);
         srcInfo.mode = 'native photon list';
         srcInfo.native = true;
+        [counts, srcInfo] = trimTrailingTcspcSupport(counts, srcInfo);
         return;
     end
 
@@ -4156,6 +4450,7 @@ function [counts, dtNs, srcInfo] = tcspcFromWholeFile_native(ptuOut)
         counts = accumarray(max(1, round(tNative(:))), 1, [nT, 1], @sum, 0);
         srcInfo.mode = 'expanded coarse photon list';
         srcInfo.native = false;
+        [counts, srcInfo] = trimTrailingTcspcSupport(counts, srcInfo);
         return;
     end
 
@@ -4166,6 +4461,7 @@ function [counts, dtNs, srcInfo] = tcspcFromWholeFile_native(ptuOut)
         counts = double(counts(:));
         srcInfo.mode = 'tcspc cube';
         srcInfo.native = false;
+        [counts, srcInfo] = trimTrailingTcspcSupport(counts, srcInfo);
         return;
     end
 
@@ -4187,6 +4483,7 @@ function [counts, dtNs, srcInfo] = tcspcFromWholeFile_native(ptuOut)
         if isfield(ptuOut, 'tcspc_mt_width_ns') && ~isempty(ptuOut.tcspc_mt_width_ns)
             srcInfo.widthNs = double(ptuOut.tcspc_mt_width_ns(:));
         end
+        [counts, srcInfo] = trimTrailingTcspcSupport(counts, srcInfo);
         return;
     end
 
@@ -4194,17 +4491,45 @@ function [counts, dtNs, srcInfo] = tcspcFromWholeFile_native(ptuOut)
     dtNs = [];
 end
 
-function dtNs = getNativeTcspcResolutionNs(head)
-    if isfield(head, 'MeasDesc_Resolution_Original') && ~isempty(head.MeasDesc_Resolution_Original)
-        dtNs = double(head.MeasDesc_Resolution_Original) * 1e9;
-    else
-        dtNs = double(head.MeasDesc_Resolution) * 1e9;
+    function dtNs = getNativeTcspcResolutionNs(head)
+        if isfield(head, 'MeasDesc_Resolution_Original') && ~isempty(head.MeasDesc_Resolution_Original)
+            dtNs = double(head.MeasDesc_Resolution_Original) * 1e9;
+        else
+            dtNs = double(head.MeasDesc_Resolution) * 1e9;
+        end
     end
-end
 
-function [countsShift, shiftBins, shiftNs, peakIdx, riseIdx] = shiftDecayForIRFDisplay(counts, dtNs)
-% Circular-shift the decay for display while preserving the full TCSPC.
-% The rise onset is moved left so no more than ~0.5 ns precedes it.
+    function [countsTrim, srcInfoTrim] = trimTrailingTcspcSupport(counts, srcInfo)
+        countsTrim = double(counts(:));
+        srcInfoTrim = srcInfo;
+        if isempty(countsTrim)
+            return;
+        end
+
+        lastIdx = find(countsTrim > 0, 1, 'last');
+        if isempty(lastIdx)
+            lastIdx = numel(countsTrim);
+        end
+        lastIdx = max(1, min(numel(countsTrim), lastIdx));
+        if lastIdx >= numel(countsTrim)
+            return;
+        end
+
+        countsTrim = countsTrim(1:lastIdx);
+        if isstruct(srcInfoTrim)
+            if isfield(srcInfoTrim, 'tAxisNs') && ~isempty(srcInfoTrim.tAxisNs)
+                srcInfoTrim.tAxisNs = srcInfoTrim.tAxisNs(1:min(lastIdx, numel(srcInfoTrim.tAxisNs)));
+            end
+            if isfield(srcInfoTrim, 'widthNs') && ~isempty(srcInfoTrim.widthNs)
+                srcInfoTrim.widthNs = srcInfoTrim.widthNs(1:min(lastIdx, numel(srcInfoTrim.widthNs)));
+            end
+            srcInfoTrim.trimmedTrailingBins = numel(counts) - lastIdx;
+        end
+    end
+
+    function [countsShift, shiftBins, shiftNs, peakIdx, riseIdx] = shiftDecayForIRFDisplay(counts, dtNs)
+% Preserve the full measured TCSPC ordering for display.
+% Rise/peak indices are still reported for annotations and fitting metadata.
     counts = double(counts(:));
     if isempty(counts) || isempty(dtNs) || ~isfinite(dtNs) || dtNs <= 0
         countsShift = counts;
@@ -4218,13 +4543,9 @@ function [countsShift, shiftBins, shiftNs, peakIdx, riseIdx] = shiftDecayForIRFD
     [~, peakIdx] = max(counts);
     peakIdx = max(1, peakIdx);
     riseIdx = estimateDecayRiseStartIdx(counts, dtNs, peakIdx);
-
-    preRiseNs = 0.50;
-    preRiseBins = max(0, round(preRiseNs / max(dtNs, eps)));
-    targetRiseIdx = min(numel(counts), preRiseBins + 1);
-    shiftBins = max(0, riseIdx - targetRiseIdx);
-    shiftNs = shiftBins * dtNs;
-    countsShift = applyDisplayShiftToDecay(counts, shiftBins);
+    shiftBins = 0;
+    shiftNs = 0;
+    countsShift = counts;
 end
 
 function riseIdx = estimateDecayRiseStartIdx(counts, dtNs, peakIdx)
@@ -4448,9 +4769,90 @@ function [err, coeff, fitCounts] = roiTcspcErrRawIRF(tau, counts, dtNs, irf, inc
         M(:, includeBG + k) = convSig(1:nBins);
     end
 
-    coeff = lsqnonneg(M, counts);
-    fitCounts = M * coeff;
+    [coeff, fitCounts] = solveDecayCoefficientsPIRLS(M, counts);
     err = sum((counts - fitCounts).^2 ./ max(fitCounts, 1));
+end
+
+function [coeff, fitCounts] = solveDecayCoefficientsPIRLS(M, counts)
+    counts = max(double(counts(:)), 0);
+    M = max(double(M), 0);
+    Mscaled = normalizeDecayModelColumns(M);
+    coeff = solveNonnegativePIRLS(Mscaled, counts, 10);
+    coeff = max(double(coeff(:)), 0);
+    fitCounts = Mscaled * coeff;
+    coeff = coeff(:).';
+end
+
+function Mscaled = normalizeDecayModelColumns(M)
+    M = double(M);
+    colScale = sum(M, 1);
+    colScale(~isfinite(colScale) | colScale <= 0) = 1;
+    Mscaled = M ./ colScale;
+end
+
+function coeff = solveNonnegativePIRLS(M, y, maxNumIter)
+    if nargin < 3 || isempty(maxNumIter)
+        maxNumIter = 10;
+    end
+    try
+        coeff = double(PIRLSnonneg(M, y, maxNumIter));
+        coeff = coeff(:);
+        return;
+    catch
+    end
+    coeff = localProjectedGradientPIRLSVec(M, y, maxNumIter, 50);
+end
+
+function beta = localProjectedGradientPIRLSVec(M, y, maxPirlsIter, maxPgIter)
+    M = double(M);
+    y = double(y(:));
+    [~, nBasis] = size(M);
+    tiny = max(1e-6, 0.1 / max(1, size(M, 1)));
+    reg = 1e-6 * eye(nBasis);
+    beta = max((M' * M + reg) \ (M' * y), 0);
+
+    for iterIdx = 1:maxPirlsIter
+        mu = max(M * beta, tiny);
+        w = 1 ./ mu;
+        Aw = M' * (M .* w) + reg;
+        bw = M' * (w .* y);
+        betaNew = projectedGradientNnlsVec(Aw, bw, maxPgIter, beta);
+        if sum((betaNew - beta).^2) < 1e-10
+            beta = betaNew;
+            break;
+        end
+        beta = betaNew;
+    end
+end
+
+function beta = projectedGradientNnlsVec(A, b, maxIter, beta)
+    if nargin < 4 || isempty(beta)
+        beta = max(A \ b, 0);
+    else
+        beta = max(double(beta(:)), 0);
+    end
+    L = max(sum(abs(A), 2));
+    if ~isfinite(L) || L <= 0
+        L = 1;
+    end
+    for iterIdx = 1:maxIter
+        grad = A * beta - b;
+        betaNew = max(beta - grad ./ L, 0);
+        if sum((betaNew - beta).^2) < 1e-10
+            beta = betaNew;
+            break;
+        end
+        beta = betaNew;
+    end
+end
+
+function bgPerBin = fittedBackgroundOffsetPerBin(coeff, nBins, includeBG)
+    bgPerBin = 0;
+    if nargin < 3 || ~includeBG || isempty(coeff) || isempty(nBins) || nBins < 1
+        return;
+    end
+    coeff = double(coeff(:));
+    bgPerBin = max(coeff(1), 0) / max(double(nBins), 1);
 end
 
 function idx = roiPhotonMask(ptuOut, roi)
@@ -4633,8 +5035,7 @@ function err = irfFitErrGamma(p, y, t, tau0)
     end
     irf = makeGammaShiftedIRF(t, shift, k, theta);
     model = buildDecayModelFromIRF(irf, t, tau0, true);
-    coeff = lsqnonneg(model, y);
-    yhat = model * coeff;
+    [~, yhat] = solveDecayCoefficientsPIRLS(model, y);
     err = sum((y - yhat).^2 ./ max(yhat, 1));
 end
 
@@ -4648,8 +5049,7 @@ function err = irfFitErrExGauss(p, y, t, tau0)
     end
     irf = makeExGaussIRF(t, mu, sigma, taui);
     model = buildDecayModelFromIRF(irf, t, tau0, true);
-    coeff = lsqnonneg(model, y);
-    yhat = model * coeff;
+    [~, yhat] = solveDecayCoefficientsPIRLS(model, y);
     err = sum((y - yhat).^2 ./ max(yhat, 1));
 end
 
