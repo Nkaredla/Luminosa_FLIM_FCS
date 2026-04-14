@@ -15,6 +15,8 @@ function Luminosa_GUI
     app.ismRes = [];
     app.flim = [];
     app.pattern = [];
+    app.distFluofit = [];
+    app.flimBayes = [];
     app.fcs = [];
     app.roi = [];
     app.lastFile = '';
@@ -29,6 +31,7 @@ function Luminosa_GUI
     app.tcspcDisplayMode = 'none';
     app.gamma = 1;
     app.displayMode = 'intensity';
+    app.activeFlimMode = '';
     app.cbTau = [];
     app.cbImage = [];
     app.irfCache = struct('key', '', 'irf', [], 'meta', struct());
@@ -56,7 +59,9 @@ function Luminosa_GUI
     app.frameSlider = [];       % Frame navigation slider
     app.seriesIntensityCache = [];  % Pre-computed intensity images for fast scrolling
     app.seriesTcspcPixCache = [];   % Pre-computed tcspc_pix for fast ROI access
-    app.seriesFlimCache = [];       % Pre-computed FLIM images for fast scrolling
+    app.seriesFlimCache = [];       % Pre-computed tau-mean images for fast scrolling
+    app.seriesDistFitCache = [];    % Cached DistFluofit-extension results per frame
+    app.seriesBayesCache = [];      % Cached Bayesian FLIM results per frame
     app.seriesFrameFileMap = [];    % Map each frame to its source PTU file
     app.ptuOutOriginal = [];        % Original full-file data for global IRF calculation
     app.mietSourceEntries = struct([]);
@@ -110,7 +115,7 @@ function Luminosa_GUI
         ctlInner.Units = 'pixels';
 
         % Keep all action-button rows at one consistent height.
-        rowHeights = [42, 28, 34, 36, 36, 30, 30, 30, 30, 30, 30, 30, 36, 36, 72];
+        rowHeights = [42, 28, 34, 36, 36, 36, 30, 30, 30, 30, 30, 30, 30, 36, 36, 72];
         ctlGrid = uigridlayout(ctlInner, [numel(rowHeights) 1]);
         ctlGrid.RowHeight = num2cell(rowHeights);
         ctlGrid.RowSpacing = 6;
@@ -143,15 +148,26 @@ function Luminosa_GUI
         app.lblGamma = uilabel(rowGamma, 'Text', '1.00');
 
         % Row 4
-        rowRun = uigridlayout(ctlGrid, [1 4]);
-        rowRun.ColumnWidth = {'1x','1x','1x','1x'};
-        rowRun.Padding = [0 0 0 0];
-        app.btnQuickFLIM = uibutton(rowRun, 'Text', 'FLIM', 'ButtonPushedFcn', @onQuickFLIM, 'FontSize', 11);
-        app.btnISMFLIM = uibutton(rowRun, 'Text', 'ISM', 'ButtonPushedFcn', @onISMFLIM, 'FontSize', 11);
-        app.btnShowIntensity = uibutton(rowRun, 'Text', 'Intensity', 'ButtonPushedFcn', @onShowIntensity, 'FontSize', 11);
-        app.btnShowTau = uibutton(rowRun, 'Text', 'Sum FLIM', 'ButtonPushedFcn', @onShowTauMean, 'FontSize', 11);
+        rowRunPrimary = uigridlayout(ctlGrid, [1 4]);
+        rowRunPrimary.ColumnWidth = {'1x','1x','1x','1x'};
+        rowRunPrimary.Padding = [0 0 0 0];
+        app.btnQuickFLIM = uibutton(rowRunPrimary, 'Text', 'Tau mean', 'ButtonPushedFcn', @onQuickFLIM, 'FontSize', 11);
+        app.btnQuickFLIMStd = uibutton(rowRunPrimary, 'Text', 'FLIM std', 'ButtonPushedFcn', @onQuickFLIMStd, 'FontSize', 11);
+        app.btnDistFluofit = uibutton(rowRunPrimary, 'Text', 'DistFluofit', 'ButtonPushedFcn', @onDistFluofitExtension, 'FontSize', 10);
+        app.btnFlimBayes = uibutton(rowRunPrimary, 'Text', 'FLIM_bayes', 'ButtonPushedFcn', @onFlimBayes, 'FontSize', 10);
+        app.flimButtonInactiveColor = app.btnQuickFLIM.BackgroundColor;
+        app.flimButtonActiveColor = [0.78 0.78 0.78];
+        app.flimButtonInactiveFontColor = app.btnQuickFLIM.FontColor;
 
         % Row 5
+        rowRunSecondary = uigridlayout(ctlGrid, [1 3]);
+        rowRunSecondary.ColumnWidth = {'1x','1x','1x'};
+        rowRunSecondary.Padding = [0 0 0 0];
+        app.btnISMFLIM = uibutton(rowRunSecondary, 'Text', 'ISM', 'ButtonPushedFcn', @onISMFLIM, 'FontSize', 11);
+        app.btnShowIntensity = uibutton(rowRunSecondary, 'Text', 'Intensity', 'ButtonPushedFcn', @onShowIntensity, 'FontSize', 11);
+        app.btnShowTau = uibutton(rowRunSecondary, 'Text', 'Sum FLIM', 'ButtonPushedFcn', @onShowTauMean, 'FontSize', 11);
+
+        % Row 6
         rowROI = uigridlayout(ctlGrid, [1 3]);
         rowROI.ColumnWidth = {70, 90, '1x'};
         rowROI.Padding = [0 0 0 0];
@@ -160,7 +176,7 @@ function Luminosa_GUI
         app.dropROIShape.Tooltip = 'ROI shape';
         app.btnShowTCSPC = uibutton(rowROI, 'Text', 'Show Full TCSPC', 'ButtonPushedFcn', @onShowFullTCSPC, 'FontSize', 11);
 
-        % Row 6
+        % Row 7
         rowNsub = uigridlayout(ctlGrid, [1 2]);
         rowNsub.ColumnWidth = {120,'1x'};
         rowNsub.Padding = [0 0 0 0];
@@ -169,21 +185,21 @@ function Luminosa_GUI
             'LowerLimitInclusive', 'on', 'UpperLimitInclusive', 'on', ...
             'ValueChangedFcn', @onTcspcBinningChanged);
 
-        % Row 7
+        % Row 8
         rowTau0 = uigridlayout(ctlGrid, [1 2]);
         rowTau0.ColumnWidth = {85,'1x'};
         rowTau0.Padding = [0 0 0 0];
         uilabel(rowTau0, 'Text', 'Tau0 (ns)');
         app.editTau0 = uieditfield(rowTau0, 'text', 'Value', '0.35 1.5 5');
 
-        % Row 8
+        % Row 9
         rowFit = uigridlayout(ctlGrid, [1 2]);
         rowFit.ColumnWidth = {'1x','1x'};
         rowFit.Padding = [0 0 0 0];
         app.chkOptimizeTau = uicheckbox(rowFit, 'Text', 'Optimize tau', 'Value', true);
         app.chkIncludeBG = uicheckbox(rowFit, 'Text', 'Include BG', 'Value', true);
 
-        % Row 9
+        % Row 10
         rowRange = uigridlayout(ctlGrid, [1 5]);
         rowRange.ColumnWidth = {135,55,'1x','1x',60};
         rowRange.Padding = [0 0 0 0];
@@ -195,7 +211,7 @@ function Luminosa_GUI
         app.editTauMax.Tooltip = 'Max tau (ns)';
         app.btnApplyTauRange = uibutton(rowRange, 'Text', 'Apply', 'ButtonPushedFcn', @onApplyTauRange);
 
-        % Row 10
+        % Row 11
         rowPattern = uigridlayout(ctlGrid, [1 2]);
         rowPattern.ColumnWidth = {110,'1x'};
         rowPattern.Padding = [0 0 0 0];
@@ -203,7 +219,7 @@ function Luminosa_GUI
         app.dropPatternSource = uidropdown(rowPattern, 'Items', {'Confocal (ptuOut)','ISM reassigned (flim)'}, ...
             'Value', 'Confocal (ptuOut)');
 
-        % Row 11
+        % Row 12
         rowIRF = uigridlayout(ctlGrid, [1 2]);
         rowIRF.ColumnWidth = {85,'1x'};
         rowIRF.Padding = [0 0 0 0];
@@ -211,14 +227,14 @@ function Luminosa_GUI
         app.dropIRF = uidropdown(rowIRF, 'Items', {'GammaShifted','ExGauss','Simple'}, ...
             'Value', 'GammaShifted', 'ValueChangedFcn', @onIRFModelChanged);
 
-        % Row 12
+        % Row 13
         rowChunk = uigridlayout(ctlGrid, [1 2]);
         rowChunk.ColumnWidth = {120,'1x'};
         rowChunk.Padding = [0 0 0 0];
         uilabel(rowChunk, 'Text', 'Read chunk (M)');
         app.editChunkM = uieditfield(rowChunk, 'numeric', 'Value', 1, 'Limits', [0.1 50]);
 
-        % Row 13
+        % Row 14
         rowAnalysis = uigridlayout(ctlGrid, [1 2]);
         rowAnalysis.ColumnWidth = {120,'1x'};
         rowAnalysis.Padding = [0 0 0 0];
@@ -228,14 +244,14 @@ function Luminosa_GUI
         app.btnPatternMatch = uibutton(rowAnalysis, 'Text', 'Global Fit + Pattern Match', ...
             'ButtonPushedFcn', @onPatternMatch, 'FontSize', 11);
 
-        % Row 14
+        % Row 15
         rowSave = uigridlayout(ctlGrid, [1 2]);
         rowSave.ColumnWidth = {'1x','1x'};
         rowSave.Padding = [0 0 0 0];
         app.btnSaveMAT = uibutton(rowSave, 'Text', 'Save MAT', 'ButtonPushedFcn', @onSaveMAT, 'FontSize', 11);
         app.btnSavePNG = uibutton(rowSave, 'Text', 'Save PNG', 'ButtonPushedFcn', @onSavePNG, 'FontSize', 11);
 
-        % Row 15
+        % Row 16
         rowVerbose = uigridlayout(ctlGrid, [1 2]);
         rowVerbose.ColumnWidth = {55, '1x'};
         rowVerbose.Padding = [0 0 0 0];
@@ -293,6 +309,7 @@ function Luminosa_GUI
             app.chkUseGPU.Enable = 'off';
             app.chkUseGPU.Value = false;
         end
+        setActiveFlimMode('');
     end
 
     function buildFCSTab(parent)
@@ -466,6 +483,8 @@ function Luminosa_GUI
             app.flim = [];
             app.ismRes = [];
             app.pattern = [];
+            app.distFluofit = [];
+            app.flimBayes = [];
             app.tcspc = [];
             app.tcspcFit = [];
             app.tcspcGlobal = [];
@@ -485,6 +504,8 @@ function Luminosa_GUI
             app.seriesIntensityCache = {};
             app.seriesTcspcPixCache = {};
             app.seriesFlimCache = {};
+            app.seriesDistFitCache = {};
+            app.seriesBayesCache = {};
             app.seriesFrameFileMap = [];
             app.currentFrame = 1;
             app.currentFrameIndex = 1;
@@ -573,6 +594,8 @@ function Luminosa_GUI
                             app.seriesData = cell(numFrames, 1);
                             app.seriesIntensityCache = cell(numFrames, 1);
                             app.seriesFlimCache = cell(numFrames, 1);
+                            app.seriesDistFitCache = cell(numFrames, 1);
+                            app.seriesBayesCache = cell(numFrames, 1);
                             if storeTCSPC
                                 app.seriesTcspcPixCache = cell(numFrames, 1);
                             end
@@ -616,7 +639,9 @@ function Luminosa_GUI
                                     frameData.tau = app.ptuOut.tau(:,:,:,frameIdx);
                                     frameData.taus = frameData.tau;  % Ensure taus field exists
                                 end
-                                app.seriesFlimCache{frameIdx} = getTauMeanMapFromPTUData(frameData);
+                                app.seriesFlimCache{frameIdx} = [];
+                                app.seriesDistFitCache{frameIdx} = [];
+                                app.seriesBayesCache{frameIdx} = [];
                                 
                                 % Keep frame-specific photons for per-frame TCSPC/ROI work.
                                 if storeTCSPC
@@ -773,6 +798,10 @@ function Luminosa_GUI
         app.seriesFiles = files;
         app.currentFrame = 1;
         app.ptuOutOriginal = [];
+        app.distFluofit = [];
+        app.flimBayes = [];
+        app.seriesDistFitCache = {};
+        app.seriesBayesCache = {};
         
         % Initialize variables for frame extraction
         addStatus(sprintf('Found %d PTU files. Extracting multiframes...', numel(files)));
@@ -787,6 +816,8 @@ function Luminosa_GUI
         allIntensityCache = {};
         allTcspcPixCache = {};
         allFlimCache = {};
+        allDistFitCache = {};
+        allBayesCache = {};
         frameFileMap = [];  % Track which file each frame came from
         totalFrameCount = 0;
         
@@ -899,7 +930,9 @@ function Luminosa_GUI
                         allIntensityCache{totalFrameCount} = intensityImg;
                         
                         allTcspcPixCache{totalFrameCount} = [];
-                        allFlimCache{totalFrameCount} = getTauMeanMapFromPTUData(frameData);
+                        allFlimCache{totalFrameCount} = [];
+                        allDistFitCache{totalFrameCount} = [];
+                        allBayesCache{totalFrameCount} = [];
                     end
                 else
                     % Single frame file - treat as one frame
@@ -926,6 +959,8 @@ function Luminosa_GUI
                     else
                         allFlimCache{totalFrameCount} = [];
                     end
+                    allDistFitCache{totalFrameCount} = [];
+                    allBayesCache{totalFrameCount} = [];
                 end
                 
             catch ME
@@ -939,6 +974,8 @@ function Luminosa_GUI
         app.seriesIntensityCache = allIntensityCache;
         app.seriesTcspcPixCache = allTcspcPixCache;
         app.seriesFlimCache = allFlimCache;
+        app.seriesDistFitCache = allDistFitCache;
+        app.seriesBayesCache = allBayesCache;
         app.seriesFrameFileMap = frameFileMap;  % Track which file each frame came from
         
         % Set current frame to first frame and update display
@@ -1016,6 +1053,8 @@ function Luminosa_GUI
             app.flim = [];
             app.ismRes = [];
             app.pattern = [];
+            app.distFluofit = [];
+            app.flimBayes = [];
             app.tcspc = [];
             app.tcspcFit = [];
             app.tcspcGlobal = [];
@@ -1054,11 +1093,12 @@ function Luminosa_GUI
             
             % Prefer the per-frame FLIM extracted with the frame data.
             cachedTau = [];
+            cachedTauStd = getTauStdMapFromPTUData(app.ptuOut);
             if ~isempty(app.seriesFlimCache) && frameNum <= numel(app.seriesFlimCache)
                 cachedTau = app.seriesFlimCache{frameNum};
             end
             if ~isempty(cachedTau)
-                app.flim = flimStructFromTauMap(cachedTau, getIntensityMapFromPTUData(app.ptuOut));
+                app.flim = flimStructFromTauMap(cachedTau, getIntensityMapFromPTUData(app.ptuOut), cachedTauStd);
                 addStatus(sprintf('Using cached FLIM for frame %d.', frameNum));
             elseif hasQuickFLIMData(app.ptuOut)
                 addStatus(sprintf('Computing FLIM for frame %d...', frameNum));
@@ -1096,10 +1136,31 @@ function Luminosa_GUI
                 title(app.axImage, sprintf('Frame %d/%d', frameNum, totalFrames));
             end
 
+            if ~isempty(app.seriesDistFitCache) && frameNum <= numel(app.seriesDistFitCache)
+                app.distFluofit = app.seriesDistFitCache{frameNum};
+            end
+            if ~isempty(app.seriesBayesCache) && frameNum <= numel(app.seriesBayesCache)
+                app.flimBayes = app.seriesBayesCache{frameNum};
+            end
+
             if strcmp(requestedDisplayMode, 'file_tau')
                 showFileSummaryOverlay();
             elseif strcmp(requestedDisplayMode, 'tau') && ~isempty(app.flim)
                 showTauMean();
+            elseif strcmp(requestedDisplayMode, 'tau_std')
+                showTauStd();
+            elseif strcmp(requestedDisplayMode, 'distfluofit')
+                if ~isempty(app.distFluofit)
+                    showDistFluofitOverlay();
+                else
+                    onDistFluofitExtension();
+                end
+            elseif strcmp(requestedDisplayMode, 'bayes')
+                if ~isempty(app.flimBayes)
+                    showFlimBayesOverlay();
+                else
+                    onFlimBayes();
+                end
             end
             
             if irfOK && fitOK
@@ -1126,26 +1187,24 @@ function Luminosa_GUI
             return;
         end
 
-        if ~hasQuickFLIMData(app.ptuOut)
-            app.flim = flimStructFromTauMap(getTauMeanMapFromPTUData(app.ptuOut), getIntensityMapFromPTUData(app.ptuOut));
-            if isempty(app.flim)
-                addStatus('No frame-specific FLIM data available.');
-                return;
-            end
-            addStatus('Using cached per-frame FLIM map.');
-            showTauMean();
+        if ~ensureFlimMetric('tauMean')
             return;
         end
 
-        setBusy(true);
-        cleanupBusy = onCleanup(@() setBusy(false)); %#ok<NASGU>
-        addStatus('Computing quick FLIM...');
-        drawnow;
-
-        useGPU = app.chkUseGPU.Value && gpuIsAvailable();
-        app.flim = quickFLIMFromTCSPCFlexible(app.ptuOut, useGPU);
-        addStatus('Quick FLIM done.');
         showTauMean();
+    end
+
+    function onQuickFLIMStd(~, ~)
+        if isempty(app.ptuOut)
+            addStatus('Load a PTU first.');
+            return;
+        end
+
+        if ~ensureFlimMetric('tauRMS')
+            return;
+        end
+
+        showTauStd();
     end
 
     function onISMFLIM(~, ~)
@@ -1186,6 +1245,153 @@ function Luminosa_GUI
         end
     end
 
+    function onDistFluofitExtension(~, ~)
+        if isempty(app.ptuOut)
+            addStatus('Load a PTU first.');
+            return;
+        end
+
+        cacheIdx = [];
+        if ~isempty(app.seriesData) && ~isempty(app.currentFrame)
+            cacheIdx = app.currentFrame;
+            if cacheIdx <= numel(app.seriesDistFitCache) && ~isempty(app.seriesDistFitCache{cacheIdx})
+                app.distFluofit = app.seriesDistFitCache{cacheIdx};
+                addStatus(sprintf('Using cached DistFluofit result for frame %d.', cacheIdx));
+                showDistFluofitOverlay();
+                return;
+            end
+        end
+
+        setBusy(true);
+        cleanupBusy = onCleanup(@() setBusy(false)); %#ok<NASGU>
+
+        useGPU = app.chkUseGPU.Value && gpuIsAvailable();
+        [tcspc_pix, dtNs, tcspcSrc, cubeErr] = resolvePatternMatchTcspcCube();
+        if isempty(tcspc_pix)
+            addStatus(cubeErr);
+            return;
+        end
+
+        pulsePeriodNs = app.ptuOut.head.MeasDesc_GlobalResolution * 1e9;
+        [irf, irfMeta, irfNote] = getWholeFileIRFForTargetGrid(dtNs, size(tcspc_pix, 3));
+        if isempty(irf)
+            addStatus('Whole-file IRF unavailable for DistFluofit extension.');
+            return;
+        end
+        if ~isempty(irfNote) && ~strcmp(irfNote, 'native')
+            addStatus(sprintf('DistFluofit using %s whole-file IRF.', irfNote));
+        end
+
+        addStatus(sprintf('Running DistFluofit extension with whole-file IRF using %s...', tcspcSrc));
+        drawnow;
+
+        opts = struct();
+        opts.useGPU = useGPU;
+        opts.mode = 'PIRLS';
+        opts.nTau = 100;
+        opts.shiftBounds = [-10 10];
+        opts.batchSize = 1024;
+
+        try
+            outDist = distfluofit_extension(tcspc_pix, irf, pulsePeriodNs, dtNs, opts);
+            outDist.irf = irf(:);
+            outDist.irfMeta = irfMeta;
+            app.distFluofit = outDist;
+            if ~isempty(cacheIdx)
+                app.seriesDistFitCache{cacheIdx} = outDist;
+            end
+        catch ME
+            addStatus(['DistFluofit extension failed: ' ME.message]);
+            return;
+        end
+
+        showDistFluofitOverlay();
+        addStatus(sprintf('DistFluofit extension complete (%s, %s).', tcspcSrc, outDist.patternMatchInfo.method));
+    end
+
+    function onFlimBayes(~, ~)
+        if isempty(app.ptuOut)
+            addStatus('Load a PTU first.');
+            return;
+        end
+
+        tau0 = parseTau0(app.editTau0.Value);
+        if isempty(tau0)
+            addStatus('Enter tau0 (ns), e.g. "0.35 1.5" for FLIM_bayes.');
+            return;
+        end
+
+        tau0Requested = sort(double(tau0(:)).', 'ascend');
+        if numel(tau0Requested) > 2
+            addStatus(sprintf('FLIM_bayes uses a two-state low-photon model; using shortest/longest Tau0 values [%.4g %.4g] ns.', ...
+                tau0Requested(1), tau0Requested(end)));
+            tau0Use = [tau0Requested(1), tau0Requested(end)];
+        else
+            tau0Use = tau0Requested;
+        end
+
+        cacheIdx = [];
+        if ~isempty(app.seriesData) && ~isempty(app.currentFrame)
+            cacheIdx = app.currentFrame;
+            if cacheIdx <= numel(app.seriesBayesCache) && ~isempty(app.seriesBayesCache{cacheIdx})
+                app.flimBayes = app.seriesBayesCache{cacheIdx};
+                addStatus(sprintf('Using cached FLIM_bayes result for frame %d.', cacheIdx));
+                showFlimBayesOverlay();
+                return;
+            end
+        end
+
+        setBusy(true);
+        cleanupBusy = onCleanup(@() setBusy(false)); %#ok<NASGU>
+
+        useGPU = app.chkUseGPU.Value && gpuIsAvailable();
+        [tcspc_pix, dtNs, tcspcSrc, cubeErr] = resolvePatternMatchTcspcCube();
+        if isempty(tcspc_pix)
+            addStatus(cubeErr);
+            return;
+        end
+
+        pulsePeriodNs = app.ptuOut.head.MeasDesc_GlobalResolution * 1e9;
+        [irf, irfMeta, irfNote] = getWholeFileIRFForTargetGrid(dtNs, size(tcspc_pix, 3));
+        if isempty(irf)
+            addStatus('Whole-file IRF unavailable for FLIM_bayes.');
+            return;
+        end
+        if ~isempty(irfNote) && ~strcmp(irfNote, 'native')
+            addStatus(sprintf('FLIM_bayes using %s whole-file IRF.', irfNote));
+        end
+
+        addStatus(sprintf('Running FLIM_bayes with whole-file IRF using %s...', tcspcSrc));
+        drawnow;
+
+        opts = struct();
+        opts.useGPU = useGPU;
+        opts.batchSize = 2048;
+        opts.includeBackground = app.chkIncludeBG.Value;
+        opts.optimizeTau = app.chkOptimizeTau.Value;
+        opts.signalGrid = linspace(0.0, 1.0, 26);
+        opts.fractionGrid = linspace(0.0, 1.0, 41);
+        opts.shiftBounds = [-5 5];
+        opts.singleExpTauGrid = [];
+
+        try
+            outBayes = flim_bayes_lowphoton(tcspc_pix, irf, pulsePeriodNs, dtNs, tau0Use, opts);
+            outBayes.irf = irf(:);
+            outBayes.irfMeta = irfMeta;
+            outBayes.tau0Requested = tau0Requested(:).';
+            app.flimBayes = outBayes;
+            if ~isempty(cacheIdx)
+                app.seriesBayesCache{cacheIdx} = outBayes;
+            end
+        catch ME
+            addStatus(['FLIM_bayes failed: ' ME.message]);
+            return;
+        end
+
+        showFlimBayesOverlay();
+        addStatus(sprintf('FLIM_bayes complete (%s, %s).', tcspcSrc, outBayes.posteriorInfo.method));
+    end
+
     function onShowIntensity(~, ~)
         showIntensityFromPTU();
     end
@@ -1200,10 +1406,16 @@ function Luminosa_GUI
         switch app.displayMode
             case 'tau'
                 showTauMean();
+            case 'tau_std'
+                showTauStd();
             case 'file_tau'
                 showFileSummaryOverlay();
             case 'pattern'
                 showPatternOverlay();
+            case 'distfluofit'
+                showDistFluofitOverlay();
+            case 'bayes'
+                showFlimBayesOverlay();
             otherwise
                 showIntensityFromPTU();
         end
@@ -1223,10 +1435,16 @@ function Luminosa_GUI
     function onApplyTauRange(~, ~)
         if strcmp(app.displayMode, 'tau')
             showTauMean();
+        elseif strcmp(app.displayMode, 'tau_std')
+            showTauStd();
         elseif strcmp(app.displayMode, 'file_tau')
             showFileSummaryOverlay();
         elseif strcmp(app.displayMode, 'pattern')
             showPatternOverlay();
+        elseif strcmp(app.displayMode, 'distfluofit')
+            showDistFluofitOverlay();
+        elseif strcmp(app.displayMode, 'bayes')
+            showFlimBayesOverlay();
         end
     end
 
@@ -1602,6 +1820,8 @@ function Luminosa_GUI
         flim = app.flim; %#ok<NASGU>
         ismRes = app.ismRes; %#ok<NASGU>
         pattern = app.pattern; %#ok<NASGU>
+        distFluofit = app.distFluofit; %#ok<NASGU>
+        flimBayes = app.flimBayes; %#ok<NASGU>
         tcspc = app.tcspc; %#ok<NASGU>
         tcspcFit = app.tcspcFit; %#ok<NASGU>
         frameMapExports = buildFrameMapExports(); %#ok<NASGU>
@@ -1612,7 +1832,7 @@ function Luminosa_GUI
             'intensityField', 'intensity', ...
             'lifetimeField', 'lifetimeNs', ...
             'lifetimeUnits', 'ns');
-        save(outFile, 'ptuOut', 'flim', 'ismRes', 'pattern', 'tcspc', 'tcspcFit', ...
+        save(outFile, 'ptuOut', 'flim', 'ismRes', 'pattern', 'distFluofit', 'flimBayes', 'tcspc', 'tcspcFit', ...
             'frameMapExports', 'fileSummaryMapExports', 'exportLabels', '-v7.3');
         app.lastMietExportFile = outFile;
         addStatus(sprintf('Saved: %s | %d frame map(s), %d file summary map(s).', ...
@@ -2846,6 +3066,7 @@ function Luminosa_GUI
         title(app.axImage, 'Intensity (gamma)');
         setSmallTitles();
         app.displayMode = 'intensity';
+        setActiveFlimMode('');
         drawnow;
     end
 
@@ -2895,6 +3116,7 @@ function Luminosa_GUI
         title(app.axImage, sprintf('Frame %d Intensity (cached)', frameNum));
         setSmallTitles();
         app.displayMode = 'intensity';
+        setActiveFlimMode('');
         drawnow;
         
         addStatus(sprintf('Successfully displayed intensity for frame %d', frameNum));
@@ -2958,10 +3180,12 @@ function Luminosa_GUI
         tauCube = [];
         tagCube = [];
 
-        if isfield(ptuData, 'taus') && ~isempty(ptuData.taus)
-            tauCube = double(ptuData.taus);
-        elseif isfield(ptuData, 'tau') && ~isempty(ptuData.tau)
-            tauCube = double(ptuData.tau);
+        if isfield(ptuData, 'tauMean') && ~isempty(ptuData.tauMean)
+            tauCube = double(ptuData.tauMean);
+        elseif isfield(ptuData, 'meanArrival') && ~isempty(ptuData.meanArrival)
+            tauCube = double(ptuData.meanArrival);
+        elseif isfield(ptuData, 'total') && isfield(ptuData.total, 'tauMean') && ~isempty(ptuData.total.tauMean)
+            tauCube = double(ptuData.total.tauMean);
         end
 
         if isempty(tauCube)
@@ -3001,6 +3225,77 @@ function Luminosa_GUI
         end
     end
 
+    function tauStd = getTauStdMapFromPTUData(ptuData)
+        tauStd = [];
+        tauCube = [];
+        tagCube = [];
+
+        if isfield(ptuData, 'tauRMS') && ~isempty(ptuData.tauRMS)
+            tauCube = double(ptuData.tauRMS);
+        elseif isfield(ptuData, 'tauStd') && ~isempty(ptuData.tauStd)
+            tauCube = double(ptuData.tauStd);
+        elseif isfield(ptuData, 'total') && isfield(ptuData.total, 'tauRMS') && ~isempty(ptuData.total.tauRMS)
+            tauCube = double(ptuData.total.tauRMS);
+        elseif isfield(ptuData, 'taus') && ~isempty(ptuData.taus)
+            tauCube = double(ptuData.taus);
+        elseif isfield(ptuData, 'tau') && ~isempty(ptuData.tau)
+            tauCube = double(ptuData.tau);
+        end
+
+        if isempty(tauCube)
+            return;
+        end
+
+        if ndims(tauCube) >= 4 && size(tauCube, 4) == 1
+            tauCube = tauCube(:,:,:,1);
+        end
+
+        if isfield(ptuData, 'tags') && ~isempty(ptuData.tags)
+            tagCube = double(ptuData.tags);
+        elseif isfield(ptuData, 'tag') && ~isempty(ptuData.tag)
+            tagCube = double(ptuData.tag);
+        end
+
+        if ndims(tagCube) >= 4 && size(tagCube, 4) == 1
+            tagCube = tagCube(:,:,:,1);
+        end
+
+        if ndims(tauCube) <= 2
+            tauStd = double(tauCube);
+            return;
+        end
+
+        if ~isempty(tagCube) && size(tagCube, 1) == size(tauCube, 1) && ...
+                size(tagCube, 2) == size(tauCube, 2) && size(tagCube, 3) == size(tauCube, 3)
+            denom = sum(tagCube, 3);
+            tauStd = sum(tauCube .* tagCube, 3) ./ max(denom, 1);
+            zeroMask = denom <= 0;
+            if any(zeroMask(:))
+                tauFallback = mean(tauCube, 3, 'omitnan');
+                tauStd(zeroMask) = tauFallback(zeroMask);
+            end
+        else
+            tauStd = mean(tauCube, 3, 'omitnan');
+        end
+    end
+
+    function tauMean = computeTauMeanMapOnDemand(ptuData)
+        tauMean = getTauMeanMapFromPTUData(ptuData);
+        if ~isempty(tauMean) || isempty(ptuData) || ~hasQuickFLIMData(ptuData)
+            return;
+        end
+
+        try
+            useGPU = app.chkUseGPU.Value && gpuIsAvailable();
+            flimTmp = quickFLIMFromTCSPCFlexible(ptuData, useGPU);
+            if isfield(flimTmp, 'total') && isfield(flimTmp.total, 'tauMean')
+                tauMean = flimTmp.total.tauMean;
+            end
+        catch
+            tauMean = [];
+        end
+    end
+
     function [tauMap, intensityMap, titleStr, statusMsg] = resolveFileSummaryOverlay()
         tauMap = [];
         intensityMap = [];
@@ -3009,7 +3304,7 @@ function Luminosa_GUI
 
         if ~isempty(app.ptuOutOriginal)
             intensityMap = getIntensityMapFromPTUData(app.ptuOutOriginal);
-            tauMap = getTauMeanMapFromPTUData(app.ptuOutOriginal);
+            tauMap = computeTauMeanMapOnDemand(app.ptuOutOriginal);
             if ~isempty(tauMap) && ~isempty(intensityMap)
                 sourceName = currentSourceFileName();
                 titleStr = buildFileSummaryTitle(sourceName);
@@ -3029,7 +3324,7 @@ function Luminosa_GUI
 
         if ~isempty(app.ptuOut)
             intensityMap = getIntensityMapFromPTUData(app.ptuOut);
-            tauMap = getTauMeanMapFromPTUData(app.ptuOut);
+            tauMap = computeTauMeanMapOnDemand(app.ptuOut);
             if ~isempty(tauMap) && ~isempty(intensityMap)
                 sourceName = currentSourceFileName();
                 titleStr = buildFileSummaryTitle(sourceName);
@@ -3113,7 +3408,7 @@ function Luminosa_GUI
                 frameTau = [];
             end
             if isempty(frameTau) && ~isempty(app.seriesData{idx})
-                frameTau = getTauMeanMapFromPTUData(app.seriesData{idx});
+                frameTau = computeTauMeanMapOnDemand(app.seriesData{idx});
             end
             if isempty(frameTau) || ~isequal(size(frameTau), size(intensityMap))
                 continue;
@@ -3199,7 +3494,7 @@ function Luminosa_GUI
                     lifetimeMap = app.seriesFlimCache{idx};
                 end
                 if isempty(lifetimeMap)
-                    lifetimeMap = getTauMeanMapFromPTUData(frameData);
+                    lifetimeMap = computeTauMeanMapOnDemand(frameData);
                 end
 
                 if isempty(intensityMap) && isempty(lifetimeMap)
@@ -3216,7 +3511,7 @@ function Luminosa_GUI
         end
 
         intensityMap = getIntensityMapFromPTUData(app.ptuOut);
-        lifetimeMap = getTauMeanMapFromPTUData(app.ptuOut);
+        lifetimeMap = computeTauMeanMapOnDemand(app.ptuOut);
         if isempty(intensityMap) && isempty(lifetimeMap)
             return;
         end
@@ -3232,7 +3527,7 @@ function Luminosa_GUI
 
         if ~isempty(app.ptuOutOriginal)
             intensityMap = getIntensityMapFromPTUData(app.ptuOutOriginal);
-            lifetimeMap = getTauMeanMapFromPTUData(app.ptuOutOriginal);
+            lifetimeMap = computeTauMeanMapOnDemand(app.ptuOutOriginal);
             if isempty(intensityMap) && isempty(lifetimeMap)
                 return;
             end
@@ -3276,7 +3571,7 @@ function Luminosa_GUI
         end
 
         intensityMap = getIntensityMapFromPTUData(app.ptuOut);
-        lifetimeMap = getTauMeanMapFromPTUData(app.ptuOut);
+        lifetimeMap = computeTauMeanMapOnDemand(app.ptuOut);
         if isempty(intensityMap) && isempty(lifetimeMap)
             return;
         end
@@ -3369,17 +3664,24 @@ function Luminosa_GUI
         end
     end
 
-    function flim = flimStructFromTauMap(tauMean, intensityImg)
+    function flim = flimStructFromTauMap(tauMean, intensityImg, tauStd)
         flim = [];
-        if isempty(tauMean)
+        if nargin < 3
+            tauStd = [];
+        end
+        if isempty(tauMean) && isempty(tauStd)
             return;
+        end
+
+        if isempty(tauMean)
+            tauMean = nan(size(tauStd), 'double');
         end
 
         flim = struct();
         flim.total = struct();
         flim.total.tauMean = double(tauMean);
         flim.total.meanArrival = double(tauMean);
-        flim.total.tauRMS = zeros(size(tauMean), 'double');
+        flim.total.tauRMS = double(tauStd);
         flim.total.globalDecay = [];
         flim.total.tAxisNs = [];
         flim.total.t0Bin = [];
@@ -3511,6 +3813,51 @@ function Luminosa_GUI
             showTauOverlay(img, intensity, 'Tau mean (ns)');
         end
         app.displayMode = 'tau';
+        setActiveFlimMode('tau');
+    end
+
+    function showTauStd()
+        img = [];
+        if ~isempty(app.flim) && isfield(app.flim, 'total') && isfield(app.flim.total, 'tauRMS') && ...
+                ~isempty(app.flim.total.tauRMS)
+            img = app.flim.total.tauRMS;
+        elseif ~isempty(app.flim) && isfield(app.flim, 'reassigned') && isfield(app.flim.reassigned, 'total') && ...
+                isfield(app.flim.reassigned.total, 'tauRMS') && ~isempty(app.flim.reassigned.total.tauRMS)
+            img = app.flim.reassigned.total.tauRMS;
+        elseif ~isempty(app.ptuOut)
+            img = getTauStdMapFromPTUData(app.ptuOut);
+        end
+
+        if isempty(img)
+            addStatus('No FLIM std result available.');
+            return;
+        end
+
+        intensity = getIntensityMap();
+        if isempty(intensity)
+            intensity = getIntensityMapFromPTUData(app.ptuOut);
+        end
+
+        if isempty(intensity)
+            cmap = jet(256);
+            cmap = cmap(30:end-30,:);
+            trange = getTauRange(img);
+            clearImageColorbars();
+            cla(app.axImage);
+            imagesc(app.axImage, img);
+            axis(app.axImage, 'on');
+            axis(app.axImage, 'image');
+            colormap(app.axImage, cmap);
+            caxis(app.axImage, trange);
+            app.cbTau = colorbar(app.axImage);
+            ylabel(app.cbTau, 'Tau std (ns)');
+            title(app.axImage, 'FLIM std (ns)');
+            setSmallTitles();
+        else
+            showTauOverlay(img, intensity, 'FLIM std (ns)', 'Tau std (ns)');
+        end
+        app.displayMode = 'tau_std';
+        setActiveFlimMode('tau_std');
     end
 
     function showFileSummaryOverlay()
@@ -3521,6 +3868,7 @@ function Luminosa_GUI
         end
         showTauOverlay(tauMap, intensityMap, titleStr);
         app.displayMode = 'file_tau';
+        setActiveFlimMode('');
         if ~isempty(statusMsg)
             addStatus(statusMsg);
         end
@@ -3535,6 +3883,31 @@ function Luminosa_GUI
         intensity = app.pattern.intensity;
         showTauOverlay(tau, intensity, 'Pattern-match tau (ns)');
         app.displayMode = 'pattern';
+        setActiveFlimMode('');
+    end
+
+    function showDistFluofitOverlay()
+        if isempty(app.distFluofit) || ~isfield(app.distFluofit, 'tauMeanArithmetic') || isempty(app.distFluofit.tauMeanArithmetic)
+            addStatus('No DistFluofit result available.');
+            return;
+        end
+        tau = app.distFluofit.tauMeanArithmetic;
+        intensity = app.distFluofit.intensity;
+        showTauOverlay(tau, intensity, 'DistFluofit tau mean (ns)');
+        app.displayMode = 'distfluofit';
+        setActiveFlimMode('distfluofit');
+    end
+
+    function showFlimBayesOverlay()
+        if isempty(app.flimBayes) || ~isfield(app.flimBayes, 'tauMeanArithmetic') || isempty(app.flimBayes.tauMeanArithmetic)
+            addStatus('No FLIM_bayes result available.');
+            return;
+        end
+        tau = app.flimBayes.tauMeanArithmetic;
+        intensity = app.flimBayes.intensity;
+        showTauOverlay(tau, intensity, 'FLIM_bayes tau mean (ns)');
+        app.displayMode = 'bayes';
+        setActiveFlimMode('bayes');
     end
 
     function showGlobalTCSPC()
@@ -3935,9 +4308,13 @@ function Luminosa_GUI
         imgG = img .^ g;
     end
 
-    function showTauOverlay(tau, intensity, titleStr)
+    function showTauOverlay(tau, intensity, titleStr, colorbarLabel)
         cmap = jet(256);
         cmap = cmap(30:end-30,:);
+
+        if nargin < 4 || isempty(colorbarLabel)
+            colorbarLabel = 'Tau (ns)';
+        end
 
         tau = double(tau);
         intensity = double(intensity);
@@ -3957,7 +4334,7 @@ function Luminosa_GUI
         colormap(app.axImage, cmap);
         caxis(app.axImage, trange);
         app.cbTau = colorbar(app.axImage);
-        ylabel(app.cbTau, 'Tau (ns)');
+        ylabel(app.cbTau, colorbarLabel);
     end
 
     function clearImageColorbars()
@@ -3969,6 +4346,124 @@ function Luminosa_GUI
             delete(app.cbImage);
         end
         app.cbImage = [];
+    end
+
+    function setActiveFlimMode(modeName)
+        if nargin < 1 || isempty(modeName)
+            modeName = '';
+        end
+        app.activeFlimMode = char(modeName);
+
+        btnList = {
+            app.btnQuickFLIM, 'tau';
+            app.btnQuickFLIMStd, 'tau_std';
+            app.btnDistFluofit, 'distfluofit';
+            app.btnFlimBayes, 'bayes'};
+
+        for ii = 1:size(btnList, 1)
+            btn = btnList{ii, 1};
+            btnMode = btnList{ii, 2};
+            if isempty(btn) || ~isvalid(btn)
+                continue;
+            end
+
+            isActive = strcmp(app.activeFlimMode, btnMode);
+            if isActive
+                btn.BackgroundColor = app.flimButtonActiveColor;
+                btn.FontWeight = 'bold';
+                btn.FontColor = [0.15 0.15 0.15];
+            else
+                btn.BackgroundColor = app.flimButtonInactiveColor;
+                btn.FontWeight = 'normal';
+                btn.FontColor = app.flimButtonInactiveFontColor;
+            end
+        end
+    end
+
+    function ok = hasFlimMetric(flim, metricName)
+        ok = false;
+        if isempty(flim) || ~isstruct(flim)
+            return;
+        end
+
+        if isfield(flim, 'total') && isfield(flim.total, metricName) && ~isempty(flim.total.(metricName))
+            ok = any(isfinite(double(flim.total.(metricName)(:))));
+            return;
+        end
+
+        if isfield(flim, 'reassigned') && isfield(flim.reassigned, 'total') && ...
+                isfield(flim.reassigned.total, metricName) && ~isempty(flim.reassigned.total.(metricName))
+            ok = any(isfinite(double(flim.reassigned.total.(metricName)(:))));
+        end
+    end
+
+    function ok = ensureFlimMetric(metricName)
+        ok = false;
+        if isempty(metricName)
+            return;
+        end
+
+        switch metricName
+            case 'tauMean'
+                statusLabel = 'tau mean';
+            case 'tauRMS'
+                statusLabel = 'FLIM std';
+            otherwise
+                statusLabel = metricName;
+        end
+
+        if hasFlimMetric(app.flim, metricName)
+            ok = true;
+            return;
+        end
+
+        if strcmp(metricName, 'tauRMS')
+            tauStd = getTauStdMapFromPTUData(app.ptuOut);
+            if ~isempty(tauStd)
+                tauMean = [];
+                if hasFlimMetric(app.flim, 'tauMean') && isfield(app.flim, 'total')
+                    tauMean = app.flim.total.tauMean;
+                end
+                app.flim = flimStructFromTauMap(tauMean, getIntensityMapFromPTUData(app.ptuOut), tauStd);
+                ok = true;
+                return;
+            end
+        end
+
+        if hasQuickFLIMData(app.ptuOut)
+            setBusy(true);
+            cleanupBusy = onCleanup(@() setBusy(false)); %#ok<NASGU>
+            addStatus(sprintf('Computing %s...', statusLabel));
+            drawnow;
+
+            useGPU = app.chkUseGPU.Value && gpuIsAvailable();
+            try
+                app.flim = quickFLIMFromTCSPCFlexible(app.ptuOut, useGPU);
+            catch ME
+                addStatus(sprintf('%s computation failed: %s', statusLabel, ME.message));
+                app.flim = [];
+                return;
+            end
+
+            ok = hasFlimMetric(app.flim, metricName);
+            if ok
+                addStatus(sprintf('%s done.', statusLabel));
+                return;
+            end
+        end
+
+        if strcmp(metricName, 'tauMean')
+            tauMean = getTauMeanMapFromPTUData(app.ptuOut);
+            if ~isempty(tauMean)
+                app.flim = flimStructFromTauMap(tauMean, getIntensityMapFromPTUData(app.ptuOut), getTauStdMapFromPTUData(app.ptuOut));
+                ok = true;
+                addStatus('Using cached tau-mean map.');
+                return;
+            end
+            addStatus('No frame-specific tau-mean data available.');
+        else
+            addStatus('No FLIM std data available.');
+        end
     end
 
     function trange = getTauRange(tau)
@@ -4252,31 +4747,41 @@ function flim = quickFLIMFromTCSPCFlexible(ptuOut, useGPU)
 
     if useGPU
         tShift3 = gpuArray(reshape(tShift, 1, 1, []));
+        tShiftSq3 = gpuArray(reshape(tShift.^2, 1, 1, []));
         if ndims(cubeG) == 4
             meanArrivalNum = sum(sum(cubeG .* tShift3, 3), 4);
+            meanSqNum = sum(sum(cubeG .* tShiftSq3, 3), 4);
             denom = max(sum(sum(cubeG, 3), 4), 1);
         else
             meanArrivalNum = sum(cubeG .* tShift3, 3);
+            meanSqNum = sum(cubeG .* tShiftSq3, 3);
             denom = max(sum(cubeG, 3), 1);
         end
         meanArrival = gather(meanArrivalNum ./ denom);
+        meanSq = gather(meanSqNum ./ denom);
     else
         tShift3 = reshape(tShift, 1, 1, []);
+        tShiftSq3 = reshape(tShift.^2, 1, 1, []);
         if ndims(cubeG) == 4
             meanArrivalNum = sum(sum(cubeG .* tShift3, 3), 4);
+            meanSqNum = sum(sum(cubeG .* tShiftSq3, 3), 4);
             denom = max(sum(sum(cubeG, 3), 4), 1);
         else
             meanArrivalNum = sum(cubeG .* tShift3, 3);
+            meanSqNum = sum(cubeG .* tShiftSq3, 3);
             denom = max(sum(cubeG, 3), 1);
         end
         meanArrival = meanArrivalNum ./ denom;
+        meanSq = meanSqNum ./ denom;
     end
+
+    tauRMS = sqrt(max(meanSq - meanArrival.^2, 0));
 
     flim = struct();
     flim.total = struct();
     flim.total.tag = double(tag);
     flim.total.tauMean = double(meanArrival);
-    flim.total.tauRMS = zeros(size(meanArrival));
+    flim.total.tauRMS = double(tauRMS);
     flim.total.meanArrival = double(meanArrival);
     flim.total.globalDecay = double(globalDecay(:));
     flim.total.tAxisNs = double(tAxisNs(:));
