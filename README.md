@@ -36,6 +36,10 @@ flim = reassigned_flim(ptuOut, ismRes, params);
 
 If you do not need `tcspc_pix`, set `storeTcspcPix = false` in `PTU_MultiFrameScanReadFast` to save memory.
 
+## Bundled MIET GUI
+
+The MIET GUI code is vendored in `external/miet-gui`, so a normal clone of this repository includes it. No `git submodule update` step is required.
+
 Estimate a global IRF and lifetimes from a TCSPC cube:
 
 ```matlab
