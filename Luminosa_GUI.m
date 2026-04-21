@@ -12,6 +12,7 @@ function Luminosa_GUI
 
     app = struct();
     app.ptuOut = [];
+    app.ptuOutRaw = [];
     app.ismRes = [];
     app.flim = [];
     app.pattern = [];
@@ -63,7 +64,13 @@ function Luminosa_GUI
     app.seriesDistFitCache = [];    % Cached DistFluofit-extension results per frame
     app.seriesBayesCache = [];      % Cached Bayesian FLIM results per frame
     app.seriesFrameFileMap = [];    % Map each frame to its source PTU file
-    app.ptuOutOriginal = [];        % Original full-file data for global IRF calculation
+    app.ptuOutOriginal = [];        % Display-filtered full-file data for global IRF calculation
+    app.ptuOutOriginalRaw = [];     % Original unfiltered full-file data for display-channel switching
+    app.currentDisplayChannel = 1;
+    app.dropDisplayChannel = [];
+    app.flimSmoothingWindow = [3 3];
+    app.chkFlimWindow = [];
+    app.editFlimWindow = [];
     app.mietSourceEntries = struct([]);
     app.mietResultEntries = struct([]);
     app.mietCalibration = struct('file', '', 'label', '', 'heightNm', [], 'lifetimeNs', []);
@@ -115,7 +122,7 @@ function Luminosa_GUI
         ctlInner.Units = 'pixels';
 
         % Keep all action-button rows at one consistent height.
-        rowHeights = [42, 28, 34, 36, 36, 36, 30, 30, 30, 30, 30, 30, 30, 36, 36, 72];
+        rowHeights = [42, 28, 30, 30, 34, 36, 36, 36, 30, 30, 30, 30, 30, 30, 30, 36, 36, 72];
         ctlGrid = uigridlayout(ctlInner, [numel(rowHeights) 1]);
         ctlGrid.RowHeight = num2cell(rowHeights);
         ctlGrid.RowSpacing = 6;
@@ -139,6 +146,32 @@ function Luminosa_GUI
         app.chkUseGPU = uicheckbox(rowChecks, 'Text', 'Use GPU', 'Value', false);
 
         % Row 3
+        rowDisplayChannel = uigridlayout(ctlGrid, [1 2]);
+        rowDisplayChannel.ColumnWidth = {110,'1x'};
+        rowDisplayChannel.Padding = [0 0 0 0];
+        uilabel(rowDisplayChannel, 'Text', 'Display channel');
+        app.dropDisplayChannel = uidropdown(rowDisplayChannel, ...
+            'Items', {'Channel 1'}, ...
+            'Value', 'Channel 1', ...
+            'Enable', 'off', ...
+            'ValueChangedFcn', @onDisplayChannelChanged);
+        app.dropDisplayChannel.Tooltip = 'PIE files expose Channel 1 (L1D1) and Channel 2 (L2D2).';
+
+        % Row 4
+        rowFlimWindow = uigridlayout(ctlGrid, [1 3]);
+        rowFlimWindow.ColumnWidth = {110, 65, '1x'};
+        rowFlimWindow.Padding = [0 0 0 0];
+        uilabel(rowFlimWindow, 'Text', 'TCSPC window');
+        app.chkFlimWindow = uicheckbox(rowFlimWindow, 'Text', 'Use', 'Value', false, ...
+            'ValueChangedFcn', @onFlimWindowToggle);
+        app.editFlimWindow = uieditfield(rowFlimWindow, 'text', ...
+            'Value', '3x3', ...
+            'Enable', 'off', ...
+            'ValueChangedFcn', @onFlimWindowSpecChanged);
+        app.editFlimWindow.Tooltip = ['Sliding spatial TCSPC window applied pixel-by-pixel before ' ...
+            'Tau mean, FLIM std, and FLIM_bayes. Examples: 2x2, 3x3, 5x5.'];
+
+        % Row 5
         rowGamma = uigridlayout(ctlGrid, [1 3]);
         rowGamma.ColumnWidth = {70,'1x',55};
         rowGamma.Padding = [0 0 0 0];
@@ -147,7 +180,7 @@ function Luminosa_GUI
             'MajorTicks', [0.3 1 1.5], 'ValueChangedFcn', @onGammaChanged);
         app.lblGamma = uilabel(rowGamma, 'Text', '1.00');
 
-        % Row 4
+        % Row 6
         rowRunPrimary = uigridlayout(ctlGrid, [1 4]);
         rowRunPrimary.ColumnWidth = {'1x','1x','1x','1x'};
         rowRunPrimary.Padding = [0 0 0 0];
@@ -159,7 +192,7 @@ function Luminosa_GUI
         app.flimButtonActiveColor = [0.78 0.78 0.78];
         app.flimButtonInactiveFontColor = app.btnQuickFLIM.FontColor;
 
-        % Row 5
+        % Row 7
         rowRunSecondary = uigridlayout(ctlGrid, [1 3]);
         rowRunSecondary.ColumnWidth = {'1x','1x','1x'};
         rowRunSecondary.Padding = [0 0 0 0];
@@ -167,7 +200,7 @@ function Luminosa_GUI
         app.btnShowIntensity = uibutton(rowRunSecondary, 'Text', 'Intensity', 'ButtonPushedFcn', @onShowIntensity, 'FontSize', 11);
         app.btnShowTau = uibutton(rowRunSecondary, 'Text', 'Sum FLIM', 'ButtonPushedFcn', @onShowTauMean, 'FontSize', 11);
 
-        % Row 6
+        % Row 8
         rowROI = uigridlayout(ctlGrid, [1 3]);
         rowROI.ColumnWidth = {70, 90, '1x'};
         rowROI.Padding = [0 0 0 0];
@@ -176,7 +209,7 @@ function Luminosa_GUI
         app.dropROIShape.Tooltip = 'ROI shape';
         app.btnShowTCSPC = uibutton(rowROI, 'Text', 'Show Full TCSPC', 'ButtonPushedFcn', @onShowFullTCSPC, 'FontSize', 11);
 
-        % Row 7
+        % Row 9
         rowNsub = uigridlayout(ctlGrid, [1 2]);
         rowNsub.ColumnWidth = {120,'1x'};
         rowNsub.Padding = [0 0 0 0];
@@ -185,21 +218,21 @@ function Luminosa_GUI
             'LowerLimitInclusive', 'on', 'UpperLimitInclusive', 'on', ...
             'ValueChangedFcn', @onTcspcBinningChanged);
 
-        % Row 8
+        % Row 10
         rowTau0 = uigridlayout(ctlGrid, [1 2]);
         rowTau0.ColumnWidth = {85,'1x'};
         rowTau0.Padding = [0 0 0 0];
         uilabel(rowTau0, 'Text', 'Tau0 (ns)');
         app.editTau0 = uieditfield(rowTau0, 'text', 'Value', '0.35 1.5 5');
 
-        % Row 9
+        % Row 11
         rowFit = uigridlayout(ctlGrid, [1 2]);
         rowFit.ColumnWidth = {'1x','1x'};
         rowFit.Padding = [0 0 0 0];
         app.chkOptimizeTau = uicheckbox(rowFit, 'Text', 'Optimize tau', 'Value', true);
         app.chkIncludeBG = uicheckbox(rowFit, 'Text', 'Include BG', 'Value', true);
 
-        % Row 10
+        % Row 12
         rowRange = uigridlayout(ctlGrid, [1 5]);
         rowRange.ColumnWidth = {135,55,'1x','1x',60};
         rowRange.Padding = [0 0 0 0];
@@ -211,7 +244,7 @@ function Luminosa_GUI
         app.editTauMax.Tooltip = 'Max tau (ns)';
         app.btnApplyTauRange = uibutton(rowRange, 'Text', 'Apply', 'ButtonPushedFcn', @onApplyTauRange);
 
-        % Row 11
+        % Row 13
         rowPattern = uigridlayout(ctlGrid, [1 2]);
         rowPattern.ColumnWidth = {110,'1x'};
         rowPattern.Padding = [0 0 0 0];
@@ -219,7 +252,7 @@ function Luminosa_GUI
         app.dropPatternSource = uidropdown(rowPattern, 'Items', {'Confocal (ptuOut)','ISM reassigned (flim)'}, ...
             'Value', 'Confocal (ptuOut)');
 
-        % Row 12
+        % Row 14
         rowIRF = uigridlayout(ctlGrid, [1 2]);
         rowIRF.ColumnWidth = {85,'1x'};
         rowIRF.Padding = [0 0 0 0];
@@ -227,14 +260,14 @@ function Luminosa_GUI
         app.dropIRF = uidropdown(rowIRF, 'Items', {'GammaShifted','ExGauss','Simple'}, ...
             'Value', 'GammaShifted', 'ValueChangedFcn', @onIRFModelChanged);
 
-        % Row 13
+        % Row 15
         rowChunk = uigridlayout(ctlGrid, [1 2]);
         rowChunk.ColumnWidth = {120,'1x'};
         rowChunk.Padding = [0 0 0 0];
         uilabel(rowChunk, 'Text', 'Read chunk (M)');
         app.editChunkM = uieditfield(rowChunk, 'numeric', 'Value', 1, 'Limits', [0.1 50]);
 
-        % Row 14
+        % Row 16
         rowAnalysis = uigridlayout(ctlGrid, [1 2]);
         rowAnalysis.ColumnWidth = {120,'1x'};
         rowAnalysis.Padding = [0 0 0 0];
@@ -244,14 +277,14 @@ function Luminosa_GUI
         app.btnPatternMatch = uibutton(rowAnalysis, 'Text', 'Global Fit + Pattern Match', ...
             'ButtonPushedFcn', @onPatternMatch, 'FontSize', 11);
 
-        % Row 15
+        % Row 17
         rowSave = uigridlayout(ctlGrid, [1 2]);
         rowSave.ColumnWidth = {'1x','1x'};
         rowSave.Padding = [0 0 0 0];
         app.btnSaveMAT = uibutton(rowSave, 'Text', 'Save MAT', 'ButtonPushedFcn', @onSaveMAT, 'FontSize', 11);
         app.btnSavePNG = uibutton(rowSave, 'Text', 'Save PNG', 'ButtonPushedFcn', @onSavePNG, 'FontSize', 11);
 
-        % Row 16
+        % Row 18
         rowVerbose = uigridlayout(ctlGrid, [1 2]);
         rowVerbose.ColumnWidth = {55, '1x'};
         rowVerbose.Padding = [0 0 0 0];
@@ -480,6 +513,8 @@ function Luminosa_GUI
 
         try
             % Clear existing data
+            app.ptuOut = [];
+            app.ptuOutRaw = [];
             app.flim = [];
             app.ismRes = [];
             app.pattern = [];
@@ -509,6 +544,9 @@ function Luminosa_GUI
             app.seriesFrameFileMap = [];
             app.currentFrame = 1;
             app.currentFrameIndex = 1;
+            app.ptuOutOriginal = [];
+            app.ptuOutOriginalRaw = [];
+            resetDisplayChannelControl();
 
             if ~isempty(app.roi) && isvalid(app.roi)
                 delete(app.roi);
@@ -543,8 +581,11 @@ function Luminosa_GUI
                         drawnow;
                         
                         try
-                            app.ptuOut = PTU_FLIM_GPU(app.lastFile, opts);
-                            addStatus(sprintf('PTU_FLIM_GPU completed. Data structure fields: %s', strjoin(fieldnames(app.ptuOut), ', ')));
+                            app.ptuOutRaw = annotatePieDisplayMetadata(PTU_FLIM_GPU(app.lastFile, opts));
+                            app.ptuOut = buildDisplayPtuData(app.ptuOutRaw, app.currentDisplayChannel);
+                            configureDisplayChannelControl(app.ptuOutRaw);
+                            addStatus(sprintf('PTU_FLIM_GPU completed. Data structure fields: %s', strjoin(fieldnames(app.ptuOutRaw), ', ')));
+                            reportPieDetection(app.ptuOutRaw);
                         catch ME
                             addStatus(sprintf('PTU_FLIM_GPU failed: %s', ME.message));
                             app.frameSlider.Visible = 'off';
@@ -553,7 +594,9 @@ function Luminosa_GUI
                         end
                         
                         % Store original full-file data for global IRF calculation
-                        app.ptuOutOriginal = app.ptuOut;
+                        app.ptuOutOriginalRaw = app.ptuOutRaw;
+                        app.ptuOutOriginal = buildDisplayPtuData(app.ptuOutOriginalRaw, app.currentDisplayChannel);
+                        fullPtuOut = app.ptuOutRaw;
                         
                         % Check if we have multiple frames with robust error handling
                         hasNFramesField = false;
@@ -562,17 +605,17 @@ function Luminosa_GUI
                         actualFrames = 1;
                         
                         try
-                            if isfield(app.ptuOut, 'nFrames') && ~isempty(app.ptuOut.nFrames) && isfinite(app.ptuOut.nFrames)
+                            if isfield(fullPtuOut, 'nFrames') && ~isempty(fullPtuOut.nFrames) && isfinite(fullPtuOut.nFrames)
                                 hasNFramesField = true;
-                                nFramesValue = app.ptuOut.nFrames;
+                                nFramesValue = fullPtuOut.nFrames;
                             end
                         catch ME
                             addStatus(sprintf('Warning: Could not access nFrames field: %s', ME.message));
                         end
                         
                         try
-                            if isfield(app.ptuOut, 'tag') && ~isempty(app.ptuOut.tag) && ndims(app.ptuOut.tag) >= 4
-                                actualFrames = size(app.ptuOut.tag, 4);
+                            if isfield(fullPtuOut, 'tag') && ~isempty(fullPtuOut.tag) && ndims(fullPtuOut.tag) >= 4
+                                actualFrames = size(fullPtuOut.tag, 4);
                                 if actualFrames > 1
                                     hasMultiFrameTag = true;
                                 end
@@ -604,18 +647,18 @@ function Luminosa_GUI
                                 addStatus(sprintf('  -> Processing frame %d/%d...', frameIdx, numFrames));
                                 
                                 % Create frame-specific data structure without inheriting global cubes
-                                frameData = prepareExtractedFrameStruct(app.ptuOut);
+                                frameData = prepareExtractedFrameStruct(fullPtuOut);
                                 
                                 % Extract frame-specific intensity data
                                 intensityImg = [];
-                                if isfield(app.ptuOut, 'tag') && size(app.ptuOut.tag, 4) >= frameIdx
-                                    frameData.tag = app.ptuOut.tag(:,:,:,frameIdx);
+                                if isfield(fullPtuOut, 'tag') && size(fullPtuOut.tag, 4) >= frameIdx
+                                    frameData.tag = fullPtuOut.tag(:,:,:,frameIdx);
                                     frameData.tags = frameData.tag;
                                     intensityImg = sum(frameData.tag, 3);
                                     addStatus(sprintf('    Frame %d intensity: %dx%d pixels, %d total counts', frameIdx, size(intensityImg,1), size(intensityImg,2), sum(intensityImg(:))));
-                                elseif isfield(app.ptuOut, 'tags') && ~isempty(app.ptuOut.tags)
+                                elseif isfield(fullPtuOut, 'tags') && ~isempty(fullPtuOut.tags)
                                     % Fallback to global tags if per-frame not available
-                                    frameData.tags = app.ptuOut.tags;
+                                    frameData.tags = fullPtuOut.tags;
                                     intensityImg = frameData.tags;
                                     addStatus(sprintf('    Frame %d: Using global intensity data as fallback', frameIdx));
                                 end
@@ -635,8 +678,8 @@ function Luminosa_GUI
                                 end
                                 
                                 % Extract frame-specific tau data
-                                if isfield(app.ptuOut, 'tau') && size(app.ptuOut.tau, 4) >= frameIdx
-                                    frameData.tau = app.ptuOut.tau(:,:,:,frameIdx);
+                                if isfield(fullPtuOut, 'tau') && size(fullPtuOut.tau, 4) >= frameIdx
+                                    frameData.tau = fullPtuOut.tau(:,:,:,frameIdx);
                                     frameData.taus = frameData.tau;  % Ensure taus field exists
                                 end
                                 app.seriesFlimCache{frameIdx} = [];
@@ -646,15 +689,15 @@ function Luminosa_GUI
                                 % Keep frame-specific photons for per-frame TCSPC/ROI work.
                                 if storeTCSPC
                                     tcspcDataAssigned = false;
-                                    if isfield(app.ptuOut, 'im_frame') && ~isempty(app.ptuOut.im_frame)
-                                        framePhotonMask = (app.ptuOut.im_frame == frameIdx);
+                                    if isfield(fullPtuOut, 'im_frame') && ~isempty(fullPtuOut.im_frame)
+                                        framePhotonMask = (fullPtuOut.im_frame == frameIdx);
                                         if any(framePhotonMask)
-                                            frameData.im_sync = app.ptuOut.im_sync(framePhotonMask);
-                                            frameData.im_tcspc = app.ptuOut.im_tcspc(framePhotonMask);
-                                            frameData.im_chan = app.ptuOut.im_chan(framePhotonMask);
-                                            frameData.im_line = app.ptuOut.im_line(framePhotonMask);
-                                            frameData.im_col = app.ptuOut.im_col(framePhotonMask);
-                                            frameData.im_frame = ones(sum(framePhotonMask), 1, 'like', app.ptuOut.im_frame);
+                                            frameData.im_sync = fullPtuOut.im_sync(framePhotonMask);
+                                            frameData.im_tcspc = fullPtuOut.im_tcspc(framePhotonMask);
+                                            frameData.im_chan = fullPtuOut.im_chan(framePhotonMask);
+                                            frameData.im_line = fullPtuOut.im_line(framePhotonMask);
+                                            frameData.im_col = fullPtuOut.im_col(framePhotonMask);
+                                            frameData.im_frame = ones(sum(framePhotonMask), 1, 'like', fullPtuOut.im_frame);
                                             tcspcDataAssigned = true;
                                             addStatus(sprintf('    Frame %d: Extracted %d photons for frame-specific TCSPC', frameIdx, numel(frameData.im_tcspc)));
                                         else
@@ -727,14 +770,20 @@ function Luminosa_GUI
         function loadSingleFramePTU()
             % Standard PTU loading logic
             if exist('PTU_MultiFrameScanReadFast_nativeTCSPC', 'file') == 2
-                app.ptuOut = PTU_MultiFrameScanReadFast_nativeTCSPC(app.lastFile, photonsPerChunk, storeTCSPC, useGPU, true);
+                app.ptuOutRaw = PTU_MultiFrameScanReadFast_nativeTCSPC(app.lastFile, photonsPerChunk, storeTCSPC, useGPU, true);
             elseif exist('PTU_MultiFrameScanReadFast_multiTauTCSPC', 'file') == 2
-                app.ptuOut = PTU_MultiFrameScanReadFast_multiTauTCSPC(app.lastFile, photonsPerChunk, storeTCSPC, useGPU, true, 8, true);
+                app.ptuOutRaw = PTU_MultiFrameScanReadFast_multiTauTCSPC(app.lastFile, photonsPerChunk, storeTCSPC, useGPU, true, 8, true);
             elseif exist('PTU_MultiFrameScanReadFast', 'file') == 2
-                app.ptuOut = PTU_MultiFrameScanReadFast(app.lastFile, photonsPerChunk, storeTCSPC, useGPU);
+                app.ptuOutRaw = PTU_MultiFrameScanReadFast(app.lastFile, photonsPerChunk, storeTCSPC, useGPU);
             else
                 error('No compatible PTU reader was found on the MATLAB path.');
             end
+            app.ptuOutRaw = annotatePieDisplayMetadata(app.ptuOutRaw);
+            configureDisplayChannelControl(app.ptuOutRaw);
+            reportPieDetection(app.ptuOutRaw);
+            app.ptuOut = buildDisplayPtuData(app.ptuOutRaw, app.currentDisplayChannel);
+            app.ptuOutOriginalRaw = app.ptuOutRaw;
+            app.ptuOutOriginal = buildDisplayPtuData(app.ptuOutOriginalRaw, app.currentDisplayChannel);
 
             img = getIntensityMap();
             if isempty(img)
@@ -797,11 +846,15 @@ function Luminosa_GUI
         app.seriesFolderPath = folderPath;
         app.seriesFiles = files;
         app.currentFrame = 1;
+        app.ptuOut = [];
+        app.ptuOutRaw = [];
         app.ptuOutOriginal = [];
+        app.ptuOutOriginalRaw = [];
         app.distFluofit = [];
         app.flimBayes = [];
         app.seriesDistFitCache = {};
         app.seriesBayesCache = {};
+        resetDisplayChannelControl();
         
         % Initialize variables for frame extraction
         addStatus(sprintf('Found %d PTU files. Extracting multiframes...', numel(files)));
@@ -846,6 +899,7 @@ function Luminosa_GUI
                 else
                     error('No compatible PTU reader was found on the MATLAB path.');
                 end
+                ptuData = annotatePieDisplayMetadata(ptuData);
                 
                 % Extract individual frames from the multiframe PTU with robust error handling
                 numFramesInFile = 1;
@@ -981,7 +1035,10 @@ function Luminosa_GUI
         % Set current frame to first frame and update display
         app.currentFrame = 1;
         if totalFrameCount > 0
-            app.ptuOut = app.seriesData{1};
+            app.ptuOutRaw = app.seriesData{1};
+            configureDisplayChannelControl(app.ptuOutRaw);
+            app.ptuOut = buildDisplayPtuData(app.ptuOutRaw, app.currentDisplayChannel);
+            reportPieDetection(app.ptuOutRaw);
         end
         
         % Setup frame slider
@@ -996,7 +1053,11 @@ function Luminosa_GUI
         
         % Initialize display with first frame
         if totalFrameCount > 0
-            showIntensityFromCache(1);
+            if hasPieDisplayChannels(app.ptuOutRaw)
+                showIntensityFromPTU();
+            else
+                showIntensityFromCache(1);
+            end
             
             % Setup global IRF and fitting for first frame
             irfOK = ensureGlobalIRF(true);
@@ -1009,9 +1070,9 @@ function Luminosa_GUI
             % Update title to show frame info
             if ~isempty(frameFileMap) && frameFileMap(1) <= numel(files)
                 sourceFile = files(frameFileMap(1)).name;
-                title(app.axImage, sprintf('Frame 1/%d from %s', totalFrameCount, sourceFile));
+                title(app.axImage, formatDisplayTitle(sprintf('Frame 1/%d from %s', totalFrameCount, sourceFile)));
             else
-                title(app.axImage, sprintf('Frame 1/%d', totalFrameCount));
+                title(app.axImage, formatDisplayTitle(sprintf('Frame 1/%d', totalFrameCount)));
             end
         end
         
@@ -1032,19 +1093,23 @@ function Luminosa_GUI
         if frameNum < 1 || frameNum > numel(app.seriesData)
             return;
         end
+        prevFrame = app.currentFrame;
         
         % Fast frame switching using cached data
         if frameNum <= numel(app.seriesData) && ~isempty(app.seriesData{frameNum})
             requestedDisplayMode = app.displayMode;
+            windowSmoothingActive = hasEffectiveFlimSmoothing();
             
             % Set current frame data - no loading needed since it's cached
             app.currentFrame = frameNum;
             app.currentFrameIndex = frameNum;  % Keep both variables in sync
-            app.ptuOut = app.seriesData{frameNum};
+            app.ptuOutRaw = app.seriesData{frameNum};
+            configureDisplayChannelControl(app.ptuOutRaw);
+            app.ptuOut = buildDisplayPtuData(app.ptuOutRaw, app.currentDisplayChannel);
             app.frameSlider.Value = frameNum;
             
             % Ensure frame has proper TCSPC data structure
-            if ~isfield(app.ptuOut, 'tcspc_pix') && frameNum <= numel(app.seriesTcspcPixCache) && ...
+            if ~hasPieDisplayChannels(app.ptuOutRaw) && ~isfield(app.ptuOut, 'tcspc_pix') && frameNum <= numel(app.seriesTcspcPixCache) && ...
                ~isempty(app.seriesTcspcPixCache{frameNum})
                 app.ptuOut.tcspc_pix = app.seriesTcspcPixCache{frameNum};
             end
@@ -1064,14 +1129,20 @@ function Luminosa_GUI
             % Note: Keep app.irfGlobal, app.irfGlobalModel, app.irfGlobalMeta, app.irfGlobalDtNs
             % for multiframe files since IRF should be calculated from full file data
 
-            if ~isempty(app.roi) && isvalid(app.roi)
-                delete(app.roi);
+            if isempty(prevFrame) || frameNum ~= prevFrame
+                if ~isempty(app.roi) && isvalid(app.roi)
+                    delete(app.roi);
+                end
+                app.roi = [];
+                clearRoiListeners();
             end
-            app.roi = [];
-            clearRoiListeners();
             
             % Show cached intensity for instant switching
-            showIntensityFromCache(frameNum);
+            if hasPieDisplayChannels(app.ptuOutRaw)
+                showIntensityFromPTU();
+            else
+                showIntensityFromCache(frameNum);
+            end
             
             % Setup IRF using original full-file data for proper fitting
             if ~isempty(app.ptuOutOriginal)
@@ -1093,14 +1164,18 @@ function Luminosa_GUI
             
             % Prefer the per-frame FLIM extracted with the frame data.
             cachedTau = [];
-            cachedTauStd = getTauStdMapFromPTUData(app.ptuOut);
-            if ~isempty(app.seriesFlimCache) && frameNum <= numel(app.seriesFlimCache)
+            cachedTauStd = [];
+            if ~windowSmoothingActive
+                cachedTauStd = getTauStdMapFromPTUData(app.ptuOut);
+            end
+            if ~windowSmoothingActive && ~hasPieDisplayChannels(app.ptuOutRaw) && ...
+                    ~isempty(app.seriesFlimCache) && frameNum <= numel(app.seriesFlimCache)
                 cachedTau = app.seriesFlimCache{frameNum};
             end
             if ~isempty(cachedTau)
                 app.flim = flimStructFromTauMap(cachedTau, getIntensityMapFromPTUData(app.ptuOut), cachedTauStd);
                 addStatus(sprintf('Using cached FLIM for frame %d.', frameNum));
-            elseif hasQuickFLIMData(app.ptuOut)
+            elseif ~windowSmoothingActive && hasQuickFLIMData(app.ptuOut)
                 addStatus(sprintf('Computing FLIM for frame %d...', frameNum));
                 drawnow;
                 
@@ -1108,10 +1183,10 @@ function Luminosa_GUI
                     useGPU = app.chkUseGPU.Value && gpuIsAvailable();
                     flimData = quickFLIMFromTCSPCFlexible(app.ptuOut, useGPU);
                     
-                    if numel(app.seriesFlimCache) < frameNum
+                    if ~hasPieDisplayChannels(app.ptuOutRaw) && numel(app.seriesFlimCache) < frameNum
                         app.seriesFlimCache{frameNum} = [];
                     end
-                    if isfield(flimData, 'total') && isfield(flimData.total, 'tauMean')
+                    if ~hasPieDisplayChannels(app.ptuOutRaw) && isfield(flimData, 'total') && isfield(flimData.total, 'tauMean')
                         app.seriesFlimCache{frameNum} = flimData.total.tauMean;
                     end
                     
@@ -1121,6 +1196,8 @@ function Luminosa_GUI
                     addStatus(sprintf('FLIM computation failed for frame %d: %s', frameNum, ME.message));
                     app.flim = [];
                 end
+            elseif windowSmoothingActive
+                app.flim = [];
             else
                 app.flim = [];
                 addStatus(sprintf('No frame-specific FLIM data available for frame %d.', frameNum));
@@ -1131,24 +1208,29 @@ function Luminosa_GUI
             if ~isempty(app.seriesFrameFileMap) && frameNum <= length(app.seriesFrameFileMap) && ...
                app.seriesFrameFileMap(frameNum) <= numel(app.seriesFiles)
                 sourceFile = app.seriesFiles(app.seriesFrameFileMap(frameNum)).name;
-                title(app.axImage, sprintf('Frame %d/%d from %s', frameNum, totalFrames, sourceFile));
+                title(app.axImage, formatDisplayTitle(sprintf('Frame %d/%d from %s', frameNum, totalFrames, sourceFile)));
             else
-                title(app.axImage, sprintf('Frame %d/%d', frameNum, totalFrames));
+                title(app.axImage, formatDisplayTitle(sprintf('Frame %d/%d', frameNum, totalFrames)));
             end
 
-            if ~isempty(app.seriesDistFitCache) && frameNum <= numel(app.seriesDistFitCache)
+            if ~hasPieDisplayChannels(app.ptuOutRaw) && ~isempty(app.seriesDistFitCache) && frameNum <= numel(app.seriesDistFitCache)
                 app.distFluofit = app.seriesDistFitCache{frameNum};
             end
-            if ~isempty(app.seriesBayesCache) && frameNum <= numel(app.seriesBayesCache)
+            if ~windowSmoothingActive && ~hasPieDisplayChannels(app.ptuOutRaw) && ...
+                    ~isempty(app.seriesBayesCache) && frameNum <= numel(app.seriesBayesCache)
                 app.flimBayes = app.seriesBayesCache{frameNum};
             end
 
             if strcmp(requestedDisplayMode, 'file_tau')
                 showFileSummaryOverlay();
-            elseif strcmp(requestedDisplayMode, 'tau') && ~isempty(app.flim)
-                showTauMean();
+            elseif strcmp(requestedDisplayMode, 'tau')
+                if ensureFlimMetric('tauMean')
+                    showTauMean();
+                end
             elseif strcmp(requestedDisplayMode, 'tau_std')
-                showTauStd();
+                if ensureFlimMetric('tauRMS')
+                    showTauStd();
+                end
             elseif strcmp(requestedDisplayMode, 'distfluofit')
                 if ~isempty(app.distFluofit)
                     showDistFluofitOverlay();
@@ -1156,7 +1238,7 @@ function Luminosa_GUI
                     onDistFluofitExtension();
                 end
             elseif strcmp(requestedDisplayMode, 'bayes')
-                if ~isempty(app.flimBayes)
+                if ~windowSmoothingActive && ~isempty(app.flimBayes)
                     showFlimBayesOverlay();
                 else
                     onFlimBayes();
@@ -1254,7 +1336,7 @@ function Luminosa_GUI
         cacheIdx = [];
         if ~isempty(app.seriesData) && ~isempty(app.currentFrame)
             cacheIdx = app.currentFrame;
-            if cacheIdx <= numel(app.seriesDistFitCache) && ~isempty(app.seriesDistFitCache{cacheIdx})
+            if ~hasPieDisplayChannels(app.ptuOutRaw) && cacheIdx <= numel(app.seriesDistFitCache) && ~isempty(app.seriesDistFitCache{cacheIdx})
                 app.distFluofit = app.seriesDistFitCache{cacheIdx};
                 addStatus(sprintf('Using cached DistFluofit result for frame %d.', cacheIdx));
                 showDistFluofitOverlay();
@@ -1297,7 +1379,7 @@ function Luminosa_GUI
             outDist.irf = irf(:);
             outDist.irfMeta = irfMeta;
             app.distFluofit = outDist;
-            if ~isempty(cacheIdx)
+            if ~isempty(cacheIdx) && ~hasPieDisplayChannels(app.ptuOutRaw)
                 app.seriesDistFitCache{cacheIdx} = outDist;
             end
         catch ME
@@ -1331,9 +1413,11 @@ function Luminosa_GUI
         end
 
         cacheIdx = [];
+        windowSmoothingActive = hasEffectiveFlimSmoothing();
         if ~isempty(app.seriesData) && ~isempty(app.currentFrame)
             cacheIdx = app.currentFrame;
-            if cacheIdx <= numel(app.seriesBayesCache) && ~isempty(app.seriesBayesCache{cacheIdx})
+            if ~windowSmoothingActive && ~hasPieDisplayChannels(app.ptuOutRaw) && ...
+                    cacheIdx <= numel(app.seriesBayesCache) && ~isempty(app.seriesBayesCache{cacheIdx})
                 app.flimBayes = app.seriesBayesCache{cacheIdx};
                 addStatus(sprintf('Using cached FLIM_bayes result for frame %d.', cacheIdx));
                 showFlimBayesOverlay();
@@ -1349,6 +1433,10 @@ function Luminosa_GUI
         if isempty(tcspc_pix)
             addStatus(cubeErr);
             return;
+        end
+        if windowSmoothingActive
+            tcspc_pix = applySpatialWindowToTcspcCube(tcspc_pix, getCurrentFlimWindow());
+            tcspcSrc = sprintf('%s + %s TCSPC window', tcspcSrc, currentFlimWindowLabel());
         end
 
         pulsePeriodNs = app.ptuOut.head.MeasDesc_GlobalResolution * 1e9;
@@ -1380,7 +1468,7 @@ function Luminosa_GUI
             outBayes.irfMeta = irfMeta;
             outBayes.tau0Requested = tau0Requested(:).';
             app.flimBayes = outBayes;
-            if ~isempty(cacheIdx)
+            if ~windowSmoothingActive && ~isempty(cacheIdx) && ~hasPieDisplayChannels(app.ptuOutRaw)
                 app.seriesBayesCache{cacheIdx} = outBayes;
             end
         catch ME
@@ -1418,6 +1506,96 @@ function Luminosa_GUI
                 showFlimBayesOverlay();
             otherwise
                 showIntensityFromPTU();
+        end
+    end
+
+    function onFlimWindowToggle(~, ~)
+        syncFlimWindowControlState();
+        [ok, winSpec] = syncFlimWindowSpecFromControl();
+        if ~ok && isFlimWindowToggleOn()
+            return;
+        end
+
+        clearWindowedFlimResults();
+        if hasEffectiveFlimSmoothing()
+            addStatus(sprintf('Sliding TCSPC window enabled: %s.', winSpec));
+        elseif isFlimWindowToggleOn()
+            addStatus('TCSPC window set to 1x1; FLIM display is unchanged.');
+        else
+            addStatus('Sliding TCSPC window disabled.');
+        end
+        refreshActiveWindowedFlimDisplay();
+    end
+
+    function onFlimWindowSpecChanged(~, ~)
+        [ok, winSpec] = syncFlimWindowSpecFromControl();
+        if ~ok
+            return;
+        end
+        if hasEffectiveFlimSmoothing()
+            clearWindowedFlimResults();
+            addStatus(sprintf('Sliding TCSPC window set to %s.', winSpec));
+            refreshActiveWindowedFlimDisplay();
+        end
+    end
+
+    function syncFlimWindowControlState()
+        if isempty(app.editFlimWindow) || ~isvalid(app.editFlimWindow)
+            return;
+        end
+        if isFlimWindowToggleOn()
+            app.editFlimWindow.Enable = 'on';
+        else
+            app.editFlimWindow.Enable = 'off';
+        end
+    end
+
+    function [ok, winSpec] = syncFlimWindowSpecFromControl()
+        ok = false;
+        winSpec = currentFlimWindowLabel();
+        if isempty(app.editFlimWindow) || ~isvalid(app.editFlimWindow)
+            ok = true;
+            return;
+        end
+
+        rawSpec = strtrim(char(app.editFlimWindow.Value));
+        [win, parsed] = parseSpatialWindowSpecLocal(rawSpec);
+        if ~parsed
+            app.editFlimWindow.Value = formatSpatialWindowSpec(app.flimSmoothingWindow);
+            addStatus(sprintf('Invalid TCSPC window "%s". Use N or NxM, for example 3x3.', rawSpec));
+            return;
+        end
+
+        app.flimSmoothingWindow = win;
+        winSpec = formatSpatialWindowSpec(win);
+        app.editFlimWindow.Value = winSpec;
+        ok = true;
+    end
+
+    function clearWindowedFlimResults()
+        app.flim = [];
+        app.flimBayes = [];
+    end
+
+    function refreshActiveWindowedFlimDisplay()
+        if isempty(app.ptuOut)
+            return;
+        end
+        switch app.displayMode
+            case 'tau'
+                if ensureFlimMetric('tauMean')
+                    showTauMean();
+                else
+                    showIntensityFromPTU();
+                end
+            case 'tau_std'
+                if ensureFlimMetric('tauRMS')
+                    showTauStd();
+                else
+                    showIntensityFromPTU();
+                end
+            case 'bayes'
+                onFlimBayes();
         end
     end
 
@@ -2036,9 +2214,13 @@ function Luminosa_GUI
             return;
         end
 
+        preferredLabel = preferredMietCurrentExportLabel(entries);
         app.mietSourceEntries = entries;
         app.mietResultEntries = struct([]);
         refreshMietDatasetItems();
+        if ~isempty(preferredLabel) && ~isempty(app.dropMietDataset) && isvalid(app.dropMietDataset)
+            app.dropMietDataset.Value = preferredLabel;
+        end
         app.mietDisplayMode = 'lifetime';
         showCurrentMietMap();
         setMietStatus(sprintf('Loaded %d MIET source map(s) from the current Luminosa session.', numel(entries)));
@@ -2357,6 +2539,14 @@ function Luminosa_GUI
             if ~isempty(hVals)
                 lines{end+1} = sprintf('Height range (nm): %.3f .. %.3f', min(hVals), max(hVals));
             end
+        end
+
+        if isfield(entry, 'processingLabel') && ~isempty(entry.processingLabel)
+            lines{end+1} = sprintf('Processing: %s', entry.processingLabel);
+        end
+
+        if isfield(entry, 'displayChannel') && ~isempty(entry.displayChannel)
+            lines{end+1} = sprintf('Display channel: %s', entry.displayChannel);
         end
     end
 
@@ -2710,6 +2900,742 @@ function Luminosa_GUI
         appendVerbose(msg);
     end
 
+    function onDisplayChannelChanged(~, ~)
+        if isempty(app.dropDisplayChannel) || isempty(app.dropDisplayChannel.Items)
+            return;
+        end
+
+        idx = find(strcmp(app.dropDisplayChannel.Value, app.dropDisplayChannel.Items), 1, 'first');
+        if isempty(idx)
+            idx = 1;
+        end
+        app.currentDisplayChannel = idx;
+
+        if ~isempty(app.seriesData) && ~isempty(app.currentFrame) && ...
+                app.currentFrame >= 1 && app.currentFrame <= numel(app.seriesData)
+            loadSeriesFrame(app.currentFrame);
+            addStatus(sprintf('Display channel set to %s.', currentDisplayChannelLabel()));
+            return;
+        end
+
+        if isempty(app.ptuOutRaw)
+            return;
+        end
+
+        requestedDisplayMode = app.displayMode;
+        requestedTcspcMode = app.tcspcDisplayMode;
+
+        app.ptuOut = buildDisplayPtuData(app.ptuOutRaw, app.currentDisplayChannel);
+        if ~isempty(app.ptuOutOriginalRaw)
+            app.ptuOutOriginal = buildDisplayPtuData(app.ptuOutOriginalRaw, app.currentDisplayChannel);
+        else
+            app.ptuOutOriginal = [];
+        end
+
+        resetDisplayDerivedResults();
+        showIntensityFromPTU();
+        if ensureGlobalIRF(true)
+            autoFitGlobalTCSPC();
+        end
+        showGlobalTCSPC();
+        restoreDisplayModeAfterDataChange(requestedDisplayMode, requestedTcspcMode);
+        addStatus(sprintf('Display channel set to %s.', currentDisplayChannelLabel()));
+    end
+
+    function restoreDisplayModeAfterDataChange(requestedDisplayMode, requestedTcspcMode)
+        if nargin < 1 || isempty(requestedDisplayMode)
+            requestedDisplayMode = 'intensity';
+        end
+        if nargin < 2 || isempty(requestedTcspcMode)
+            requestedTcspcMode = 'none';
+        end
+
+        switch requestedDisplayMode
+            case 'file_tau'
+                showFileSummaryOverlay();
+            case 'tau'
+                if ensureFlimMetric('tauMean', 'Tau mean')
+                    showTauMean();
+                else
+                    showIntensityFromPTU();
+                end
+            case 'tau_std'
+                if ensureFlimMetric('tauRMS', 'FLIM std')
+                    showTauStd();
+                else
+                    showIntensityFromPTU();
+                end
+            case 'distfluofit'
+                onDistFluofitExtension();
+            case 'bayes'
+                onFlimBayes();
+            otherwise
+                showIntensityFromPTU();
+        end
+
+        switch requestedTcspcMode
+            case 'roi_fit'
+                if ~isempty(app.roi) && isvalid(app.roi)
+                    onShowTCSPC();
+                    onFitTCSPC();
+                else
+                    showGlobalTCSPC();
+                end
+            case 'roi'
+                if ~isempty(app.roi) && isvalid(app.roi)
+                    onShowTCSPC();
+                else
+                    showGlobalTCSPC();
+                end
+            otherwise
+                if ~isempty(app.ptuOut)
+                    showGlobalTCSPC();
+                end
+        end
+    end
+
+    function resetDisplayDerivedResults()
+        app.flim = [];
+        app.ismRes = [];
+        app.pattern = [];
+        app.distFluofit = [];
+        app.flimBayes = [];
+        app.tcspc = [];
+        app.tcspcFit = [];
+        app.tcspcGlobal = [];
+        app.irfCache = struct('key', '', 'irf', [], 'meta', struct());
+        app.irfGlobal = [];
+        app.irfGlobalModel = '';
+        app.irfGlobalMeta = struct();
+        app.irfGlobalDtNs = [];
+        app.globalFit = [];
+        app.tcspcDisplayMode = 'none';
+        clearTCSPCSidePanel();
+    end
+
+    function resetDisplayChannelControl()
+        app.currentDisplayChannel = 1;
+        if isempty(app.dropDisplayChannel) || ~isvalid(app.dropDisplayChannel)
+            return;
+        end
+        app.dropDisplayChannel.Items = {'Channel 1'};
+        app.dropDisplayChannel.Value = 'Channel 1';
+        app.dropDisplayChannel.Enable = 'off';
+    end
+
+    function configureDisplayChannelControl(ptuData)
+        labels = {'Channel 1'};
+        enableState = 'off';
+        if hasPieDisplayChannels(ptuData)
+            labels = getPieDisplayChannelLabels(ptuData);
+            enableState = 'on';
+        end
+
+        app.currentDisplayChannel = max(1, min(numel(labels), round(double(app.currentDisplayChannel))));
+        if isempty(app.dropDisplayChannel) || ~isvalid(app.dropDisplayChannel)
+            return;
+        end
+        app.dropDisplayChannel.Items = labels;
+        app.dropDisplayChannel.Value = labels{app.currentDisplayChannel};
+        app.dropDisplayChannel.Enable = enableState;
+    end
+
+    function reportPieDetection(ptuData)
+        if isempty(ptuData) || ~isfield(ptuData, 'pie') || ~isstruct(ptuData.pie)
+            return;
+        end
+        if hasPieDisplayChannels(ptuData)
+            labels = getPieDisplayChannelLabels(ptuData);
+            addStatus(sprintf('PIE detected: %s and %s are available in the display selector.', labels{1}, labels{2}));
+        elseif isfield(ptuData.pie, 'reason') && ~isempty(ptuData.pie.reason)
+            addStatus(ptuData.pie.reason);
+        elseif isfield(ptuData.pie, 'checked') && ptuData.pie.checked
+            addStatus('No PIE double-peak detected; using a single display channel.');
+        end
+    end
+
+    function ptuData = annotatePieDisplayMetadata(ptuData)
+        if isempty(ptuData) || ~isstruct(ptuData)
+            return;
+        end
+        if isfield(ptuData, 'pie') && isstruct(ptuData.pie) && isfield(ptuData.pie, 'checked')
+            return;
+        end
+
+        pie = struct( ...
+            'checked', false, ...
+            'isDetected', false, ...
+            'reason', '', ...
+            'detectorIDs', [], ...
+            'gateStarts', [], ...
+            'gateStops', [], ...
+            'gateLen', [], ...
+            'channelLabels', {{'Channel 1 (L1D1)', 'Channel 2 (L2D2)'}}, ...
+            'info', struct(), ...
+            'activeIndex', 1, ...
+            'activeLabel', '', ...
+            'isFilteredDisplay', false);
+
+        if ~isfield(ptuData, 'im_tcspc') || isempty(ptuData.im_tcspc) || ...
+                ~isfield(ptuData, 'im_chan') || isempty(ptuData.im_chan)
+            pie.reason = 'PIE check unavailable: reload with "Store TCSPC" enabled.';
+            ptuData.pie = pie;
+            return;
+        end
+
+        detectorIDs = [];
+        if isfield(ptuData, 'dind') && ~isempty(ptuData.dind)
+            detectorIDs = double(ptuData.dind(:));
+        else
+            detectorIDs = unique(double(ptuData.im_chan(:)));
+        end
+        detectorIDs = detectorIDs(isfinite(detectorIDs));
+        if numel(detectorIDs) < 2
+            pie.checked = true;
+            pie.reason = 'PIE check skipped: fewer than two detector channels were found.';
+            ptuData.pie = pie;
+            return;
+        end
+
+        try
+            cfg = struct( ...
+                'gateThresholdFrac', 0.15, ...
+                'gatePreBins', 100, ...
+                'minGateSeparationBins', 50, ...
+                'secondPeakMinFraction', 0.12);
+            tcspcByDetector = buildPieDetectorHistogram(ptuData);
+            [gateStarts, gateStops, gateLen, gateInfo] = detectPieGatesFromHistogram(tcspcByDetector, 2, cfg);
+
+            pie.checked = true;
+            if numel(gateStarts) >= 2
+                pie.isDetected = true;
+                pie.detectorIDs = detectorIDs(1:2).';
+                pie.gateStarts = gateStarts(:).';
+                pie.gateStops = gateStops(:).';
+                pie.gateLen = gateLen;
+                pie.info = gateInfo;
+            else
+                pie.reason = 'No second TCSPC peak was detected in one sync period.';
+            end
+        catch ME
+            pie.reason = sprintf('PIE detection failed: %s', ME.message);
+        end
+
+        ptuData.pie = pie;
+    end
+
+    function tf = hasPieDisplayChannels(ptuData)
+        tf = ~isempty(ptuData) && isstruct(ptuData) && isfield(ptuData, 'pie') && ...
+            isstruct(ptuData.pie) && isfield(ptuData.pie, 'isDetected') && logical(ptuData.pie.isDetected) && ...
+            isfield(ptuData.pie, 'detectorIDs') && numel(ptuData.pie.detectorIDs) >= 2 && ...
+            isfield(ptuData.pie, 'gateStarts') && numel(ptuData.pie.gateStarts) >= 2;
+    end
+
+    function labels = getPieDisplayChannelLabels(ptuData)
+        labels = {'Channel 1'};
+        if hasPieDisplayChannels(ptuData) && isfield(ptuData.pie, 'channelLabels') && ...
+                numel(ptuData.pie.channelLabels) >= 2
+            if iscell(ptuData.pie.channelLabels)
+                labels = ptuData.pie.channelLabels(:).';
+            else
+                labels = cellstr(ptuData.pie.channelLabels(:));
+            end
+        end
+    end
+
+    function lbl = currentDisplayChannelLabel(ptuData)
+        if nargin < 1 || isempty(ptuData)
+            if ~isempty(app.ptuOutRaw)
+                ptuData = app.ptuOutRaw;
+            else
+                ptuData = app.ptuOut;
+            end
+        end
+        labels = getPieDisplayChannelLabels(ptuData);
+        idx = max(1, min(numel(labels), round(double(app.currentDisplayChannel))));
+        lbl = labels{idx};
+    end
+
+    function titleStr = formatDisplayTitle(titleBase, ptuData)
+        titleStr = titleBase;
+        if nargin < 2 || isempty(ptuData)
+            if ~isempty(app.ptuOutRaw)
+                ptuData = app.ptuOutRaw;
+            else
+                ptuData = app.ptuOut;
+            end
+        end
+        if hasPieDisplayChannels(ptuData)
+            titleStr = sprintf('%s | %s', titleBase, currentDisplayChannelLabel(ptuData));
+        end
+    end
+
+    function titleStr = formatFlimDisplayTitle(titleBase)
+        if hasEffectiveFlimSmoothing()
+            titleBase = sprintf('%s | TCSPC %s', titleBase, currentFlimWindowLabel());
+        end
+        titleStr = formatDisplayTitle(titleBase);
+    end
+
+    function tf = isFlimWindowToggleOn()
+        tf = ~isempty(app.chkFlimWindow) && isvalid(app.chkFlimWindow) && logical(app.chkFlimWindow.Value);
+    end
+
+    function win = getCurrentFlimWindow()
+        win = double(app.flimSmoothingWindow(:).');
+        if isempty(win)
+            win = [3 3];
+        elseif numel(win) == 1
+            win = [win win];
+        else
+            win = win(1:2);
+        end
+        win = max(1, round(win));
+    end
+
+    function tf = hasEffectiveFlimSmoothing()
+        win = getCurrentFlimWindow();
+        tf = isFlimWindowToggleOn() && any(win > 1);
+    end
+
+    function lbl = currentFlimWindowLabel()
+        lbl = formatSpatialWindowSpec(getCurrentFlimWindow());
+    end
+
+    function [win, ok] = parseSpatialWindowSpecLocal(spec)
+        win = [];
+        ok = false;
+
+        if isnumeric(spec)
+            vals = double(spec(:).');
+        else
+            spec = lower(strtrim(char(spec)));
+            spec = regexprep(spec, '\s+', '');
+            spec = strrep(spec, '*', 'x');
+            spec = strrep(spec, 'by', 'x');
+            tok = regexp(spec, '^(\d+)(?:x(\d+))?$', 'tokens', 'once');
+            if isempty(tok)
+                return;
+            end
+            vals = str2double(tok);
+        end
+
+        vals = vals(isfinite(vals));
+        if isempty(vals)
+            return;
+        end
+        if numel(vals) == 1
+            vals = [vals vals];
+        else
+            vals = vals(1:2);
+        end
+        vals = round(vals);
+        if any(vals < 1) || any(vals > 99)
+            return;
+        end
+
+        win = vals;
+        ok = true;
+    end
+
+    function spec = formatSpatialWindowSpec(win)
+        win = double(win(:).');
+        if isempty(win)
+            win = [1 1];
+        elseif numel(win) == 1
+            win = [win win];
+        else
+            win = win(1:2);
+        end
+        win = max(1, round(win));
+        spec = sprintf('%dx%d', win(1), win(2));
+    end
+
+    function [flim, srcLabel, errMsg] = computeWindowedQuickFlim(ptuData, useGPU)
+        flim = [];
+        srcLabel = '';
+        errMsg = '';
+
+        [ptuWindowed, srcLabel, errMsg] = buildWindowedQuickFlimInput(ptuData);
+        if isempty(ptuWindowed)
+            return;
+        end
+
+        flim = quickFLIMFromTCSPCFlexible(ptuWindowed, useGPU);
+    end
+
+    function [ptuWindowed, srcLabel, errMsg] = buildWindowedQuickFlimInput(ptuData)
+        ptuWindowed = [];
+        srcLabel = '';
+        errMsg = '';
+        if isempty(ptuData)
+            errMsg = 'Load a PTU first.';
+            return;
+        end
+
+        cubeField = '';
+        cube = [];
+        if isfield(ptuData, 'tcspc_pix') && ~isempty(ptuData.tcspc_pix)
+            cube = ptuData.tcspc_pix;
+            cubeField = 'tcspc_pix';
+            srcLabel = 'stored tcspc_pix';
+        elseif isfield(ptuData, 'tcspc_pix_mt') && ~isempty(ptuData.tcspc_pix_mt)
+            cube = ptuData.tcspc_pix_mt;
+            cubeField = 'tcspc_pix_mt';
+            srcLabel = 'stored tcspc_pix_mt';
+        elseif isfield(ptuData, 'im_tcspc') && ~isempty(ptuData.im_tcspc) && ...
+                isfield(ptuData, 'im_col') && ~isempty(ptuData.im_col) && ...
+                isfield(ptuData, 'im_line') && ~isempty(ptuData.im_line) && ...
+                isfield(ptuData, 'im_chan') && ~isempty(ptuData.im_chan)
+            try
+                [cube, ~] = buildLinearTcspcCubeFromPhotonLists(ptuData);
+            catch ME
+                errMsg = sprintf('Sliding-window FLIM reconstruction failed: %s', ME.message);
+                return;
+            end
+            cubeField = 'tcspc_pix';
+            srcLabel = 'photon-list reconstructed tcspc_pix';
+        else
+            errMsg = 'No TCSPC cube is available for sliding-window FLIM. Reload with "Store TCSPC" enabled.';
+            return;
+        end
+
+        ptuWindowed = removeFieldsIfPresent(ptuData, { ...
+            'tag', 'tags', 'tau', 'taus', 'tauMean', 'tauRMS', 'meanArrival', 'total', ...
+            'tcspc_pix', 'tcspc_pix_mt'});
+        ptuWindowed.(cubeField) = applySpatialWindowToTcspcCube(cube, getCurrentFlimWindow());
+        srcLabel = sprintf('%s + %s TCSPC window', srcLabel, currentFlimWindowLabel());
+    end
+
+    function cubeOut = applySpatialWindowToTcspcCube(cubeIn, win)
+        cubeIn = double(cubeIn);
+        if isempty(cubeIn)
+            cubeOut = cubeIn;
+            return;
+        end
+
+        win = double(win(:).');
+        if isempty(win)
+            win = [1 1];
+        elseif numel(win) == 1
+            win = [win win];
+        else
+            win = win(1:2);
+        end
+        win = max(1, round(win));
+        if all(win == 1)
+            cubeOut = cubeIn;
+            return;
+        end
+
+        kernel = ones([win, ones(1, max(ndims(cubeIn) - 2, 0))], 'double');
+        cubeOut = convn(cubeIn, kernel, 'same');
+    end
+
+    function ptuDisplay = buildDisplayPtuData(ptuRaw, channelIdx)
+        ptuDisplay = ptuRaw;
+        if isempty(ptuRaw) || ~hasPieDisplayChannels(ptuRaw)
+            return;
+        end
+        if isfield(ptuRaw.pie, 'isFilteredDisplay') && ptuRaw.pie.isFilteredDisplay
+            return;
+        end
+
+        labels = getPieDisplayChannelLabels(ptuRaw);
+        channelIdx = max(1, min(numel(labels), round(double(channelIdx))));
+        detectorID = double(ptuRaw.pie.detectorIDs(channelIdx));
+        gateStart = double(ptuRaw.pie.gateStarts(channelIdx));
+        gateStop = double(ptuRaw.pie.gateStops(channelIdx));
+        gateLen = max(1, round(double(ptuRaw.pie.gateLen)));
+
+        [t, chan, x, y, nAligned] = getAlignedPtuPhotonArrays(ptuRaw, true);
+        if nAligned <= 0
+            keep = false(0, 1);
+        else
+            keep = chan == detectorID & t >= gateStart & t <= gateStop;
+        end
+
+        ptuDisplay = removeFieldsIfPresent(ptuDisplay, { ...
+            'tag', 'tags', 'tau', 'taus', 'tauMean', 'tauRMS', 'meanArrival', ...
+            'total', 'tcspc_pix', 'tcspc_pix_mt', 'time', 'im_tcspc_native', ...
+            'cachedGlobalDecayCounts', 'cachedGlobalDecayDtNs', 'cachedGlobalDecaySrcInfo'});
+
+        if isfield(ptuRaw, 'im_sync') && ~isempty(ptuRaw.im_sync)
+            syncVals = ptuRaw.im_sync(:);
+            nSync = min(numel(syncVals), nAligned);
+            syncVals = syncVals(1:nSync);
+            ptuDisplay.im_sync = syncVals(keep(1:nSync));
+        else
+            ptuDisplay.im_sync = [];
+        end
+        shiftedTcspc = round(t(keep) - gateStart + 1);
+        if isempty(shiftedTcspc)
+            ptuDisplay.im_tcspc = uint16([]);
+        else
+            ptuDisplay.im_tcspc = uint16(max(1, shiftedTcspc));
+        end
+        ptuDisplay.im_chan = uint8(chan(keep));
+        ptuDisplay.im_line = uint16(y(keep));
+        ptuDisplay.im_col = uint16(x(keep));
+        if isfield(ptuRaw, 'im_frame') && ~isempty(ptuRaw.im_frame)
+            frameVals = ptuRaw.im_frame(:);
+            nFrameVals = min(numel(frameVals), nAligned);
+            frameVals = frameVals(1:nFrameVals);
+            ptuDisplay.im_frame = frameVals(keep(1:nFrameVals));
+        else
+            ptuDisplay.im_frame = uint16([]);
+        end
+
+        ptuDisplay.dind = detectorID;
+        ptuDisplay.Ngate = gateLen;
+        nx = double(ptuRaw.head.ImgHdr_PixX);
+        ny = double(ptuRaw.head.ImgHdr_PixY);
+        intensityMap = buildCountsImageFromPhotonCoords(ptuDisplay.im_col, ptuDisplay.im_line, nx, ny);
+        ptuDisplay.tags = intensityMap;
+        ptuDisplay.tag = intensityMap;
+        ptuDisplay.pie.activeIndex = channelIdx;
+        ptuDisplay.pie.activeLabel = labels{channelIdx};
+        ptuDisplay.pie.isFilteredDisplay = true;
+    end
+
+    function [t, chan, x, y, nAligned] = getAlignedPtuPhotonArrays(ptuData, needXY)
+        if nargin < 2
+            needXY = true;
+        end
+
+        t = double(ptuData.im_tcspc(:));
+        chan = double(ptuData.im_chan(:));
+        if needXY
+            x = double(ptuData.im_col(:));
+            y = double(ptuData.im_line(:));
+            nAligned = min([numel(t), numel(chan), numel(x), numel(y)]);
+            x = x(1:nAligned);
+            y = y(1:nAligned);
+        else
+            x = [];
+            y = [];
+            nAligned = min([numel(t), numel(chan)]);
+        end
+
+        if nAligned <= 0
+            t = zeros(0,1);
+            chan = zeros(0,1);
+            x = zeros(0,1);
+            y = zeros(0,1);
+            nAligned = 0;
+            return;
+        end
+
+        t = t(1:nAligned);
+        chan = chan(1:nAligned);
+    end
+
+    function img = buildCountsImageFromPhotonCoords(imCol, imLine, nx, ny)
+        if isempty(imCol) || isempty(imLine)
+            img = zeros(nx, ny);
+            return;
+        end
+        pix = double(imCol(:)) + (double(imLine(:)) - 1) * double(nx);
+        valid = isfinite(pix) & pix >= 1 & pix <= (double(nx) * double(ny));
+        if ~any(valid)
+            img = zeros(nx, ny);
+            return;
+        end
+        counts = accumarray(round(pix(valid)), 1, [double(nx) * double(ny), 1], @sum, 0);
+        img = reshape(counts, [nx, ny]);
+    end
+
+    function tcspcByDetector = buildPieDetectorHistogram(ptuData)
+        if isfield(ptuData, 'dind') && ~isempty(ptuData.dind)
+            detectorIDs = double(ptuData.dind(:));
+        else
+            detectorIDs = unique(double(ptuData.im_chan(:)));
+        end
+        detectorIDs = detectorIDs(isfinite(detectorIDs));
+        nDet = numel(detectorIDs);
+        if isfield(ptuData, 'Ngate') && ~isempty(ptuData.Ngate)
+            nBins = double(ptuData.Ngate);
+        else
+            nBins = max(1, ceil(max(double(ptuData.im_tcspc(:)))));
+        end
+        tcspcByDetector = zeros(nBins, nDet);
+        if nDet <= 0 || nBins <= 0
+            return;
+        end
+
+        lut = zeros(1, max(256, max(detectorIDs) + 1));
+        lut(detectorIDs + 1) = 1:nDet;
+
+        [t, chan] = getAlignedPtuPhotonArrays(ptuData, false);
+        if isempty(t)
+            return;
+        end
+        det = zeros(size(chan));
+        chanValid = chan >= 0 & chan <= (numel(lut) - 1);
+        det(chanValid) = lut(chan(chanValid) + 1);
+        valid = isfinite(t) & isfinite(det) & det >= 1 & det <= nDet & t >= 1 & t <= nBins;
+        if any(valid)
+            tcspcByDetector = accumarray([round(t(valid)), round(det(valid))], 1, [nBins, nDet], @sum, 0);
+        end
+    end
+
+    function [gateStarts, gateStops, gateLen, info] = detectPieGatesFromHistogram(tcspcByDetector, cnum, cfg)
+        gateStarts = [];
+        gateStops = [];
+        gateLen = [];
+        info = struct();
+
+        profile = mean(double(tcspcByDetector), 2);
+        profile = max(profile(:), 0);
+        if numel(profile) < 2 || all(profile <= 0)
+            return;
+        end
+
+        smoothBins = max(3, min(21, 2 * floor(numel(profile) / 200) + 1));
+        kernel = ones(smoothBins, 1) / smoothBins;
+        profileSmooth = conv(profile, kernel, 'same');
+
+        baseline = meanOfLowestFractionLocal(profileSmooth, 0.2);
+        peakVal = max(profileSmooth);
+        thr = baseline + cfg.gateThresholdFrac * max(peakVal - baseline, 0);
+        mask = profileSmooth > thr;
+
+        [startsRaw, stopsRaw, scoresRaw] = contiguousRunsLocal(mask, profileSmooth);
+        if numel(startsRaw) < cnum
+            [startsRaw, stopsRaw, scoresRaw] = fallbackPeakWindowsLocal(profileSmooth, cnum, cfg.minGateSeparationBins);
+        end
+        if numel(startsRaw) < cnum
+            return;
+        end
+
+        [~, orderByScore] = sort(scoresRaw(:), 'descend');
+        keep = sort(orderByScore(1:cnum));
+        startsRaw = startsRaw(keep);
+        stopsRaw = stopsRaw(keep);
+        scoresRaw = scoresRaw(keep);
+
+        [startsRaw, orderByStart] = sort(startsRaw(:));
+        stopsRaw = stopsRaw(orderByStart);
+        scoresRaw = scoresRaw(orderByStart);
+
+        gateStarts = max(1, startsRaw - cfg.gatePreBins);
+        nextStart = [gateStarts(2:end) - 1; numel(profileSmooth)];
+        gateLen = min(nextStart - gateStarts + 1);
+        gateLen = max(1, gateLen);
+        gateStops = gateStarts + gateLen - 1;
+
+        peakHeights = zeros(numel(gateStarts), 1);
+        peakBins = zeros(numel(gateStarts), 1);
+        for k = 1:numel(gateStarts)
+            win = profileSmooth(gateStarts(k):gateStops(k));
+            [peakHeights(k), relIdx] = max(win);
+            peakBins(k) = gateStarts(k) + relIdx - 1;
+        end
+
+        sortedHeights = sort(peakHeights(:), 'descend');
+        minPeakHeight = baseline + cfg.secondPeakMinFraction * max(sortedHeights(1) - baseline, 0);
+        if numel(sortedHeights) < cnum || sortedHeights(min(cnum, numel(sortedHeights))) < minPeakHeight
+            gateStarts = [];
+            gateStops = [];
+            gateLen = [];
+            return;
+        end
+        if numel(peakBins) >= 2 && abs(peakBins(2) - peakBins(1)) < cfg.minGateSeparationBins
+            gateStarts = [];
+            gateStops = [];
+            gateLen = [];
+            return;
+        end
+
+        info.profile = profile;
+        info.profileSmooth = profileSmooth;
+        info.threshold = thr;
+        info.rawStarts = startsRaw;
+        info.rawStops = stopsRaw;
+        info.rawScores = scoresRaw;
+        info.peakBins = peakBins;
+        info.peakHeights = peakHeights;
+    end
+
+    function m = meanOfLowestFractionLocal(x, frac)
+        x = sort(double(x(:)));
+        n = max(1, round(frac * numel(x)));
+        m = mean(x(1:n));
+    end
+
+    function [starts, stops, scores] = contiguousRunsLocal(mask, scoreTrace)
+        mask = logical(mask(:));
+        d = diff([false; mask; false]);
+        starts = find(d == 1);
+        stops = find(d == -1) - 1;
+        scores = zeros(numel(starts), 1);
+        for k = 1:numel(starts)
+            scores(k) = sum(scoreTrace(starts(k):stops(k)));
+        end
+    end
+
+    function [starts, stops, scores] = fallbackPeakWindowsLocal(profile, cnum, minSep)
+        y = double(profile(:));
+        n = numel(y);
+        starts = zeros(0,1);
+        stops = zeros(0,1);
+        scores = zeros(0,1);
+
+        isPeak = false(size(y));
+        if n >= 3
+            isPeak(2:end-1) = y(2:end-1) >= y(1:end-2) & y(2:end-1) >= y(3:end);
+        end
+        if n >= 1
+            isPeak(1) = y(1) >= y(min(2,n));
+            isPeak(end) = y(end) >= y(max(1,n-1));
+        end
+
+        peakIdx = find(isPeak & y > 0);
+        if isempty(peakIdx)
+            [~, peakIdx] = max(y);
+        end
+
+        [~, ord] = sort(y(peakIdx), 'descend');
+        peakIdx = peakIdx(ord);
+
+        picked = zeros(0,1);
+        for k = 1:numel(peakIdx)
+            if isempty(picked) || all(abs(peakIdx(k) - picked) >= minSep)
+                picked(end+1,1) = peakIdx(k); %#ok<AGROW>
+            end
+            if numel(picked) >= cnum
+                break;
+            end
+        end
+        if numel(picked) < cnum
+            return;
+        end
+
+        picked = sort(picked);
+        halfWidth = max(5, floor(minSep / 2));
+        starts = max(1, picked - halfWidth);
+        stops = min(n, picked + halfWidth);
+        scores = y(picked);
+    end
+
+    function ptuData = getDisplayPtuDataForFrameIndex(idx)
+        ptuData = [];
+        if idx < 1 || idx > numel(app.seriesData) || isempty(app.seriesData{idx})
+            return;
+        end
+        ptuData = buildDisplayPtuData(app.seriesData{idx}, app.currentDisplayChannel);
+    end
+
+    function s = removeFieldsIfPresent(s, fields)
+        if isempty(s) || ~isstruct(s)
+            return;
+        end
+        present = fields(isfield(s, fields));
+        if ~isempty(present)
+            s = rmfield(s, present);
+        end
+    end
+
     function clearRoiListeners()
         if isempty(app.roiListeners)
             return;
@@ -3048,7 +3974,10 @@ function Luminosa_GUI
         if isempty(app.ptuOut)
             return;
         end
-        img = getIntensityMap();
+        img = getIntensityMapFromPTUData(app.ptuOut);
+        if isempty(img)
+            img = getIntensityMap();
+        end
         if isempty(img)
             addStatus('No intensity data available.');
             return;
@@ -3063,7 +3992,7 @@ function Luminosa_GUI
         app.axImage.Visible = 'on';
         colormap(app.axImage, gray);
         app.cbImage = colorbar(app.axImage);
-        title(app.axImage, 'Intensity (gamma)');
+        title(app.axImage, formatDisplayTitle('Intensity (gamma)'));
         setSmallTitles();
         app.displayMode = 'intensity';
         setActiveFlimMode('');
@@ -3071,6 +4000,11 @@ function Luminosa_GUI
     end
 
     function showIntensityFromCache(frameNum)
+        if hasPieDisplayChannels(app.ptuOutRaw)
+            showIntensityFromPTU();
+            return;
+        end
+
         % Show intensity image from pre-computed cache for fast navigation
         addStatus(sprintf('Showing intensity for frame %d (cache size: %d)', frameNum, numel(app.seriesIntensityCache)));
         
@@ -3113,7 +4047,7 @@ function Luminosa_GUI
         app.axImage.Visible = 'on';
         colormap(app.axImage, gray);
         app.cbImage = colorbar(app.axImage);
-        title(app.axImage, sprintf('Frame %d Intensity (cached)', frameNum));
+        title(app.axImage, formatDisplayTitle(sprintf('Frame %d Intensity (cached)', frameNum)));
         setSmallTitles();
         app.displayMode = 'intensity';
         setActiveFlimMode('');
@@ -3166,7 +4100,7 @@ function Luminosa_GUI
     function frameData = prepareExtractedFrameStruct(ptuData)
         frameData = struct();
         metaFields = {'head', 'dind', 'Ngate', 'Resolution_ns', 'options', ...
-            'tcspc_mt_centers_ns', 'tcspc_mt_width_ns'};
+            'tcspc_mt_centers_ns', 'tcspc_mt_width_ns', 'pie'};
         for ii = 1:numel(metaFields)
             if isfield(ptuData, metaFields{ii})
                 frameData.(metaFields{ii}) = ptuData.(metaFields{ii});
@@ -3303,8 +4237,7 @@ function Luminosa_GUI
         statusMsg = '';
 
         if ~isempty(app.ptuOutOriginal)
-            intensityMap = getIntensityMapFromPTUData(app.ptuOutOriginal);
-            tauMap = computeTauMeanMapOnDemand(app.ptuOutOriginal);
+            [intensityMap, tauMap] = getExportMapsForPtuData(app.ptuOutOriginal);
             if ~isempty(tauMap) && ~isempty(intensityMap)
                 sourceName = currentSourceFileName();
                 titleStr = buildFileSummaryTitle(sourceName);
@@ -3323,8 +4256,7 @@ function Luminosa_GUI
         end
 
         if ~isempty(app.ptuOut)
-            intensityMap = getIntensityMapFromPTUData(app.ptuOut);
-            tauMap = computeTauMeanMapOnDemand(app.ptuOut);
+            [intensityMap, tauMap] = getExportMapsForPtuData(app.ptuOut);
             if ~isempty(tauMap) && ~isempty(intensityMap)
                 sourceName = currentSourceFileName();
                 titleStr = buildFileSummaryTitle(sourceName);
@@ -3370,6 +4302,7 @@ function Luminosa_GUI
         tauWeight = [];
         tauFallback = [];
         tauCount = [];
+        windowSmoothingActive = hasEffectiveFlimSmoothing();
 
         for ii = 1:numel(frameIdx)
             idx = frameIdx(ii);
@@ -3377,13 +4310,24 @@ function Luminosa_GUI
                 continue;
             end
 
-            if idx <= numel(app.seriesIntensityCache)
-                frameIntensity = app.seriesIntensityCache{idx};
-            else
-                frameIntensity = [];
+            frameDisplayData = getDisplayPtuDataForFrameIndex(idx);
+            if isempty(frameDisplayData)
+                continue;
             end
-            if isempty(frameIntensity) && ~isempty(app.seriesData{idx})
-                frameIntensity = getIntensityMapFromPTUData(app.seriesData{idx});
+
+            if windowSmoothingActive
+                [frameIntensity, frameTau] = getExportMapsForPtuData(frameDisplayData);
+            else
+                if idx <= numel(app.seriesIntensityCache)
+                    frameIntensity = app.seriesIntensityCache{idx};
+                else
+                    frameIntensity = [];
+                end
+                if hasPieDisplayChannels(app.seriesData{idx})
+                    frameIntensity = getIntensityMapFromPTUData(frameDisplayData);
+                elseif isempty(frameIntensity) && ~isempty(app.seriesData{idx})
+                    frameIntensity = getIntensityMapFromPTUData(app.seriesData{idx});
+                end
             end
             if isempty(frameIntensity)
                 continue;
@@ -3402,13 +4346,17 @@ function Luminosa_GUI
 
             intensityMap = intensityMap + frameIntensity;
 
-            if idx <= numel(app.seriesFlimCache)
-                frameTau = app.seriesFlimCache{idx};
-            else
-                frameTau = [];
-            end
-            if isempty(frameTau) && ~isempty(app.seriesData{idx})
-                frameTau = computeTauMeanMapOnDemand(app.seriesData{idx});
+            if ~windowSmoothingActive
+                if idx <= numel(app.seriesFlimCache)
+                    frameTau = app.seriesFlimCache{idx};
+                else
+                    frameTau = [];
+                end
+                if hasPieDisplayChannels(app.seriesData{idx})
+                    frameTau = computeTauMeanMapOnDemand(frameDisplayData);
+                elseif isempty(frameTau) && ~isempty(app.seriesData{idx})
+                    frameTau = computeTauMeanMapOnDemand(app.seriesData{idx});
+                end
             end
             if isempty(frameTau) || ~isequal(size(frameTau), size(intensityMap))
                 continue;
@@ -3468,10 +4416,201 @@ function Luminosa_GUI
         else
             titleStr = sprintf('Summed intensity + FLIM overlay (%s)', sourceName);
         end
+        titleStr = formatFlimDisplayTitle(titleStr);
+    end
+
+    function info = currentMapProcessingInfo(ptuData)
+        if nargin < 1 || isempty(ptuData)
+            ptuData = app.ptuOut;
+        end
+
+        info = struct( ...
+            'label', 'Per-pixel FLIM', ...
+            'window', [1 1], ...
+            'displayChannel', '');
+
+        if hasEffectiveFlimSmoothing()
+            info.label = sprintf('Sliding TCSPC window %s', currentFlimWindowLabel());
+            info.window = getCurrentFlimWindow();
+        end
+
+        if ~isempty(ptuData) && hasPieDisplayChannels(ptuData)
+            info.displayChannel = currentDisplayChannelLabel(ptuData);
+        end
+    end
+
+    function [intensityMap, lifetimeMap, processingInfo] = getExportMapsForPtuData(ptuData)
+        intensityMap = [];
+        lifetimeMap = [];
+        processingInfo = currentMapProcessingInfo(ptuData);
+
+        if isempty(ptuData)
+            return;
+        end
+
+        if hasEffectiveFlimSmoothing()
+            useGPU = app.chkUseGPU.Value && gpuIsAvailable();
+            try
+                [flimTmp, ~, errMsg] = computeWindowedQuickFlim(ptuData, useGPU);
+            catch ME
+                flimTmp = [];
+                errMsg = ME.message;
+            end
+
+            if isempty(flimTmp)
+                if ~isempty(errMsg)
+                    addStatus(sprintf('Windowed export fallback: %s', errMsg));
+                end
+                processingInfo.label = 'Per-pixel FLIM (windowed export fallback)';
+                processingInfo.window = [1 1];
+            else
+                if isfield(flimTmp, 'total') && isfield(flimTmp.total, 'tag') && ~isempty(flimTmp.total.tag)
+                    intensityMap = double(flimTmp.total.tag);
+                end
+                if isfield(flimTmp, 'total') && isfield(flimTmp.total, 'tauMean') && ~isempty(flimTmp.total.tauMean)
+                    lifetimeMap = double(flimTmp.total.tauMean);
+                end
+            end
+        end
+
+        if isempty(intensityMap)
+            intensityMap = getIntensityMapFromPTUData(ptuData);
+        end
+        if isempty(lifetimeMap)
+            lifetimeMap = computeTauMeanMapOnDemand(ptuData);
+        end
+    end
+
+    function [intensityMap, lifetimeMap, processingInfo] = getCurrentDisplayedLifetimeExport(exportKind, ptuData)
+        if nargin < 1 || isempty(exportKind)
+            exportKind = 'frame';
+        end
+        if nargin < 2 || isempty(ptuData)
+            ptuData = app.ptuOut;
+        end
+
+        intensityMap = [];
+        lifetimeMap = [];
+        processingInfo = currentMapProcessingInfo(ptuData);
+        methodLabel = '';
+
+        switch char(exportKind)
+            case 'summary'
+                if strcmp(app.displayMode, 'file_tau')
+                    [tauMap, intensityTmp, ~, ~] = resolveFileSummaryOverlay();
+                    if ~isempty(tauMap)
+                        lifetimeMap = double(tauMap);
+                        intensityMap = double(intensityTmp);
+                        methodLabel = 'Summed tau mean';
+                    end
+                end
+
+            otherwise
+                switch app.displayMode
+                    case 'bayes'
+                        if ~isempty(app.flimBayes) && isfield(app.flimBayes, 'tauMeanArithmetic') && ~isempty(app.flimBayes.tauMeanArithmetic)
+                            lifetimeMap = double(app.flimBayes.tauMeanArithmetic);
+                            if isfield(app.flimBayes, 'intensity') && ~isempty(app.flimBayes.intensity)
+                                intensityMap = double(app.flimBayes.intensity);
+                            end
+                            methodLabel = 'FLIM_bayes';
+                        end
+
+                    case 'distfluofit'
+                        if ~isempty(app.distFluofit) && isfield(app.distFluofit, 'tauMeanArithmetic') && ~isempty(app.distFluofit.tauMeanArithmetic)
+                            lifetimeMap = double(app.distFluofit.tauMeanArithmetic);
+                            if isfield(app.distFluofit, 'intensity') && ~isempty(app.distFluofit.intensity)
+                                intensityMap = double(app.distFluofit.intensity);
+                            end
+                            methodLabel = 'DistFluofit';
+                        end
+
+                    case 'pattern'
+                        if ~isempty(app.pattern) && isfield(app.pattern, 'tauMeanArithmetic') && ~isempty(app.pattern.tauMeanArithmetic)
+                            lifetimeMap = double(app.pattern.tauMeanArithmetic);
+                            if isfield(app.pattern, 'intensity') && ~isempty(app.pattern.intensity)
+                                intensityMap = double(app.pattern.intensity);
+                            end
+                            methodLabel = 'Pattern match';
+                        end
+
+                    case {'tau', 'tau_std'}
+                        if ~isempty(app.flim) && isfield(app.flim, 'total') && isfield(app.flim.total, 'tauMean') && ~isempty(app.flim.total.tauMean)
+                            lifetimeMap = double(app.flim.total.tauMean);
+                            if isfield(app.flim.total, 'tag') && ~isempty(app.flim.total.tag)
+                                intensityMap = double(app.flim.total.tag);
+                            end
+                            methodLabel = 'Tau mean';
+                        end
+                end
+        end
+
+        if ~isempty(methodLabel)
+            processingInfo = annotateProcessingMethod(processingInfo, methodLabel);
+        end
+    end
+
+    function processingInfo = annotateProcessingMethod(processingInfo, methodLabel)
+        if nargin < 1 || isempty(processingInfo) || ~isstruct(processingInfo)
+            processingInfo = struct('label', '', 'window', [1 1], 'displayChannel', '');
+        end
+        if nargin < 2 || isempty(methodLabel)
+            return;
+        end
+
+        baseLabel = '';
+        if isfield(processingInfo, 'label') && ~isempty(processingInfo.label)
+            baseLabel = char(processingInfo.label);
+        end
+
+        if isempty(baseLabel) || strcmp(baseLabel, 'Per-pixel FLIM')
+            processingInfo.label = char(methodLabel);
+        elseif contains(baseLabel, 'Sliding TCSPC window')
+            processingInfo.label = sprintf('%s | %s', char(methodLabel), baseLabel);
+        else
+            processingInfo.label = sprintf('%s | %s', char(methodLabel), baseLabel);
+        end
+    end
+
+    function tf = isCurrentFrameExportIndex(frameIdx)
+        tf = false;
+        if nargin < 1 || isempty(frameIdx) || ~isfinite(frameIdx)
+            return;
+        end
+        if ~isempty(app.seriesData)
+            tf = ~isempty(app.currentFrame) && frameIdx == app.currentFrame;
+        else
+            tf = frameIdx == 1;
+        end
+    end
+
+    function label = preferredMietCurrentExportLabel(entries)
+        label = '';
+        if nargin < 1 || isempty(entries)
+            return;
+        end
+
+        if strcmp(app.displayMode, 'file_tau')
+            targetLabel = sprintf('%s | total summed', currentSourceFileName());
+        else
+            if ~isempty(app.seriesData)
+                [sourceName, ~, fileFrameIndex] = frameSourceInfo(app.currentFrame);
+            else
+                sourceName = currentSourceFileName();
+                fileFrameIndex = 1;
+            end
+            targetLabel = sprintf('%s | frame %d', sourceName, fileFrameIndex);
+        end
+
+        entryLabels = {entries.label};
+        if any(strcmp(entryLabels, targetLabel))
+            label = targetLabel;
+        end
     end
 
     function frameMapExports = buildFrameMapExports()
         frameMapExports = emptyMapExport();
+        windowSmoothingActive = hasEffectiveFlimSmoothing();
 
         if ~isempty(app.seriesData)
             outIdx = 0;
@@ -3481,20 +4620,40 @@ function Luminosa_GUI
                     continue;
                 end
 
-                intensityMap = [];
-                if idx <= numel(app.seriesIntensityCache)
-                    intensityMap = app.seriesIntensityCache{idx};
-                end
-                if isempty(intensityMap)
-                    intensityMap = getIntensityMapFromPTUData(frameData);
+                frameDisplayData = getDisplayPtuDataForFrameIndex(idx);
+                if isempty(frameDisplayData)
+                    continue;
                 end
 
-                lifetimeMap = [];
-                if idx <= numel(app.seriesFlimCache)
-                    lifetimeMap = app.seriesFlimCache{idx};
+                processingInfo = currentMapProcessingInfo(frameDisplayData);
+                if isCurrentFrameExportIndex(idx)
+                    [intensityMap, lifetimeMap, processingInfo] = getCurrentDisplayedLifetimeExport('frame', frameDisplayData);
+                else
+                    intensityMap = [];
+                    lifetimeMap = [];
                 end
-                if isempty(lifetimeMap)
-                    lifetimeMap = computeTauMeanMapOnDemand(frameData);
+                if isempty(intensityMap) && isempty(lifetimeMap) && windowSmoothingActive
+                    [intensityMap, lifetimeMap, processingInfo] = getExportMapsForPtuData(frameDisplayData);
+                elseif isempty(intensityMap) && isempty(lifetimeMap)
+                    intensityMap = [];
+                    if idx <= numel(app.seriesIntensityCache)
+                        intensityMap = app.seriesIntensityCache{idx};
+                    end
+                    if hasPieDisplayChannels(frameData)
+                        intensityMap = getIntensityMapFromPTUData(frameDisplayData);
+                    elseif isempty(intensityMap)
+                        intensityMap = getIntensityMapFromPTUData(frameData);
+                    end
+
+                    lifetimeMap = [];
+                    if idx <= numel(app.seriesFlimCache)
+                        lifetimeMap = app.seriesFlimCache{idx};
+                    end
+                    if hasPieDisplayChannels(frameData)
+                        lifetimeMap = computeTauMeanMapOnDemand(frameDisplayData);
+                    elseif isempty(lifetimeMap)
+                        lifetimeMap = computeTauMeanMapOnDemand(frameData);
+                    end
                 end
 
                 if isempty(intensityMap) && isempty(lifetimeMap)
@@ -3505,13 +4664,15 @@ function Luminosa_GUI
                 outIdx = outIdx + 1;
                 frameMapExports(outIdx) = makeMapExportEntry( ...
                     sprintf('%s | frame %d', sourceName, fileFrameIndex), ...
-                    'per_frame', sourceName, sourceIdx, idx, fileFrameIndex, 1, intensityMap, lifetimeMap);
+                    'per_frame', sourceName, sourceIdx, idx, fileFrameIndex, 1, intensityMap, lifetimeMap, processingInfo);
             end
             return;
         end
 
-        intensityMap = getIntensityMapFromPTUData(app.ptuOut);
-        lifetimeMap = computeTauMeanMapOnDemand(app.ptuOut);
+        [intensityMap, lifetimeMap, processingInfo] = getCurrentDisplayedLifetimeExport('frame', app.ptuOut);
+        if isempty(intensityMap) && isempty(lifetimeMap)
+            [intensityMap, lifetimeMap, processingInfo] = getExportMapsForPtuData(app.ptuOut);
+        end
         if isempty(intensityMap) && isempty(lifetimeMap)
             return;
         end
@@ -3519,15 +4680,18 @@ function Luminosa_GUI
         sourceName = currentSourceFileName();
         frameMapExports(1) = makeMapExportEntry( ...
             sprintf('%s | frame 1', sourceName), ...
-            'per_frame', sourceName, NaN, 1, 1, 1, intensityMap, lifetimeMap);
+            'per_frame', sourceName, NaN, 1, 1, 1, intensityMap, lifetimeMap, processingInfo);
     end
 
     function fileSummaryMapExports = buildFileSummaryMapExports()
         fileSummaryMapExports = emptyMapExport();
+        processingInfo = currentMapProcessingInfo(app.ptuOut);
 
         if ~isempty(app.ptuOutOriginal)
-            intensityMap = getIntensityMapFromPTUData(app.ptuOutOriginal);
-            lifetimeMap = computeTauMeanMapOnDemand(app.ptuOutOriginal);
+            [intensityMap, lifetimeMap, processingInfo] = getCurrentDisplayedLifetimeExport('summary', app.ptuOutOriginal);
+            if isempty(intensityMap) && isempty(lifetimeMap)
+                [intensityMap, lifetimeMap, processingInfo] = getExportMapsForPtuData(app.ptuOutOriginal);
+            end
             if isempty(intensityMap) && isempty(lifetimeMap)
                 return;
             end
@@ -3536,7 +4700,7 @@ function Luminosa_GUI
             nFrames = max(1, numel(app.seriesData));
             fileSummaryMapExports(1) = makeMapExportEntry( ...
                 sprintf('%s | total summed', sourceName), ...
-                'summed_file', sourceName, 1, [], [], nFrames, intensityMap, lifetimeMap);
+                'summed_file', sourceName, 1, [], [], nFrames, intensityMap, lifetimeMap, processingInfo);
             return;
         end
 
@@ -3562,16 +4726,23 @@ function Luminosa_GUI
                 end
 
                 sourceName = sourceFileNameFromIndex(sourceIdx);
+                if ~isempty(frameIdx)
+                    processingInfo = currentMapProcessingInfo(getDisplayPtuDataForFrameIndex(frameIdx(1)));
+                else
+                    processingInfo = currentMapProcessingInfo(app.ptuOut);
+                end
                 outIdx = outIdx + 1;
                 fileSummaryMapExports(outIdx) = makeMapExportEntry( ...
                     sprintf('%s | total summed', sourceName), ...
-                    'summed_file', sourceName, sourceIdx, [], [], numel(frameIdx), intensityMap, lifetimeMap);
+                    'summed_file', sourceName, sourceIdx, [], [], numel(frameIdx), intensityMap, lifetimeMap, processingInfo);
             end
             return;
         end
 
-        intensityMap = getIntensityMapFromPTUData(app.ptuOut);
-        lifetimeMap = computeTauMeanMapOnDemand(app.ptuOut);
+        [intensityMap, lifetimeMap, processingInfo] = getCurrentDisplayedLifetimeExport('summary', app.ptuOut);
+        if isempty(intensityMap) && isempty(lifetimeMap)
+            [intensityMap, lifetimeMap, processingInfo] = getExportMapsForPtuData(app.ptuOut);
+        end
         if isempty(intensityMap) && isempty(lifetimeMap)
             return;
         end
@@ -3579,7 +4750,7 @@ function Luminosa_GUI
         sourceName = currentSourceFileName();
         fileSummaryMapExports(1) = makeMapExportEntry( ...
             sprintf('%s | total summed', sourceName), ...
-            'summed_file', sourceName, NaN, [], [], 1, intensityMap, lifetimeMap);
+            'summed_file', sourceName, NaN, [], [], 1, intensityMap, lifetimeMap, processingInfo);
     end
 
     function [sourceName, sourceIdx, fileFrameIndex] = frameSourceInfo(globalFrameIndex)
@@ -3618,13 +4789,31 @@ function Luminosa_GUI
         end
     end
 
-    function entry = makeMapExportEntry(label, mapType, sourceName, sourceIdx, globalFrameIndex, fileFrameIndex, nFrames, intensityMap, lifetimeMap)
+    function entry = makeMapExportEntry(label, mapType, sourceName, sourceIdx, globalFrameIndex, fileFrameIndex, nFrames, intensityMap, lifetimeMap, processingInfo)
         if strcmp(mapType, 'summed_file')
             intensityLabel = 'summed intensity';
             lifetimeLabel = 'summed lifetime (ns)';
         else
             intensityLabel = 'frame intensity';
             lifetimeLabel = 'frame lifetime (ns)';
+        end
+
+        if nargin < 10 || isempty(processingInfo)
+            processingInfo = currentMapProcessingInfo(app.ptuOut);
+        end
+        processingLabel = '';
+        spatialWindow = [1 1];
+        displayChannel = '';
+        if isstruct(processingInfo)
+            if isfield(processingInfo, 'label') && ~isempty(processingInfo.label)
+                processingLabel = char(processingInfo.label);
+            end
+            if isfield(processingInfo, 'window') && ~isempty(processingInfo.window)
+                spatialWindow = double(processingInfo.window(:).');
+            end
+            if isfield(processingInfo, 'displayChannel') && ~isempty(processingInfo.displayChannel)
+                displayChannel = char(processingInfo.displayChannel);
+            end
         end
 
         entry = struct( ...
@@ -3638,7 +4827,10 @@ function Luminosa_GUI
             'intensityLabel', intensityLabel, ...
             'lifetimeLabel', lifetimeLabel, ...
             'intensity', doubleOrEmpty(intensityMap), ...
-            'lifetimeNs', doubleOrEmpty(lifetimeMap));
+            'lifetimeNs', doubleOrEmpty(lifetimeMap), ...
+            'processingLabel', processingLabel, ...
+            'spatialWindow', doubleOrEmpty(spatialWindow), ...
+            'displayChannel', displayChannel);
     end
 
     function exports = emptyMapExport()
@@ -3653,7 +4845,10 @@ function Luminosa_GUI
             'intensityLabel', {}, ...
             'lifetimeLabel', {}, ...
             'intensity', {}, ...
-            'lifetimeNs', {});
+            'lifetimeNs', {}, ...
+            'processingLabel', {}, ...
+            'spatialWindow', {}, ...
+            'displayChannel', {});
     end
 
     function arr = doubleOrEmpty(arrIn)
@@ -3724,7 +4919,7 @@ function Luminosa_GUI
             return;
         end
 
-        if iscell(app.seriesTcspcPixCache) && ~isempty(app.currentFrame) && app.currentFrame >= 1 && ...
+        if ~hasPieDisplayChannels(app.ptuOutRaw) && iscell(app.seriesTcspcPixCache) && ~isempty(app.currentFrame) && app.currentFrame >= 1 && ...
                 app.currentFrame <= numel(app.seriesTcspcPixCache) && ...
                 ~isempty(app.seriesTcspcPixCache{app.currentFrame})
             tcspcPix = app.seriesTcspcPixCache{app.currentFrame};
@@ -3778,6 +4973,7 @@ function Luminosa_GUI
         else
             lbl = 'Whole-file';
         end
+        lbl = formatDisplayTitle(lbl);
     end
 
     function showTauMean()
@@ -3807,10 +5003,10 @@ function Luminosa_GUI
             caxis(app.axImage, trange);
             app.cbTau = colorbar(app.axImage);
             ylabel(app.cbTau, 'Tau (ns)');
-            title(app.axImage, 'Tau mean (ns)');
+            title(app.axImage, formatFlimDisplayTitle('Tau mean (ns)'));
             setSmallTitles();
         else
-            showTauOverlay(img, intensity, 'Tau mean (ns)');
+            showTauOverlay(img, intensity, formatFlimDisplayTitle('Tau mean (ns)'));
         end
         app.displayMode = 'tau';
         setActiveFlimMode('tau');
@@ -3851,10 +5047,10 @@ function Luminosa_GUI
             caxis(app.axImage, trange);
             app.cbTau = colorbar(app.axImage);
             ylabel(app.cbTau, 'Tau std (ns)');
-            title(app.axImage, 'FLIM std (ns)');
+            title(app.axImage, formatFlimDisplayTitle('FLIM std (ns)'));
             setSmallTitles();
         else
-            showTauOverlay(img, intensity, 'FLIM std (ns)', 'Tau std (ns)');
+            showTauOverlay(img, intensity, formatFlimDisplayTitle('FLIM std (ns)'), 'Tau std (ns)');
         end
         app.displayMode = 'tau_std';
         setActiveFlimMode('tau_std');
@@ -3905,7 +5101,7 @@ function Luminosa_GUI
         end
         tau = app.flimBayes.tauMeanArithmetic;
         intensity = app.flimBayes.intensity;
-        showTauOverlay(tau, intensity, 'FLIM_bayes tau mean (ns)');
+        showTauOverlay(tau, intensity, formatFlimDisplayTitle('FLIM_bayes tau mean (ns)'));
         app.displayMode = 'bayes';
         setActiveFlimMode('bayes');
     end
@@ -4397,27 +5593,33 @@ function Luminosa_GUI
         end
     end
 
-    function ok = ensureFlimMetric(metricName)
+    function ok = ensureFlimMetric(metricName, varargin)
         ok = false;
         if isempty(metricName)
             return;
         end
 
-        switch metricName
-            case 'tauMean'
-                statusLabel = 'tau mean';
-            case 'tauRMS'
-                statusLabel = 'FLIM std';
-            otherwise
-                statusLabel = metricName;
+        if nargin >= 2 && ~isempty(varargin{1})
+            statusLabel = char(varargin{1});
+        else
+            switch metricName
+                case 'tauMean'
+                    statusLabel = 'tau mean';
+                case 'tauRMS'
+                    statusLabel = 'FLIM std';
+                otherwise
+                    statusLabel = metricName;
+            end
         end
+
+        windowSmoothingActive = hasEffectiveFlimSmoothing();
 
         if hasFlimMetric(app.flim, metricName)
             ok = true;
             return;
         end
 
-        if strcmp(metricName, 'tauRMS')
+        if strcmp(metricName, 'tauRMS') && ~windowSmoothingActive
             tauStd = getTauStdMapFromPTUData(app.ptuOut);
             if ~isempty(tauStd)
                 tauMean = [];
@@ -4433,12 +5635,31 @@ function Luminosa_GUI
         if hasQuickFLIMData(app.ptuOut)
             setBusy(true);
             cleanupBusy = onCleanup(@() setBusy(false)); %#ok<NASGU>
-            addStatus(sprintf('Computing %s...', statusLabel));
+            if windowSmoothingActive
+                addStatus(sprintf('Computing %s with sliding %s TCSPC window...', ...
+                    statusLabel, currentFlimWindowLabel()));
+            else
+                addStatus(sprintf('Computing %s...', statusLabel));
+            end
             drawnow;
 
             useGPU = app.chkUseGPU.Value && gpuIsAvailable();
             try
-                app.flim = quickFLIMFromTCSPCFlexible(app.ptuOut, useGPU);
+                if windowSmoothingActive
+                    [flimWindowed, flimSrc, flimErr] = computeWindowedQuickFlim(app.ptuOut, useGPU);
+                    if isempty(flimWindowed)
+                        if isempty(flimErr)
+                            flimErr = sprintf('Sliding-window %s computation failed.', statusLabel);
+                        end
+                        addStatus(flimErr);
+                        app.flim = [];
+                        return;
+                    end
+                    app.flim = flimWindowed;
+                else
+                    flimSrc = '';
+                    app.flim = quickFLIMFromTCSPCFlexible(app.ptuOut, useGPU);
+                end
             catch ME
                 addStatus(sprintf('%s computation failed: %s', statusLabel, ME.message));
                 app.flim = [];
@@ -4447,18 +5668,24 @@ function Luminosa_GUI
 
             ok = hasFlimMetric(app.flim, metricName);
             if ok
-                addStatus(sprintf('%s done.', statusLabel));
+                if windowSmoothingActive && ~isempty(flimSrc)
+                    addStatus(sprintf('%s done (%s).', statusLabel, flimSrc));
+                else
+                    addStatus(sprintf('%s done.', statusLabel));
+                end
                 return;
             end
         end
 
         if strcmp(metricName, 'tauMean')
-            tauMean = getTauMeanMapFromPTUData(app.ptuOut);
-            if ~isempty(tauMean)
-                app.flim = flimStructFromTauMap(tauMean, getIntensityMapFromPTUData(app.ptuOut), getTauStdMapFromPTUData(app.ptuOut));
-                ok = true;
-                addStatus('Using cached tau-mean map.');
-                return;
+            if ~windowSmoothingActive
+                tauMean = getTauMeanMapFromPTUData(app.ptuOut);
+                if ~isempty(tauMean)
+                    app.flim = flimStructFromTauMap(tauMean, getIntensityMapFromPTUData(app.ptuOut), getTauStdMapFromPTUData(app.ptuOut));
+                    ok = true;
+                    addStatus('Using cached tau-mean map.');
+                    return;
+                end
             end
             addStatus('No frame-specific tau-mean data available.');
         else
