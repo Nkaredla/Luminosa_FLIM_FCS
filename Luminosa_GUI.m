@@ -67,10 +67,16 @@ function Luminosa_GUI
     app.ptuOutOriginal = [];        % Display-filtered full-file data for global IRF calculation
     app.ptuOutOriginalRaw = [];     % Original unfiltered full-file data for display-channel switching
     app.currentDisplayChannel = 1;
+    app.patternTcspcCubeCache = struct('key', '', 'cube', [], 'dtNs', [], 'srcLabel', '');
+    app.fileSummaryOverlayCache = struct('tauMap', [], 'intensityMap', [], 'auxMap', [], 'titleStr', '');
     app.dropDisplayChannel = [];
     app.flimSmoothingWindow = [3 3];
     app.chkFlimWindow = [];
     app.editFlimWindow = [];
+    app.imageAxesGrid = [];
+    app.axImageAux = [];
+    app.cbTauAux = [];
+    app.cbImageAux = [];
     app.mietSourceEntries = struct([]);
     app.mietResultEntries = struct([]);
     app.mietCalibration = struct('file', '', 'label', '', 'heightNm', [], 'lifetimeNs', []);
@@ -122,7 +128,7 @@ function Luminosa_GUI
         ctlInner.Units = 'pixels';
 
         % Keep all action-button rows at one consistent height.
-        rowHeights = [42, 28, 30, 30, 34, 36, 36, 36, 30, 30, 30, 30, 30, 30, 30, 36, 36, 72];
+        rowHeights = [42, 28, 30, 30, 4, 34, 36, 36, 36, 30, 30, 30, 30, 30, 30, 30, 36, 36, 72];
         ctlGrid = uigridlayout(ctlInner, [numel(rowHeights) 1]);
         ctlGrid.RowHeight = num2cell(rowHeights);
         ctlGrid.RowSpacing = 6;
@@ -172,6 +178,9 @@ function Luminosa_GUI
             'Tau mean, FLIM std, and FLIM_bayes. Examples: 2x2, 3x3, 5x5.'];
 
         % Row 5
+        uipanel(ctlGrid, 'BorderType', 'none', 'Visible', 'off');
+
+        % Row 6
         rowGamma = uigridlayout(ctlGrid, [1 3]);
         rowGamma.ColumnWidth = {70,'1x',55};
         rowGamma.Padding = [0 0 0 0];
@@ -214,7 +223,7 @@ function Luminosa_GUI
         rowNsub.ColumnWidth = {120,'1x'};
         rowNsub.Padding = [0 0 0 0];
         uilabel(rowNsub, 'Text', 'Log bins / octave');
-        app.txtBins = uieditfield(rowNsub, 'numeric', 'Value', 8, 'Limits', [2 32], ...
+        app.txtBins = uieditfield(rowNsub, 'numeric', 'Value', 12, 'Limits', [2 32], ...
             'LowerLimitInclusive', 'on', 'UpperLimitInclusive', 'on', ...
             'ValueChangedFcn', @onTcspcBinningChanged);
 
@@ -309,8 +318,12 @@ function Luminosa_GUI
             'ValueChangedFcn', @onFrameChanged, 'Visible', 'off');
         app.frameSlider.Tooltip = 'Video frame navigation';
         
+        app.imageAxesGrid = [];
         app.axImage = uiaxes(imageGrid);
+        app.axImage.Layout.Row = 1;
+        app.axImage.Layout.Column = 2;
         title(app.axImage, 'Image');
+        app.axImageAux = [];
 
         tcspcGrid = uigridlayout(axGrid, [1 2]);
         tcspcGrid.ColumnWidth = {'3.8x','1.5x'};
@@ -530,6 +543,8 @@ function Luminosa_GUI
             app.irfGlobalDtNs = [];
             app.globalFit = [];
             app.tcspcDisplayMode = 'none';
+            app.displayMode = 'intensity';
+            setActiveFlimMode('');
             clearTCSPCSidePanel();
             
             % Clear series data (switch to single file mode)
@@ -543,7 +558,6 @@ function Luminosa_GUI
             app.seriesBayesCache = {};
             app.seriesFrameFileMap = [];
             app.currentFrame = 1;
-            app.currentFrameIndex = 1;
             app.ptuOutOriginal = [];
             app.ptuOutOriginalRaw = [];
             resetDisplayChannelControl();
@@ -558,9 +572,9 @@ function Luminosa_GUI
             fileInfo = dir(app.lastFile);
             fileSizeMB = fileInfo.bytes / (1024 * 1024);
             
-            if fileSizeMB < 300 && exist('mHist4', 'file') == 2
-                % Use mHist4 for smaller files with potential multiframe support
-                addStatus('Loading PTU with mHist4 for multiframe detection...');
+            if fileSizeMB < 300 && exist('PTU_FLIM_GPU', 'file') == 2
+                % Use PTU_FLIM_GPU for smaller files when multiframe extraction is available.
+                addStatus('Loading PTU with PTU_FLIM_GPU for multiframe detection...');
                 drawnow;
                 
                 % Load PTU header to check for multiframe
@@ -595,7 +609,7 @@ function Luminosa_GUI
                         
                         % Store original full-file data for global IRF calculation
                         app.ptuOutOriginalRaw = app.ptuOutRaw;
-                        app.ptuOutOriginal = buildDisplayPtuData(app.ptuOutOriginalRaw, app.currentDisplayChannel);
+                        app.ptuOutOriginal = app.ptuOut;
                         fullPtuOut = app.ptuOutRaw;
                         
                         % Check if we have multiple frames with robust error handling
@@ -738,7 +752,7 @@ function Luminosa_GUI
                             app.frameSlider.Visible = 'on';
                             
                             % Load first frame and calculate its FLIM
-                            app.currentFrameIndex = 1;
+                            app.displayMode = 'intensity';
                             loadSeriesFrame(1);
                             
                             addStatus(sprintf('PTU loaded with %d frames. Global IRF calculated. Use frame slider to navigate.', numFrames));
@@ -783,7 +797,7 @@ function Luminosa_GUI
             reportPieDetection(app.ptuOutRaw);
             app.ptuOut = buildDisplayPtuData(app.ptuOutRaw, app.currentDisplayChannel);
             app.ptuOutOriginalRaw = app.ptuOutRaw;
-            app.ptuOutOriginal = buildDisplayPtuData(app.ptuOutOriginalRaw, app.currentDisplayChannel);
+            app.ptuOutOriginal = app.ptuOut;
 
             img = getIntensityMap();
             if isempty(img)
@@ -871,7 +885,8 @@ function Luminosa_GUI
         allFlimCache = {};
         allDistFitCache = {};
         allBayesCache = {};
-        frameFileMap = [];  % Track which file each frame came from
+        frameMapGrow = max(numel(files) * 32, 1);
+        frameFileMap = zeros(frameMapGrow, 1);  % Track which file each frame came from
         totalFrameCount = 0;
         
         for fileIdx = 1:numel(files)
@@ -933,6 +948,9 @@ function Luminosa_GUI
                     
                     for frameIdx = 1:numFramesInFile
                         totalFrameCount = totalFrameCount + 1;
+                        if totalFrameCount > numel(frameFileMap)
+                            frameFileMap(end + frameMapGrow, 1) = 0;
+                        end
                         frameFileMap(totalFrameCount) = fileIdx;
                         
                         % Create individual frame data structure without inheriting global cubes
@@ -991,6 +1009,9 @@ function Luminosa_GUI
                 else
                     % Single frame file - treat as one frame
                     totalFrameCount = totalFrameCount + 1;
+                    if totalFrameCount > numel(frameFileMap)
+                        frameFileMap(end + frameMapGrow, 1) = 0;
+                    end
                     frameFileMap(totalFrameCount) = fileIdx;
                     allFrameData{totalFrameCount} = ptuData;
                     allIntensityCache{totalFrameCount} = getIntensityMapFromPTUData(ptuData);
@@ -1030,7 +1051,7 @@ function Luminosa_GUI
         app.seriesFlimCache = allFlimCache;
         app.seriesDistFitCache = allDistFitCache;
         app.seriesBayesCache = allBayesCache;
-        app.seriesFrameFileMap = frameFileMap;  % Track which file each frame came from
+        app.seriesFrameFileMap = frameFileMap(1:totalFrameCount);  % Track which file each frame came from
         
         % Set current frame to first frame and update display
         app.currentFrame = 1;
@@ -1102,7 +1123,6 @@ function Luminosa_GUI
             
             % Set current frame data - no loading needed since it's cached
             app.currentFrame = frameNum;
-            app.currentFrameIndex = frameNum;  % Keep both variables in sync
             app.ptuOutRaw = app.seriesData{frameNum};
             configureDisplayChannelControl(app.ptuOutRaw);
             app.ptuOut = buildDisplayPtuData(app.ptuOutRaw, app.currentDisplayChannel);
@@ -1414,6 +1434,7 @@ function Luminosa_GUI
 
         cacheIdx = [];
         windowSmoothingActive = hasEffectiveFlimSmoothing();
+
         if ~isempty(app.seriesData) && ~isempty(app.currentFrame)
             cacheIdx = app.currentFrame;
             if ~windowSmoothingActive && ~hasPieDisplayChannels(app.ptuOutRaw) && ...
@@ -1449,9 +1470,6 @@ function Luminosa_GUI
             addStatus(sprintf('FLIM_bayes using %s whole-file IRF.', irfNote));
         end
 
-        addStatus(sprintf('Running FLIM_bayes with whole-file IRF using %s...', tcspcSrc));
-        drawnow;
-
         opts = struct();
         opts.useGPU = useGPU;
         opts.batchSize = 2048;
@@ -1463,6 +1481,8 @@ function Luminosa_GUI
         opts.singleExpTauGrid = [];
 
         try
+            addStatus(sprintf('Running FLIM_bayes with whole-file IRF using %s...', tcspcSrc));
+            drawnow;
             outBayes = flim_bayes_lowphoton(tcspc_pix, irf, pulsePeriodNs, dtNs, tau0Use, opts);
             outBayes.irf = irf(:);
             outBayes.irfMeta = irfMeta;
@@ -1497,7 +1517,17 @@ function Luminosa_GUI
             case 'tau_std'
                 showTauStd();
             case 'file_tau'
-                showFileSummaryOverlay();
+                if ~isempty(app.fileSummaryOverlayCache) && isfield(app.fileSummaryOverlayCache, 'tauMap') && ...
+                        ~isempty(app.fileSummaryOverlayCache.tauMap) && isfield(app.fileSummaryOverlayCache, 'intensityMap') && ...
+                        ~isempty(app.fileSummaryOverlayCache.intensityMap)
+                    titleStr = 'Summed intensity + FLIM overlay';
+                    if isfield(app.fileSummaryOverlayCache, 'titleStr') && ~isempty(app.fileSummaryOverlayCache.titleStr)
+                        titleStr = app.fileSummaryOverlayCache.titleStr;
+                    end
+                    showTauOverlay(app.fileSummaryOverlayCache.tauMap, app.fileSummaryOverlayCache.intensityMap, titleStr);
+                else
+                    showFileSummaryOverlay();
+                end
             case 'pattern'
                 showPatternOverlay();
             case 'distfluofit'
@@ -1515,7 +1545,6 @@ function Luminosa_GUI
         if ~ok && isFlimWindowToggleOn()
             return;
         end
-
         clearWindowedFlimResults();
         if hasEffectiveFlimSmoothing()
             addStatus(sprintf('Sliding TCSPC window enabled: %s.', winSpec));
@@ -1532,22 +1561,26 @@ function Luminosa_GUI
         if ~ok
             return;
         end
+        clearWindowedFlimResults();
         if hasEffectiveFlimSmoothing()
-            clearWindowedFlimResults();
             addStatus(sprintf('Sliding TCSPC window set to %s.', winSpec));
-            refreshActiveWindowedFlimDisplay();
+        elseif isFlimWindowToggleOn()
+            addStatus('TCSPC window set to 1x1; FLIM display is unchanged.');
         end
+        refreshActiveWindowedFlimDisplay();
     end
 
     function syncFlimWindowControlState()
-        if isempty(app.editFlimWindow) || ~isvalid(app.editFlimWindow)
-            return;
+        windowToggleOn = isFlimWindowToggleOn();
+
+        if ~isempty(app.editFlimWindow) && isvalid(app.editFlimWindow)
+            if windowToggleOn
+                app.editFlimWindow.Enable = 'on';
+            else
+                app.editFlimWindow.Enable = 'off';
+            end
         end
-        if isFlimWindowToggleOn()
-            app.editFlimWindow.Enable = 'on';
-        else
-            app.editFlimWindow.Enable = 'off';
-        end
+
     end
 
     function [ok, winSpec] = syncFlimWindowSpecFromControl()
@@ -1575,6 +1608,7 @@ function Luminosa_GUI
     function clearWindowedFlimResults()
         app.flim = [];
         app.flimBayes = [];
+        app.fileSummaryOverlayCache = struct('tauMap', [], 'intensityMap', [], 'auxMap', [], 'titleStr', '');
     end
 
     function refreshActiveWindowedFlimDisplay()
@@ -1594,6 +1628,8 @@ function Luminosa_GUI
                 else
                     showIntensityFromPTU();
                 end
+            case 'file_tau'
+                showFileSummaryOverlay();
             case 'bayes'
                 onFlimBayes();
         end
@@ -1756,9 +1792,9 @@ function Luminosa_GUI
         if ~isempty(app.axResidual) && isvalid(app.axResidual)
             cla(app.axResidual);
         end
-        tcspcDensityDisp = clipIrfDisplay(cDensity, 1e-1);
-        maskTcspc = isfinite(tBinNs(:)) & isfinite(tcspcDensityDisp(:));
-        plot(app.axTCSPC, tBinNs(maskTcspc)*1e-9, tcspcDensityDisp(maskTcspc), 'k.', 'MarkerSize', 10);
+        floorVal = tcspcDisplayFloor(widthNs);
+        tcspcDensityDisp = clipIrfDisplay(cDensity, floorVal);
+        plotClippedBinnedDensity(app.axTCSPC, edgesNs, tcspcDensityDisp, floorVal, 'k-', 1.1);
         hold(app.axTCSPC, 'on');
 
         legendLines = {'ROI TCSPC'};
@@ -1769,8 +1805,8 @@ function Luminosa_GUI
             if ~isempty(irfDisp) && max(irfDisp) > 0
                 irfScale = max(countsShift) / max(irfDisp);
                 irfScaled = irfDisp * irfScale;
-                [tIRFNs, irfDensity] = logBinTCSPC(irfScaled, dtNsNative, binsPerOct);
-                if plotClippedIrfDensity(app.axTCSPC, tIRFNs, irfDensity, 1e-1, 'b--', 1.1)
+                [~, irfDensity, ~, irfEdgesNs] = logBinTCSPC(irfScaled, dtNsNative, binsPerOct);
+                if plotClippedBinnedDensity(app.axTCSPC, irfEdgesNs, irfDensity, floorVal, 'b--', 1.1)
                     legendLines{end+1} = 'Whole-file IRF (scaled)';
                 end
             end
@@ -1780,10 +1816,10 @@ function Luminosa_GUI
         app.axTCSPC.XScale = 'linear';
         xlabel(app.axTCSPC, 'Delay time (s)');
         ylabel(app.axTCSPC, 'Counts / ns');
-        applyLogYGrid(app.axTCSPC);
+        applyLogYGrid(app.axTCSPC, floorVal);
         title(app.axTCSPC, sprintf('ROI TCSPC + whole-file IRF (%s)', app.dropIRF.Value));
         setSmallTitles();
-        setTcspcXLim(tBinNs*1e-9);
+        setTcspcXLim(edgesNs*1e-9);
 
         drawResidualDivider(false);
         setLegendEntries(legendLines);
@@ -1840,13 +1876,12 @@ function Luminosa_GUI
         if ~isempty(app.axResidual) && isvalid(app.axResidual)
             cla(app.axResidual);
         end
-        tcspcDensityDisp = clipIrfDisplay(app.tcspc.cDensity, 1e-1);
-        maskTcspc = isfinite(app.tcspc.tBinNs(:)) & isfinite(tcspcDensityDisp(:));
-        plot(app.axTCSPC, app.tcspc.tBinNs(maskTcspc)*1e-9, tcspcDensityDisp(maskTcspc), 'k.', 'MarkerSize', 10);
+        floorVal = tcspcDisplayFloor(app.tcspc.widthNs);
+        tcspcDensityDisp = clipIrfDisplay(app.tcspc.cDensity, floorVal);
+        plotClippedBinnedDensity(app.axTCSPC, app.tcspc.edgesNs, tcspcDensityDisp, floorVal, 'k-', 1.1);
         hold(app.axTCSPC, 'on');
-        fitDensityDisp = clipIrfDisplay(fitDensity, 1e-1);
-        maskFit = isfinite(tFitNs(:)) & isfinite(fitDensityDisp(:));
-        plot(app.axTCSPC, tFitNs(maskFit)*1e-9, fitDensityDisp(maskFit), 'r-', 'LineWidth', 1.3);
+        fitDensityDisp = clipIrfDisplay(fitDensity, floorVal);
+        plotClippedBinnedDensity(app.axTCSPC, fitEdgesNs, fitDensityDisp, floorVal, 'r-', 1.3);
 
         legendLines = {'ROI TCSPC', 'Reconvolution fit'};
         irfDisp = applyDisplayShiftToDecay(irfROI(:), app.tcspc.shiftBins);
@@ -1854,8 +1889,8 @@ function Luminosa_GUI
         if ~isempty(irfDisp) && max(irfDisp) > 0
             irfScale = max(app.tcspc.rawCountsShift) / max(irfDisp);
             irfScaled = irfDisp * irfScale;
-            [tIRFNs, irfDensity] = logBinTCSPC(irfScaled, app.tcspc.dtNs, app.txtBins.Value);
-            if plotClippedIrfDensity(app.axTCSPC, tIRFNs, irfDensity, 1e-1, 'b--', 1.1)
+            [~, irfDensity, ~, irfEdgesNs] = logBinTCSPC(irfScaled, app.tcspc.dtNs, app.txtBins.Value);
+            if plotClippedBinnedDensity(app.axTCSPC, irfEdgesNs, irfDensity, floorVal, 'b--', 1.1)
                 legendLines{end+1} = 'Whole-file IRF (scaled)';
             end
         end
@@ -1863,10 +1898,10 @@ function Luminosa_GUI
         grid(app.axTCSPC, 'on');
         app.axTCSPC.XScale = 'linear';
         ylabel(app.axTCSPC, 'Counts / ns');
-        applyLogYGrid(app.axTCSPC);
+        applyLogYGrid(app.axTCSPC, floorVal);
         title(app.axTCSPC, sprintf('ROI TCSPC fit using whole-file %s IRF', app.dropIRF.Value));
         setSmallTitles();
-        setTcspcXLim(app.tcspc.tBinNs*1e-9);
+        setTcspcXLim(app.tcspc.edgesNs*1e-9);
         if ~isempty(app.axResidual) && isvalid(app.axResidual)
             plot(app.axResidual, app.tcspc.tBinNs(1:n)*1e-9, residualDensity, 'm-', 'LineWidth', 1.0);
             hold(app.axResidual, 'on');
@@ -2027,7 +2062,11 @@ function Luminosa_GUI
             return;
         end
         outFile = fullfile(p, f);
-        exportgraphics(app.axImage, outFile, 'Resolution', 300);
+        exportTarget = app.axImage;
+        if ~isempty(app.imageAxesGrid) && isvalid(app.imageAxesGrid)
+            exportTarget = app.imageAxesGrid;
+        end
+        exportgraphics(exportTarget, outFile, 'Resolution', 300);
         addStatus(['Saved: ' outFile]);
     end
 
@@ -2926,8 +2965,14 @@ function Luminosa_GUI
         requestedTcspcMode = app.tcspcDisplayMode;
 
         app.ptuOut = buildDisplayPtuData(app.ptuOutRaw, app.currentDisplayChannel);
-        if ~isempty(app.ptuOutOriginalRaw)
-            app.ptuOutOriginal = buildDisplayPtuData(app.ptuOutOriginalRaw, app.currentDisplayChannel);
+        if ~isempty(app.seriesData)
+            if ~isempty(app.ptuOutOriginalRaw)
+                app.ptuOutOriginal = buildDisplayPtuData(app.ptuOutOriginalRaw, app.currentDisplayChannel);
+            else
+                app.ptuOutOriginal = [];
+            end
+        elseif ~isempty(app.ptuOutOriginalRaw)
+            app.ptuOutOriginal = app.ptuOut;
         else
             app.ptuOutOriginal = [];
         end
@@ -3000,6 +3045,8 @@ function Luminosa_GUI
         app.pattern = [];
         app.distFluofit = [];
         app.flimBayes = [];
+        app.patternTcspcCubeCache = struct('key', '', 'cube', [], 'dtNs', [], 'srcLabel', '');
+        app.fileSummaryOverlayCache = struct('tauMap', [], 'intensityMap', [], 'auxMap', [], 'titleStr', '');
         app.tcspc = [];
         app.tcspcFit = [];
         app.tcspcGlobal = [];
@@ -3202,6 +3249,24 @@ function Luminosa_GUI
         lbl = formatSpatialWindowSpec(getCurrentFlimWindow());
     end
 
+    function tf = windowedFlimCacheMatchesCurrentSettings()
+        tf = false;
+        if isempty(app.flim) || ~isstruct(app.flim) || ~isfield(app.flim, 'total') || ~isstruct(app.flim.total)
+            return;
+        end
+        if ~hasEffectiveFlimSmoothing()
+            tf = true;
+            return;
+        end
+
+        total = app.flim.total;
+        fitMode = '';
+        if isfield(total, 'fitMode') && ~isempty(total.fitMode)
+            fitMode = char(total.fitMode);
+        end
+        tf = ~strcmp(fitMode, 'window_fixed_free');
+    end
+
     function [win, ok] = parseSpatialWindowSpecLocal(spec)
         win = [];
         ok = false;
@@ -3308,7 +3373,6 @@ function Luminosa_GUI
     end
 
     function cubeOut = applySpatialWindowToTcspcCube(cubeIn, win)
-        cubeIn = double(cubeIn);
         if isempty(cubeIn)
             cubeOut = cubeIn;
             return;
@@ -3328,8 +3392,90 @@ function Luminosa_GUI
             return;
         end
 
-        kernel = ones([win, ones(1, max(ndims(cubeIn) - 2, 0))], 'double');
-        cubeOut = convn(cubeIn, kernel, 'same');
+        origSz = size(cubeIn);
+        workSz = origSz;
+        if numel(workSz) < 3
+            workSz(end+1:3) = 1;
+        end
+
+        nx = workSz(1);
+        ny = workSz(2);
+        nPlanes = prod(workSz(3:end));
+        workClass = spatialWindowWorkingClass(cubeIn);
+        planesPerChunk = chooseSpatialWindowChunkPlanes(nx, ny, workClass);
+
+        cubeView = reshape(cubeIn, nx, ny, nPlanes);
+        cubeOutView = zeros(nx, ny, nPlanes, workClass);
+        for p0 = 1:planesPerChunk:nPlanes
+            p1 = min(p0 + planesPerChunk - 1, nPlanes);
+            block = cubeView(:, :, p0:p1);
+            if ~isa(block, workClass)
+                block = cast(block, workClass);
+            end
+            cubeOutView(:, :, p0:p1) = spatialWindowBlockSum(block, win);
+        end
+
+        cubeOut = reshape(cubeOutView, workSz);
+        cubeOut = reshape(cubeOut, origSz);
+    end
+
+    function workClass = spatialWindowWorkingClass(data)
+        if isa(data, 'single')
+            workClass = 'single';
+        elseif isa(data, 'double')
+            workClass = 'double';
+        else
+            workClass = 'single';
+        end
+    end
+
+    function planesPerChunk = chooseSpatialWindowChunkPlanes(nx, ny, workClass)
+        bytesPerElem = 8;
+        if strcmp(workClass, 'single')
+            bytesPerElem = 4;
+        end
+
+        targetBytes = 96 * 1024 * 1024;
+        tempFactor = 6;
+        denom = max(double(nx) * double(ny) * bytesPerElem * tempFactor, 1);
+        planesPerChunk = max(1, floor(targetBytes / denom));
+    end
+
+    function blockOut = spatialWindowBlockSum(blockIn, win)
+        blockOut = spatialWindowSumAlongDim(blockIn, win(1), 1);
+        blockOut = spatialWindowSumAlongDim(blockOut, win(2), 2);
+    end
+
+    function blockOut = spatialWindowSumAlongDim(blockIn, width, dimIdx)
+        if width <= 1
+            blockOut = blockIn;
+            return;
+        end
+
+        sz = size(blockIn);
+        if numel(sz) < 3
+            sz(3) = 1;
+        end
+        pre = floor(width / 2);
+        post = width - 1 - pre;
+        zeroPad = zeros(1, sz(2), sz(3), 'like', blockIn);
+
+        switch dimIdx
+            case 1
+                padded = zeros(sz(1) + pre + post, sz(2), sz(3), 'like', blockIn);
+                padded(pre + 1:pre + sz(1), :, :) = blockIn;
+                prefix = cumsum(padded, 1);
+                prefix = cat(1, zeroPad, prefix);
+                blockOut = prefix((1:sz(1)) + width, :, :) - prefix(1:sz(1), :, :);
+            case 2
+                padded = zeros(sz(1), sz(2) + pre + post, sz(3), 'like', blockIn);
+                padded(:, pre + 1:pre + sz(2), :) = blockIn;
+                prefix = cumsum(padded, 2);
+                prefix = cat(2, zeros(sz(1), 1, sz(3), 'like', blockIn), prefix);
+                blockOut = prefix(:, (1:sz(2)) + width, :) - prefix(:, 1:sz(2), :);
+            otherwise
+                blockOut = blockIn;
+        end
     end
 
     function ptuDisplay = buildDisplayPtuData(ptuRaw, channelIdx)
@@ -3348,17 +3494,43 @@ function Luminosa_GUI
         gateStop = double(ptuRaw.pie.gateStops(channelIdx));
         gateLen = max(1, round(double(ptuRaw.pie.gateLen)));
 
-        [t, chan, x, y, nAligned] = getAlignedPtuPhotonArrays(ptuRaw, true);
-        if nAligned <= 0
-            keep = false(0, 1);
-        else
-            keep = chan == detectorID & t >= gateStart & t <= gateStop;
+        if ~isfield(ptuRaw, 'im_tcspc') || ~isfield(ptuRaw, 'im_chan') || ...
+                ~isfield(ptuRaw, 'im_col') || ~isfield(ptuRaw, 'im_line')
+            return;
         end
 
-        ptuDisplay = removeFieldsIfPresent(ptuDisplay, { ...
-            'tag', 'tags', 'tau', 'taus', 'tauMean', 'tauRMS', 'meanArrival', ...
-            'total', 'tcspc_pix', 'tcspc_pix_mt', 'time', 'im_tcspc_native', ...
-            'cachedGlobalDecayCounts', 'cachedGlobalDecayDtNs', 'cachedGlobalDecaySrcInfo'});
+        tRaw = ptuRaw.im_tcspc(:);
+        chanRaw = ptuRaw.im_chan(:);
+        xRaw = ptuRaw.im_col(:);
+        yRaw = ptuRaw.im_line(:);
+        nAligned = min([numel(tRaw), numel(chanRaw), numel(xRaw), numel(yRaw)]);
+        if nAligned <= 0
+            keep = false(0, 1);
+            tKeep = zeros(0, 1, 'like', tRaw);
+            chanKeep = zeros(0, 1, 'like', chanRaw);
+            xKeep = zeros(0, 1, 'like', xRaw);
+            yKeep = zeros(0, 1, 'like', yRaw);
+        else
+            tRaw = tRaw(1:nAligned);
+            chanRaw = chanRaw(1:nAligned);
+            xRaw = xRaw(1:nAligned);
+            yRaw = yRaw(1:nAligned);
+
+            detectorVal = cast(round(detectorID), 'like', chanRaw);
+            gateStartVal = cast(max(0, round(gateStart)), 'like', tRaw);
+            gateStopVal = cast(max(0, round(gateStop)), 'like', tRaw);
+            keep = (chanRaw == detectorVal) & (tRaw >= gateStartVal) & (tRaw <= gateStopVal);
+
+            tKeep = tRaw(keep);
+            chanKeep = chanRaw(keep);
+            xKeep = xRaw(keep);
+            yKeep = yRaw(keep);
+        end
+
+        ptuDisplay = prepareExtractedFrameStruct(ptuRaw);
+        if isfield(ptuRaw, 'nFrames') && ~isempty(ptuRaw.nFrames)
+            ptuDisplay.nFrames = ptuRaw.nFrames;
+        end
 
         if isfield(ptuRaw, 'im_sync') && ~isempty(ptuRaw.im_sync)
             syncVals = ptuRaw.im_sync(:);
@@ -3368,15 +3540,15 @@ function Luminosa_GUI
         else
             ptuDisplay.im_sync = [];
         end
-        shiftedTcspc = round(t(keep) - gateStart + 1);
-        if isempty(shiftedTcspc)
+        if isempty(tKeep)
             ptuDisplay.im_tcspc = uint16([]);
         else
+            shiftedTcspc = round(double(tKeep) - gateStart + 1);
             ptuDisplay.im_tcspc = uint16(max(1, shiftedTcspc));
         end
-        ptuDisplay.im_chan = uint8(chan(keep));
-        ptuDisplay.im_line = uint16(y(keep));
-        ptuDisplay.im_col = uint16(x(keep));
+        ptuDisplay.im_chan = uint8(chanKeep);
+        ptuDisplay.im_line = uint16(yKeep);
+        ptuDisplay.im_col = uint16(xKeep);
         if isfield(ptuRaw, 'im_frame') && ~isempty(ptuRaw.im_frame)
             frameVals = ptuRaw.im_frame(:);
             nFrameVals = min(numel(frameVals), nAligned);
@@ -3384,6 +3556,16 @@ function Luminosa_GUI
             ptuDisplay.im_frame = frameVals(keep(1:nFrameVals));
         else
             ptuDisplay.im_frame = uint16([]);
+        end
+        if isfield(ptuRaw, 'im_tcspc_native') && ~isempty(ptuRaw.im_tcspc_native)
+            tNative = ptuRaw.im_tcspc_native(:);
+            nNative = min(numel(tNative), nAligned);
+            if nNative > 0
+                tNative = tNative(1:nNative);
+                ptuDisplay.im_tcspc_native = tNative(keep(1:nNative));
+            else
+                ptuDisplay.im_tcspc_native = [];
+            end
         end
 
         ptuDisplay.dind = detectorID;
@@ -3463,19 +3645,34 @@ function Luminosa_GUI
             return;
         end
 
-        lut = zeros(1, max(256, max(detectorIDs) + 1));
+        lut = zeros(1, max(256, max(detectorIDs) + 1), 'uint16');
         lut(detectorIDs + 1) = 1:nDet;
 
-        [t, chan] = getAlignedPtuPhotonArrays(ptuData, false);
-        if isempty(t)
+        if ~isfield(ptuData, 'im_tcspc') || isempty(ptuData.im_tcspc) || ...
+                ~isfield(ptuData, 'im_chan') || isempty(ptuData.im_chan)
             return;
         end
-        det = zeros(size(chan));
-        chanValid = chan >= 0 & chan <= (numel(lut) - 1);
-        det(chanValid) = lut(chan(chanValid) + 1);
-        valid = isfinite(t) & isfinite(det) & det >= 1 & det <= nDet & t >= 1 & t <= nBins;
+
+        t = ptuData.im_tcspc(:);
+        chan = ptuData.im_chan(:);
+        nAligned = min(numel(t), numel(chan));
+        if nAligned <= 0
+            return;
+        end
+        t = t(1:nAligned);
+        chan = chan(1:nAligned);
+
+        det = zeros(size(chan), 'uint16');
+        chanUpper = cast(numel(lut) - 1, 'like', chan);
+        chanValid = chan >= 0 & chan <= chanUpper;
+        if any(chanValid)
+            det(chanValid) = lut(double(chan(chanValid)) + 1);
+        end
+
+        tUpper = cast(nBins, 'like', t);
+        valid = det >= 1 & det <= nDet & t >= 1 & t <= tUpper;
         if any(valid)
-            tcspcByDetector = accumarray([round(t(valid)), round(det(valid))], 1, [nBins, nDet], @sum, 0);
+            tcspcByDetector = accumarray([double(t(valid)), double(det(valid))], 1, [nBins, nDet], @sum, 0);
         end
     end
 
@@ -3777,10 +3974,40 @@ function Luminosa_GUI
         catch
         end
         try
+            if ~isempty(app.axImageAux) && isvalid(app.axImageAux)
+                app.axImageAux.Title.FontSize = app.smallTitleFont;
+            end
+        catch
+        end
+        try
             if ~isempty(app.axTCSPC) && isvalid(app.axTCSPC)
                 app.axTCSPC.Title.FontSize = app.smallTitleFont;
             end
         catch
+        end
+    end
+
+    function setImageSplitLayout(showSplit)
+        if nargin < 1 || isempty(showSplit)
+            showSplit = false;
+        end
+        if isempty(app.imageAxesGrid) || ~isvalid(app.imageAxesGrid) || isempty(app.axImage) || ~isvalid(app.axImage)
+            return;
+        end
+
+        if showSplit && ~isempty(app.axImageAux) && isvalid(app.axImageAux)
+            app.imageAxesGrid.ColumnWidth = {'1x', '1x'};
+            app.imageAxesGrid.ColumnSpacing = 6;
+            app.axImage.Visible = 'on';
+            app.axImageAux.Visible = 'on';
+        else
+            app.imageAxesGrid.ColumnWidth = {'1x', 0};
+            app.imageAxesGrid.ColumnSpacing = 0;
+            app.axImage.Visible = 'on';
+            if ~isempty(app.axImageAux) && isvalid(app.axImageAux)
+                cla(app.axImageAux);
+                app.axImageAux.Visible = 'off';
+            end
         end
     end
 
@@ -3869,11 +4096,13 @@ function Luminosa_GUI
         app.dividerLine = [];
     end
 
-    function applyLogYGrid(ax)
+    function applyLogYGrid(ax, floorVal)
         if isempty(ax) || ~isvalid(ax)
             return;
         end
-        floorVal = 1e-1;
+        if nargin < 2 || isempty(floorVal) || ~isfinite(floorVal) || floorVal <= 0
+            floorVal = 1e-1;
+        end
         try
             drawnow limitrate;
         catch
@@ -3902,6 +4131,16 @@ function Luminosa_GUI
             yTicks = [floorVal, yTicks];
         end
         ax.YTick = unique(yTicks);
+    end
+
+    function floorVal = tcspcDisplayFloor(widthNs)
+        widthNs = double(widthNs(:));
+        widthNs = widthNs(isfinite(widthNs) & widthNs > 0);
+        if isempty(widthNs)
+            floorVal = 1e-1;
+            return;
+        end
+        floorVal = max(0.5 / max(widthNs), eps);
     end
 
     function yMax = findMaxPositiveYData(ax, floorVal)
@@ -3941,6 +4180,69 @@ function Luminosa_GUI
         end
         y = double(y);
         y(~isfinite(y) | y < floorVal) = NaN;
+    end
+
+    function didPlot = plotClippedBinnedDensity(ax, edgesNs, yDensity, floorVal, lineSpec, lineWidth)
+        didPlot = false;
+        if nargin < 4 || isempty(floorVal)
+            floorVal = 1e-1;
+        end
+        if nargin < 5 || isempty(lineSpec)
+            lineSpec = 'k-';
+        end
+        if nargin < 6 || isempty(lineWidth)
+            lineWidth = 1.1;
+        end
+        if isempty(ax) || ~isvalid(ax)
+            return;
+        end
+
+        edgesNs = double(edgesNs(:));
+        yDensity = clipIrfDisplay(yDensity, floorVal);
+        if numel(edgesNs) ~= (numel(yDensity) + 1)
+            return;
+        end
+
+        centersNs = zeros(numel(yDensity), 1);
+        for i = 1:numel(yDensity)
+            t0 = edgesNs(i);
+            t1 = edgesNs(i+1);
+            if t0 > 0 && (t1 / t0) > 1.05
+                centersNs(i) = sqrt(t0 * t1);
+            else
+                centersNs(i) = 0.5 * (t0 + t1);
+            end
+        end
+
+        m = isfinite(yDensity) & (yDensity > 0);
+        if ~any(m)
+            return;
+        end
+
+        plot(ax, centersNs(m) * 1e-9, yDensity(m), lineSpec, 'LineWidth', lineWidth);
+        didPlot = true;
+    end
+
+    function edgesNs = binEdgesFromCentersWidths(tBinNs, widthNs)
+        tBinNs = double(tBinNs(:));
+        widthNs = double(widthNs(:));
+        n = min(numel(tBinNs), numel(widthNs));
+        if n < 1
+            edgesNs = zeros(0, 1);
+            return;
+        end
+
+        tBinNs = tBinNs(1:n);
+        widthNs = max(widthNs(1:n), eps);
+        leftEdges = tBinNs - 0.5 * widthNs;
+        rightEdges = tBinNs + 0.5 * widthNs;
+        edgesNs = zeros(n + 1, 1);
+        edgesNs(1) = max(0, leftEdges(1));
+        edgesNs(end) = max(edgesNs(1), rightEdges(end));
+        if n > 1
+            edgesNs(2:n) = 0.5 * (rightEdges(1:end-1) + leftEdges(2:end));
+        end
+        edgesNs = cummax(edgesNs);
     end
 
     function didPlot = plotClippedIrfDensity(ax, tNs, yDensity, floorVal, lineSpec, lineWidth)
@@ -3983,6 +4285,7 @@ function Luminosa_GUI
             return;
         end
         imgG = applyGamma(double(img), app.gamma);
+        setImageSplitLayout(false);
         clearImageColorbars();
         cla(app.axImage);
         app.axImage.CLimMode = 'auto';
@@ -4038,6 +4341,7 @@ function Luminosa_GUI
         
         % Display the intensity image
         imgG = applyGamma(double(img), app.gamma);
+        setImageSplitLayout(false);
         clearImageColorbars();
         cla(app.axImage);
         app.axImage.CLimMode = 'auto';
@@ -4230,14 +4534,15 @@ function Luminosa_GUI
         end
     end
 
-    function [tauMap, intensityMap, titleStr, statusMsg] = resolveFileSummaryOverlay()
+    function [tauMap, intensityMap, auxMap, titleStr, statusMsg] = resolveFileSummaryOverlay()
         tauMap = [];
         intensityMap = [];
+        auxMap = [];
         titleStr = 'Summed intensity + FLIM overlay';
         statusMsg = '';
 
         if ~isempty(app.ptuOutOriginal)
-            [intensityMap, tauMap] = getExportMapsForPtuData(app.ptuOutOriginal);
+            [intensityMap, tauMap, ~, auxMap] = getExportMapsForPtuData(app.ptuOutOriginal);
             if ~isempty(tauMap) && ~isempty(intensityMap)
                 sourceName = currentSourceFileName();
                 titleStr = buildFileSummaryTitle(sourceName);
@@ -4247,7 +4552,7 @@ function Luminosa_GUI
         end
 
         if ~isempty(app.seriesData)
-            [tauMap, intensityMap, sourceName, nFramesUsed] = aggregateCurrentSourceFileOverlay();
+            [tauMap, intensityMap, auxMap, sourceName, nFramesUsed] = aggregateCurrentSourceFileOverlay();
             if ~isempty(tauMap) && ~isempty(intensityMap)
                 titleStr = buildFileSummaryTitle(sourceName);
                 statusMsg = sprintf('Showing summed intensity + FLIM overlay for %d frame(s) in %s.', nFramesUsed, sourceName);
@@ -4256,7 +4561,7 @@ function Luminosa_GUI
         end
 
         if ~isempty(app.ptuOut)
-            [intensityMap, tauMap] = getExportMapsForPtuData(app.ptuOut);
+            [intensityMap, tauMap, ~, auxMap] = getExportMapsForPtuData(app.ptuOut);
             if ~isempty(tauMap) && ~isempty(intensityMap)
                 sourceName = currentSourceFileName();
                 titleStr = buildFileSummaryTitle(sourceName);
@@ -4265,9 +4570,10 @@ function Luminosa_GUI
         end
     end
 
-    function [tauMap, intensityMap, sourceName, nFramesUsed] = aggregateCurrentSourceFileOverlay()
+    function [tauMap, intensityMap, auxMap, sourceName, nFramesUsed] = aggregateCurrentSourceFileOverlay()
         tauMap = [];
         intensityMap = [];
+        auxMap = [];
         sourceName = currentSourceFileName();
         nFramesUsed = 0;
 
@@ -4292,16 +4598,21 @@ function Luminosa_GUI
         end
 
         nFramesUsed = numel(frameIdx);
-        [tauMap, intensityMap] = aggregateFrameOverlayMaps(frameIdx);
+        [tauMap, intensityMap, auxMap] = aggregateFrameOverlayMaps(frameIdx);
     end
 
-    function [tauMap, intensityMap] = aggregateFrameOverlayMaps(frameIdx)
+    function [tauMap, intensityMap, auxMap] = aggregateFrameOverlayMaps(frameIdx)
         tauMap = [];
         intensityMap = [];
+        auxMap = [];
         weightedTau = [];
         tauWeight = [];
         tauFallback = [];
         tauCount = [];
+        weightedAux = [];
+        auxWeight = [];
+        auxFallback = [];
+        auxCount = [];
         windowSmoothingActive = hasEffectiveFlimSmoothing();
 
         for ii = 1:numel(frameIdx)
@@ -4316,8 +4627,9 @@ function Luminosa_GUI
             end
 
             if windowSmoothingActive
-                [frameIntensity, frameTau] = getExportMapsForPtuData(frameDisplayData);
+                [frameIntensity, frameTau, ~, frameAux] = getExportMapsForPtuData(frameDisplayData);
             else
+                frameAux = [];
                 if idx <= numel(app.seriesIntensityCache)
                     frameIntensity = app.seriesIntensityCache{idx};
                 else
@@ -4340,6 +4652,10 @@ function Luminosa_GUI
                 tauWeight = zeros(size(frameIntensity), 'double');
                 tauFallback = zeros(size(frameIntensity), 'double');
                 tauCount = zeros(size(frameIntensity), 'double');
+                weightedAux = zeros(size(frameIntensity), 'double');
+                auxWeight = zeros(size(frameIntensity), 'double');
+                auxFallback = zeros(size(frameIntensity), 'double');
+                auxCount = zeros(size(frameIntensity), 'double');
             elseif ~isequal(size(frameIntensity), size(intensityMap))
                 continue;
             end
@@ -4374,6 +4690,20 @@ function Luminosa_GUI
                 weightedTau(validWeighted) = weightedTau(validWeighted) + frameTau(validWeighted) .* frameIntensity(validWeighted);
                 tauWeight(validWeighted) = tauWeight(validWeighted) + frameIntensity(validWeighted);
             end
+
+            if ~isempty(frameAux) && isequal(size(frameAux), size(intensityMap))
+                frameAux = double(frameAux);
+                finiteAux = isfinite(frameAux);
+                if any(finiteAux(:))
+                    auxFallback(finiteAux) = auxFallback(finiteAux) + frameAux(finiteAux);
+                    auxCount(finiteAux) = auxCount(finiteAux) + 1;
+                end
+                validAuxWeighted = finiteAux & isfinite(frameIntensity) & frameIntensity > 0;
+                if any(validAuxWeighted(:))
+                    weightedAux(validAuxWeighted) = weightedAux(validAuxWeighted) + frameAux(validAuxWeighted) .* frameIntensity(validAuxWeighted);
+                    auxWeight(validAuxWeighted) = auxWeight(validAuxWeighted) + frameIntensity(validAuxWeighted);
+                end
+            end
         end
 
         if isempty(intensityMap)
@@ -4387,6 +4717,16 @@ function Luminosa_GUI
         fallbackMask = ~weightedMask & tauCount > 0;
         if any(fallbackMask(:))
             tauMap(fallbackMask) = tauFallback(fallbackMask) ./ tauCount(fallbackMask);
+        end
+
+        if any(auxWeight(:) > 0) || any(auxCount(:) > 0)
+            auxMap = nan(size(intensityMap), 'double');
+            auxWeightedMask = auxWeight > 0;
+            auxMap(auxWeightedMask) = weightedAux(auxWeightedMask) ./ auxWeight(auxWeightedMask);
+            auxFallbackMask = ~auxWeightedMask & auxCount > 0;
+            if any(auxFallbackMask(:))
+                auxMap(auxFallbackMask) = auxFallback(auxFallbackMask) ./ auxCount(auxFallbackMask);
+            end
         end
     end
 
@@ -4439,10 +4779,11 @@ function Luminosa_GUI
         end
     end
 
-    function [intensityMap, lifetimeMap, processingInfo] = getExportMapsForPtuData(ptuData)
+    function [intensityMap, lifetimeMap, processingInfo, auxMap] = getExportMapsForPtuData(ptuData)
         intensityMap = [];
         lifetimeMap = [];
         processingInfo = currentMapProcessingInfo(ptuData);
+        auxMap = [];
 
         if isempty(ptuData)
             return;
@@ -4497,7 +4838,7 @@ function Luminosa_GUI
         switch char(exportKind)
             case 'summary'
                 if strcmp(app.displayMode, 'file_tau')
-                    [tauMap, intensityTmp, ~, ~] = resolveFileSummaryOverlay();
+                    [tauMap, intensityTmp] = resolveFileSummaryOverlay();
                     if ~isempty(tauMap)
                         lifetimeMap = double(tauMap);
                         intensityMap = double(intensityTmp);
@@ -4510,10 +4851,10 @@ function Luminosa_GUI
                     case 'bayes'
                         if ~isempty(app.flimBayes) && isfield(app.flimBayes, 'tauMeanArithmetic') && ~isempty(app.flimBayes.tauMeanArithmetic)
                             lifetimeMap = double(app.flimBayes.tauMeanArithmetic);
+                            methodLabel = 'FLIM_bayes';
                             if isfield(app.flimBayes, 'intensity') && ~isempty(app.flimBayes.intensity)
                                 intensityMap = double(app.flimBayes.intensity);
                             end
-                            methodLabel = 'FLIM_bayes';
                         end
 
                     case 'distfluofit'
@@ -4990,10 +5331,14 @@ function Luminosa_GUI
             return;
         end
         intensity = getIntensityMap();
+        if isempty(intensity) && isfield(app.flim, 'total') && isfield(app.flim.total, 'tag') && ~isempty(app.flim.total.tag)
+            intensity = double(app.flim.total.tag);
+        end
         if isempty(intensity)
             cmap = jet(256);
             cmap = cmap(30:end-30,:);
             trange = getTauRange(img);
+            setImageSplitLayout(false);
             clearImageColorbars();
             cla(app.axImage);
             imagesc(app.axImage, img);
@@ -5038,6 +5383,7 @@ function Luminosa_GUI
             cmap = jet(256);
             cmap = cmap(30:end-30,:);
             trange = getTauRange(img);
+            setImageSplitLayout(false);
             clearImageColorbars();
             cla(app.axImage);
             imagesc(app.axImage, img);
@@ -5057,11 +5403,13 @@ function Luminosa_GUI
     end
 
     function showFileSummaryOverlay()
-        [tauMap, intensityMap, titleStr, statusMsg] = resolveFileSummaryOverlay();
+        [tauMap, intensityMap, auxMap, titleStr, statusMsg] = resolveFileSummaryOverlay();
         if isempty(tauMap) || isempty(intensityMap)
+            app.fileSummaryOverlayCache = struct('tauMap', [], 'intensityMap', [], 'auxMap', [], 'titleStr', '');
             addStatus('No summed file FLIM overlay is available.');
             return;
         end
+        app.fileSummaryOverlayCache = struct('tauMap', tauMap, 'intensityMap', intensityMap, 'auxMap', auxMap, 'titleStr', titleStr);
         showTauOverlay(tauMap, intensityMap, titleStr);
         app.displayMode = 'file_tau';
         setActiveFlimMode('');
@@ -5128,8 +5476,9 @@ function Luminosa_GUI
                 widthNs = ones(size(cInt));
             end
             cDensity = cInt ./ max(widthNs, eps);
+            edgesNs = binEdgesFromCentersWidths(tBinNs, widthNs);
             app.tcspcGlobal = struct('tBinNs', tBinNs, 'cDensity', cDensity, 'cBin', cInt, ...
-                'widthNs', widthNs, 'dtNs', [], 'rawCountsNative', countsNative(:), 'source', srcInfo);
+                'edgesNs', edgesNs, 'widthNs', widthNs, 'dtNs', [], 'rawCountsNative', countsNative(:), 'source', srcInfo);
         else
             binsPerOct = app.txtBins.Value;
             [countsShift, shiftBins, shiftNs, peakIdx, riseIdx] = shiftDecayForIRFDisplay(countsNative, dtNs);
@@ -5168,9 +5517,9 @@ function Luminosa_GUI
         if ~isempty(app.axResidual) && isvalid(app.axResidual)
             cla(app.axResidual);
         end
-        tcspcDensityDisp = clipIrfDisplay(app.tcspcGlobal.cDensity, 1e-1);
-        maskTcspc = isfinite(app.tcspcGlobal.tBinNs(:)) & isfinite(tcspcDensityDisp(:));
-        plot(app.axTCSPC, app.tcspcGlobal.tBinNs(maskTcspc)*1e-9, tcspcDensityDisp(maskTcspc), 'k.', 'MarkerSize', 10);
+        floorVal = tcspcDisplayFloor(app.tcspcGlobal.widthNs);
+        tcspcDensityDisp = clipIrfDisplay(app.tcspcGlobal.cDensity, floorVal);
+        plotClippedBinnedDensity(app.axTCSPC, app.tcspcGlobal.edgesNs, tcspcDensityDisp, floorVal, 'k-', 1.1);
         hold(app.axTCSPC, 'on');
         legendLines = {'Whole-file TCSPC'};
 
@@ -5181,17 +5530,16 @@ function Luminosa_GUI
             if ~isempty(irfDisp) && max(irfDisp) > 0
                 irfScale = max(app.tcspcGlobal.cBin) / max(irfDisp);
                 irfScaled = irfDisp * irfScale;
-                [tIRFNs, irfDensity] = logBinTCSPC(irfScaled, app.tcspcGlobal.dtNs, app.txtBins.Value);
-                if plotClippedIrfDensity(app.axTCSPC, tIRFNs, irfDensity, 1e-1, 'b--', 1.1)
+                [~, irfDensity, ~, irfEdgesNs] = logBinTCSPC(irfScaled, app.tcspcGlobal.dtNs, app.txtBins.Value);
+                if plotClippedBinnedDensity(app.axTCSPC, irfEdgesNs, irfDensity, floorVal, 'b--', 1.1)
                     legendLines{end+1} = 'Whole-file IRF (scaled)';
                 end
             end
         end
 
         if ~isempty(fitDensityPlot)
-            fitDensityDisp = clipIrfDisplay(fitDensityPlot, 1e-1);
-            maskFit = isfinite(app.globalFit.tBinNs(:)) & isfinite(fitDensityDisp(:));
-            plot(app.axTCSPC, app.globalFit.tBinNs(maskFit)*1e-9, fitDensityDisp(maskFit), 'r-', 'LineWidth', 1.3);
+            fitDensityDisp = clipIrfDisplay(fitDensityPlot, floorVal);
+            plotClippedBinnedDensity(app.axTCSPC, app.globalFit.fitEdgesNs, fitDensityDisp, floorVal, 'r-', 1.3);
             fitLegend = sprintf('Fit (%d-exp)', app.globalFit.nExp);
             if isfield(app.globalFit, 'selectionMode')
                 selectionMode = lower(char(string(app.globalFit.selectionMode)));
@@ -5209,10 +5557,10 @@ function Luminosa_GUI
         grid(app.axTCSPC, 'on');
         app.axTCSPC.XScale = 'linear';
         ylabel(app.axTCSPC, 'Counts / ns');
-        applyLogYGrid(app.axTCSPC);
+        applyLogYGrid(app.axTCSPC, floorVal);
         title(app.axTCSPC, sprintf('%s TCSPC + whole-file IRF (%s)', currentTcspcLabel(), app.dropIRF.Value));
         setSmallTitles();
-        setTcspcXLim(app.tcspcGlobal.tBinNs*1e-9);
+        setTcspcXLim(app.tcspcGlobal.edgesNs*1e-9);
 
         if showResidual && ~isempty(app.axResidual) && isvalid(app.axResidual)
             plot(app.axResidual, app.tcspcGlobal.tBinNs(1:numel(residualDensity))*1e-9, residualDensity, 'm-', 'LineWidth', 1.0);
@@ -5504,6 +5852,29 @@ function Luminosa_GUI
         imgG = img .^ g;
     end
 
+    function cb = showScalarOverlayOnAxis(ax, mapData, intensity, valueRange, cmap, titleStr, colorbarLabel)
+        cb = [];
+        if isempty(ax) || ~isvalid(ax)
+            return;
+        end
+        mapData = double(mapData);
+        intensity = double(intensity);
+        if isempty(mapData) || isempty(intensity)
+            return;
+        end
+        bright = applyGamma(intensity, app.gamma);
+        rgb = flim_rgb(mapData, bright, valueRange, cmap);
+        cla(ax);
+        image(ax, rgb);
+        axis(ax, 'image');
+        axis(ax, 'off');
+        title(ax, titleStr);
+        colormap(ax, cmap);
+        caxis(ax, valueRange);
+        cb = colorbar(ax);
+        ylabel(cb, colorbarLabel);
+    end
+
     function showTauOverlay(tau, intensity, titleStr, colorbarLabel)
         cmap = jet(256);
         cmap = cmap(30:end-30,:);
@@ -5518,19 +5889,10 @@ function Luminosa_GUI
             return;
         end
         trange = getTauRange(tau);
-        bright = applyGamma(intensity, app.gamma);
-        rgb = flim_rgb(tau, bright, trange, cmap);
+        setImageSplitLayout(false);
         clearImageColorbars();
-        cla(app.axImage);
-        image(app.axImage, rgb);
-        axis(app.axImage, 'image');
-        axis(app.axImage, 'off');
-        title(app.axImage, titleStr);
+        app.cbTau = showScalarOverlayOnAxis(app.axImage, tau, intensity, trange, cmap, titleStr, colorbarLabel);
         setSmallTitles();
-        colormap(app.axImage, cmap);
-        caxis(app.axImage, trange);
-        app.cbTau = colorbar(app.axImage);
-        ylabel(app.cbTau, colorbarLabel);
     end
 
     function clearImageColorbars()
@@ -5538,10 +5900,18 @@ function Luminosa_GUI
             delete(app.cbTau);
         end
         app.cbTau = [];
+        if ~isempty(app.cbTauAux) && isvalid(app.cbTauAux)
+            delete(app.cbTauAux);
+        end
+        app.cbTauAux = [];
         if ~isempty(app.cbImage) && isvalid(app.cbImage)
             delete(app.cbImage);
         end
         app.cbImage = [];
+        if ~isempty(app.cbImageAux) && isvalid(app.cbImageAux)
+            delete(app.cbImageAux);
+        end
+        app.cbImageAux = [];
     end
 
     function setActiveFlimMode(modeName)
@@ -5613,6 +5983,10 @@ function Luminosa_GUI
         end
 
         windowSmoothingActive = hasEffectiveFlimSmoothing();
+
+        if windowSmoothingActive && ~windowedFlimCacheMatchesCurrentSettings()
+            app.flim = [];
+        end
 
         if hasFlimMetric(app.flim, metricName)
             ok = true;
@@ -5838,12 +6212,26 @@ function tauSeed = getDefaultTauSeedsForGlobalFit(nExp)
     end
 end
 
-function [tauFit, coeff, fitCountsRawFull, stats] = fitDecayIRFModelMultiStart(countsRawFull, dtNs, tau0, irf, includeBG, optimizeTau)
+function [tauFit, coeff, fitCountsRawFull, stats] = fitDecayIRFModelMultiStart(countsRawFull, dtNs, tau0, irf, includeBG, optimizeTau, tauBounds)
     tau0 = double(tau0(:));
     countsRawFull = double(countsRawFull(:));
     irf = max(double(irf(:)), 0);
     irf = irf ./ max(sum(irf), eps);
+    if nargin < 7
+        tauBounds = [];
+    end
+    if ~isempty(tauBounds)
+        tauBounds = double(tauBounds(:).');
+        if numel(tauBounds) < 2 || any(~isfinite(tauBounds(1:2))) || tauBounds(1) <= 0 || tauBounds(2) <= tauBounds(1)
+            tauBounds = [];
+        else
+            tauBounds = tauBounds(1:2);
+        end
+    end
     seedMat = buildTauSeedMatrix(tau0);
+    if ~isempty(tauBounds)
+        seedMat = min(max(seedMat, tauBounds(1)), tauBounds(2));
+    end
     best.err = inf;
     best.tauFit = tau0(:).';
     best.coeff = [];
@@ -5853,17 +6241,27 @@ function [tauFit, coeff, fitCountsRawFull, stats] = fitDecayIRFModelMultiStart(c
         tauSeed = seedMat(:,iseed);
         if optimizeTau
             p0 = tauSeed;
-            xmin = max(0.03, p0 / 10);
-            xmax = max(p0 * 10, p0 + 0.05);
+            if ~isempty(tauBounds)
+                xmin = tauBounds(1) * ones(size(p0));
+                xmax = tauBounds(2) * ones(size(p0));
+            else
+                xmin = max(0.03, p0 / 10);
+                xmax = max(p0 * 10, p0 + 0.05);
+            end
+            p0 = min(max(p0, xmin), xmax);
             tol = 1e-5;
             steps = max(250, 180 * numel(p0));
             [pfit, ~] = Simplex(@roiTcspcErrRawIRF, p0, xmin, xmax, tol, steps, countsRawFull, dtNs, irf, includeBG);
         else
-            pfit = tauSeed;
+            if ~isempty(tauBounds)
+                pfit = min(max(tauSeed, tauBounds(1)), tauBounds(2));
+            else
+                pfit = tauSeed;
+            end
         end
         [err, coeffCand, fitCand] = roiTcspcErrRawIRF(pfit, countsRawFull, dtNs, irf, includeBG);
         [tauSorted, coeffSorted] = sortLifetimesAndAmps(pfit(:).', coeffCand(:).', includeBG);
-        [err, coeffCand, fitCand] = roiTcspcErrRawIRF(tauSorted(:), countsRawFull, dtNs, irf, includeBG);
+        coeffCand = coeffSorted(:).';
         statsCand = calcDecayFitStats(countsRawFull, fitCand, numel(tauSorted), includeBG);
         if err < best.err
             best.err = err;
@@ -6116,10 +6514,12 @@ end
         cube = ptuOut.tcspc_pix;
         dtNs = ptuOut.head.MeasDesc_Resolution * 1e9;
         [maskSub, x1, x2, y1, y2] = roiPixelMaskSub(roi, size(cube,1), size(cube,2));
-        if isempty(maskSub)
-            y1 = 1; y2 = size(cube,1);
-            x1 = 1; x2 = size(cube,2);
-            maskSub = true(y2-y1+1, x2-x1+1);
+        if isempty(maskSub) || ~any(maskSub(:))
+            counts = [];
+            srcInfo.mode = 'tcspc cube';
+            srcInfo.native = false;
+            srcInfo.emptyRoi = true;
+            return;
         end
         sub = double(cube(y1:y2, x1:x2, :, :));
         maskSub = double(maskSub);
@@ -6353,7 +6753,8 @@ end
 
 function [tBinNs, cDensity, cInt, edgesNs, widthNs] = logBinTCSPC(counts, dtNs, binsPerOct)
 % Mixed linear/log binning for decay display.
-% The first 0.5 ns remain at native resolution; later bins expand logarithmically.
+% First 0.5 ns kept at native resolution; thereafter fractional log edges
+% (not snapped to native bins) with counts redistributed via CDF interpolation.
     if nargin < 3 || isempty(binsPerOct)
         binsPerOct = 8;
     end
@@ -6370,46 +6771,54 @@ function [tBinNs, cDensity, cInt, edgesNs, widthNs] = logBinTCSPC(counts, dtNs, 
         return;
     end
 
+    tEndNs = Nt * dtNs;
     linearNs = 0.50;
     nLinear = min(Nt, max(1, ceil(linearNs / max(dtNs, eps))));
-    linearEdgesIdx = (1:(nLinear + 1)).';
+    linEdges = (0:nLinear)' * dtNs;
+    tStartNs = linEdges(end);
 
-    if nLinear < Nt
-        remNt = Nt - nLinear;
-        nOct = max(1, log2(remNt));
-        nBinsLog = max(16, ceil(nOct * binsPerOct));
-        logEdgesRel = unique(round(logspace(0, log10(remNt + 1), nBinsLog + 1)));
-        logEdgesRel(1) = 1;
-        logEdgesRel(end) = remNt + 1;
-        logEdgesIdx = nLinear + logEdgesRel(:);
-        edgesIdx = unique([linearEdgesIdx; logEdgesIdx(2:end)]);
+    if tStartNs < tEndNs
+        nOct = log2(tEndNs / max(tStartNs, dtNs));
+        nBinsLog = max(4, ceil(nOct * binsPerOct));
+        logEdges = tStartNs * 2.^((1:nBinsLog)' / binsPerOct);
+        logEdges(end) = tEndNs;
+        edgesNs = [linEdges; logEdges];
     else
-        edgesIdx = linearEdgesIdx;
-    end
-
-    nBins = numel(edgesIdx) - 1;
-    cInt = zeros(nBins, 1);
-    widthNs = zeros(nBins, 1);
-    tBinNs = zeros(nBins, 1);
-
-    csum = cumsum([0; counts]);
-    for i = 1:nBins
-        a = edgesIdx(i);
-        b = edgesIdx(i+1) - 1;
-        cInt(i) = csum(b + 1) - csum(a);
-        widthNs(i) = (b - a + 1) * dtNs;
-        t0 = (a - 1) * dtNs;
-        t1 = b * dtNs;
-        if widthNs(i) <= (1 + 1e-12) * dtNs || t0 < linearNs
-            tBinNs(i) = 0.5 * (t0 + t1);
-        elseif t0 <= 0
-            tBinNs(i) = max(dtNs/2, t1/2);
-        else
-            tBinNs(i) = sqrt(t0 * t1);
+        edgesNs = linEdges;
+        if edgesNs(end) < tEndNs
+            edgesNs(end + 1, 1) = tEndNs;
         end
     end
 
-    edgesNs = (edgesIdx(:) - 1) * dtNs;
+    edgesNs(edgesNs > tEndNs + eps) = [];
+    edgesNs = unique(edgesNs);
+    if edgesNs(end) < tEndNs - eps
+        edgesNs(end + 1, 1) = tEndNs;
+    end
+    dE = diff(edgesNs);
+    edgesNs = edgesNs([true; dE > max(1e-9, 1e-6 * dtNs)]);
+    if edgesNs(end) < tEndNs
+        edgesNs(end + 1, 1) = tEndNs;
+    end
+
+    nativeEdges = (0:Nt)' * dtNs;
+    csum = [0; cumsum(counts)];
+    cdfAtEdges = interp1(nativeEdges, csum, edgesNs, 'linear', 'extrap');
+    cInt = max(diff(cdfAtEdges), 0);
+    widthNs = diff(edgesNs);
+
+    nBins = numel(widthNs);
+    tBinNs = zeros(nBins, 1);
+    for i = 1:nBins
+        t0 = edgesNs(i);
+        t1 = edgesNs(i + 1);
+        if t0 > 0 && (t1 / t0) > 1.05
+            tBinNs(i) = sqrt(t0 * t1);
+        else
+            tBinNs(i) = 0.5 * (t0 + t1);
+        end
+    end
+
     cDensity = cInt ./ max(widthNs, eps);
 end
 
@@ -6588,9 +6997,10 @@ function bgPerBin = fittedBackgroundOffsetPerBin(coeff, nBins, includeBG)
 end
 
 function idx = roiPhotonMask(ptuOut, roi)
-    col = double(ptuOut.im_col(:));
-    row = double(ptuOut.im_line(:));
-    idx = false(size(col));
+    % Match ROI extraction to the displayed image coordinates.
+    xDisp = double(ptuOut.im_line(:));
+    yDisp = double(ptuOut.im_col(:));
+    idx = false(size(xDisp));
 
     if isempty(roi) || ~isvalid(roi)
         return;
@@ -6601,32 +7011,52 @@ function idx = roiPhotonMask(ptuOut, roi)
         a = roi.SemiAxes(1);
         b = roi.SemiAxes(2);
         if a <= 0 || b <= 0
+            [xPt, yPt, ok] = roiDisplayAnchorPoint(roi);
+            if ok
+                idx = (xDisp == xPt) & (yDisp == yPt);
+            end
             return;
         end
         theta = 0;
         if isprop(roi, 'RotationAngle')
             theta = roi.RotationAngle * (pi / 180);
         end
-        x = col - c(1);
-        y = row - c(2);
+        x = xDisp - c(1);
+        y = yDisp - c(2);
         xr =  cos(theta) * x + sin(theta) * y;
         yr = -sin(theta) * x + cos(theta) * y;
         idx = (xr ./ a).^2 + (yr ./ b).^2 <= 1;
+        if ~any(idx)
+            [xPt, yPt, ok] = roiDisplayAnchorPoint(roi);
+            if ok
+                idx = (xDisp == xPt) & (yDisp == yPt);
+            end
+        end
         return;
     end
 
     if isprop(roi, 'Position')
         pos = roi.Position;
         if size(pos,2) == 2 && size(pos,1) >= 3
-            idx = inpolygon(col, row, pos(:,1), pos(:,2));
+            idx = inpolygon(xDisp, yDisp, pos(:,1), pos(:,2));
+            if ~any(idx)
+                [xPt, yPt, ok] = roiDisplayAnchorPoint(roi);
+                if ok
+                    idx = (xDisp == xPt) & (yDisp == yPt);
+                end
+            end
             return;
         end
         if numel(pos) >= 4
-            x1 = max(1, floor(pos(1)));
-            y1 = max(1, floor(pos(2)));
-            x2 = ceil(pos(1) + pos(3));
-            y2 = ceil(pos(2) + pos(4));
-            idx = col >= x1 & col <= x2 & row >= y1 & row <= y2;
+            [xMin, xMax, yMin, yMax, hasArea] = roiRectangleBounds(pos);
+            if hasArea
+                idx = xDisp >= xMin & xDisp <= xMax & yDisp >= yMin & yDisp <= yMax;
+            else
+                [xPt, yPt, ok] = roiDisplayAnchorPoint(roi);
+                if ok
+                    idx = (xDisp == xPt) & (yDisp == yPt);
+                end
+            end
             return;
         end
     end
@@ -6828,6 +7258,7 @@ function [maskSub, x1, x2, y1, y2] = roiPixelMaskSub(roi, nRows, nCols)
         a = roi.SemiAxes(1);
         b = roi.SemiAxes(2);
         if a <= 0 || b <= 0
+            [maskSub, x1, x2, y1, y2] = roiSinglePixelMaskSub(roi, nRows, nCols);
             return;
         end
         theta = 0;
@@ -6844,6 +7275,9 @@ function [maskSub, x1, x2, y1, y2] = roiPixelMaskSub(roi, nRows, nCols)
         xr =  cos(theta) * x + sin(theta) * y;
         yr = -sin(theta) * x + cos(theta) * y;
         maskSub = (xr ./ a).^2 + (yr ./ b).^2 <= 1;
+        if ~any(maskSub(:))
+            [maskSub, x1, x2, y1, y2] = roiSinglePixelMaskSub(roi, nRows, nCols);
+        end
         return;
     end
 
@@ -6854,17 +7288,99 @@ function [maskSub, x1, x2, y1, y2] = roiPixelMaskSub(roi, nRows, nCols)
             x2 = min(nCols, ceil(max(pos(:,1))));
             y1 = max(1, floor(min(pos(:,2))));
             y2 = min(nRows, ceil(max(pos(:,2))));
+            if x2 < x1 || y2 < y1
+                [maskSub, x1, x2, y1, y2] = roiSinglePixelMaskSub(roi, nRows, nCols);
+                return;
+            end
             [yg, xg] = ndgrid(y1:y2, x1:x2);
             maskSub = inpolygon(xg, yg, pos(:,1), pos(:,2));
+            if ~any(maskSub(:))
+                [maskSub, x1, x2, y1, y2] = roiSinglePixelMaskSub(roi, nRows, nCols);
+            end
             return;
         end
         if numel(pos) >= 4
-            x1 = max(1, floor(pos(1)));
-            y1 = max(1, floor(pos(2)));
-            x2 = min(nCols, ceil(pos(1) + pos(3)));
-            y2 = min(nRows, ceil(pos(2) + pos(4)));
-            maskSub = true(y2-y1+1, x2-x1+1);
+            [xMin, xMax, yMin, yMax, hasArea] = roiRectangleBounds(pos);
+            if ~hasArea
+                [maskSub, x1, x2, y1, y2] = roiSinglePixelMaskSub(roi, nRows, nCols);
+                return;
+            end
+            x1 = max(1, floor(xMin));
+            y1 = max(1, floor(yMin));
+            x2 = min(nCols, ceil(xMax));
+            y2 = min(nRows, ceil(yMax));
+            if x2 < x1 || y2 < y1
+                [maskSub, x1, x2, y1, y2] = roiSinglePixelMaskSub(roi, nRows, nCols);
+                return;
+            end
+            [yg, xg] = ndgrid(y1:y2, x1:x2);
+            maskSub = (xg >= xMin) & (xg <= xMax) & (yg >= yMin) & (yg <= yMax);
+            if ~any(maskSub(:))
+                [maskSub, x1, x2, y1, y2] = roiSinglePixelMaskSub(roi, nRows, nCols);
+            end
             return;
         end
     end
+end
+
+function [maskSub, x1, x2, y1, y2] = roiSinglePixelMaskSub(roi, nRows, nCols)
+    maskSub = [];
+    x1 = 1; x2 = nCols; y1 = 1; y2 = nRows;
+    [xPt, yPt, ok] = roiDisplayAnchorPoint(roi);
+    if ~ok
+        return;
+    end
+    x1 = min(nCols, max(1, xPt));
+    x2 = x1;
+    y1 = min(nRows, max(1, yPt));
+    y2 = y1;
+    maskSub = true(1, 1);
+end
+
+function [xPt, yPt, ok] = roiDisplayAnchorPoint(roi)
+    xPt = NaN;
+    yPt = NaN;
+    ok = false;
+    if isempty(roi) || ~isvalid(roi)
+        return;
+    end
+
+    if isprop(roi, 'Center') && isprop(roi, 'SemiAxes')
+        c = double(roi.Center);
+        if numel(c) >= 2 && all(isfinite(c(1:2)))
+            xPt = round(c(1));
+            yPt = round(c(2));
+            ok = true;
+            return;
+        end
+    end
+
+    if isprop(roi, 'Position')
+        pos = double(roi.Position);
+        if size(pos,2) == 2 && ~isempty(pos)
+            xPt = round(mean(pos(:,1), 'omitnan'));
+            yPt = round(mean(pos(:,2), 'omitnan'));
+            ok = isfinite(xPt) && isfinite(yPt);
+            return;
+        end
+        if numel(pos) >= 4
+            xPt = round(pos(1) + pos(3) / 2);
+            yPt = round(pos(2) + pos(4) / 2);
+            ok = isfinite(xPt) && isfinite(yPt);
+            return;
+        end
+    end
+end
+
+function [xMin, xMax, yMin, yMax, hasArea] = roiRectangleBounds(pos)
+    x0 = double(pos(1));
+    y0 = double(pos(2));
+    x1 = double(pos(1) + pos(3));
+    y1 = double(pos(2) + pos(4));
+    xMin = min(x0, x1);
+    xMax = max(x0, x1);
+    yMin = min(y0, y1);
+    yMax = max(y0, y1);
+    hasArea = isfinite(xMin) && isfinite(xMax) && isfinite(yMin) && isfinite(yMax) && ...
+        (xMax > xMin) && (yMax > yMin);
 end

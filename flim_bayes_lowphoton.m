@@ -26,7 +26,6 @@ function out = flim_bayes_lowphoton(tcspc_pix, irf, pulsePeriodNs, dtNs, tau0, o
 %       .fractionGrid       : species-1 fraction grid, default linspace(0,1,41)
 %       .singleExpTauGrid   : explicit tau grid for 1-state mode
 %       .shiftBounds        : integer IRF shift search bounds in bins, default [-5 5]
-%
 % OUTPUT
 %   out struct with posterior mean lifetime map and diagnostics.
 
@@ -57,7 +56,6 @@ function out = flim_bayes_lowphoton(tcspc_pix, irf, pulsePeriodNs, dtNs, tau0, o
     if ~isfield(opts, 'shiftBounds') || isempty(opts.shiftBounds)
         opts.shiftBounds = [-5 5];
     end
-
     Ypix = single(tcspc_pix);
     if ndims(Ypix) == 4
         Ypix = sum(Ypix, 4);
@@ -89,7 +87,6 @@ function out = flim_bayes_lowphoton(tcspc_pix, irf, pulsePeriodNs, dtNs, tau0, o
     else
         tau0Use = tau0Requested;
     end
-
     globalDecay = squeeze(sum(sum(Ypix, 1), 2));
     globalDecay = double(globalDecay(:));
 
@@ -256,7 +253,8 @@ function seedMat = build_tau_seed_matrix(tau0)
     scales = [1.0, 0.75, 1.35];
     seedMat = zeros(numel(tau0), numel(scales));
     for idx = 1:numel(scales)
-        seedMat(:, idx) = max(tau0 * scales(idx), 0.03);
+        seed = max(tau0 * scales(idx), 0.03);
+        seedMat(:, idx) = seed;
     end
 end
 
