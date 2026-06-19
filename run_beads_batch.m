@@ -23,7 +23,7 @@ for k = 3:numel(filenames)
         %% Pixel reassignment
         params = struct();
         params.imageSource = 'tags';      % use outPTU.tags(:,:,channel)
-        params.smoothSigma = 1;
+        params.smoothSigma = 0;
         params.useWindow = true;
         params.normalizeImages = true;
         params.upsampleReg = 20;
@@ -38,6 +38,13 @@ for k = 3:numel(filenames)
         params.NA = 1.45;
 
         params.showPlots = true;
+        params.subtractDarkCounts = true;
+        params.darkCountFile = 'D:\Luminosa\Data\ISMdark_counts.ptu';
+        params.detectorAverageIntensityPlotFile = [name(1:end-4),'_detector_dark_subtraction_hex.png'];
+        params.printDetectorShifts = true;
+        params.detectorReportLabel = name;
+        params.detectorTableFile = [name(1:end-4),'_detector_map.csv'];
+        params.detectorShiftVectorPlotFile = [name(1:end-4),'_detector_shift_vectors.png'];
 
         try
             results = run_ism_reconstruction_from_ptu(outNew, params);
@@ -48,8 +55,8 @@ for k = 3:numel(filenames)
             save_tiff( [name(1:end-4),'_APR_image.tiff'],uint16(results.aprImage/max(results.aprImage(:))*2^16-1),'uint',16,1)
             save_tiff( [name(1:end-4),'_ACO_image.tiff'],uint16(results.acoImage/max(results.acoImage(:))*2^16-1),'uint',16,1)
             save_tiff( [name(1:end-4),'_Deconv_image.tiff'],uint16(results.deconvolvedImage/max(results.deconvolvedImage(:))*2^16-1),'uint',16,1)
-        catch
-            print('Did not process') 
+        catch ME
+            fprintf('Did not process %s: %s\n', name, ME.message);
         end
     end
 

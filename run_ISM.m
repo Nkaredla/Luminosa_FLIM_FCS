@@ -32,16 +32,22 @@ params.NA = 1.45;
 
 params.showChannelLabels = true;
 params.channelLabelMode = 'channel';     % 'channel', 'index', or 'both'
-params.channelLabelFontSize = 9;
+params.channelLabelFontSize = 6;
 params.channelLabelColor = [0 0 0];
 params.channelLabelWeight = 'bold';
 
 params.storeImageStack = false;
 params.showPlots = true;
 params.showChannelLabels = true;
+params.subtractDarkCounts = true;
+params.darkCountFile = 'D:\Luminosa\Data\ISMdark_counts.ptu';
+params.detectorAverageIntensityPlotFile = [name(1:end-4) '_detector_dark_subtraction_hex.png'];
+params.printDetectorShifts = true;
+params.detectorReportLabel = name;
+params.detectorTableFile = [name(1:end-4) '_detector_map.csv'];
+params.detectorShiftVectorPlotFile = [name(1:end-4) '_detector_shift_vectors.png'];
 
 results = run_ism_reconstruction_from_ptu(outNew, params);
-writetable(results.detectorTable, [name(1:end-4) '_detector_map.csv']);
 save([name(1:end-4) '_detector_map.mat'], 'results');
 
 

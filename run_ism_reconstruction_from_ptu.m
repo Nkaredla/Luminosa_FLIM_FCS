@@ -47,6 +47,17 @@ function results = run_ism_reconstruction_from_ptu(ptuOut, params)
 % .NA                   : objective NA
 %
 % .showPlots            : true/false                (default true)
+% .subtractDarkCounts   : true/false subtract dark offsets before APR/ACO
+% .darkCountFile        : dark-count PTU used when subtractDarkCounts=true
+% .darkCountScale       : scalar multiplier for dark offsets
+% .darkCountStatistic   : 'mean' or 'median' for per-channel offsets
+% .darkCountClipNegative: true/false clip corrected counts to zero
+% .printDetectorShifts  : true/false print detector center and shifts
+% .detectorReportLabel  : label printed with detector shift report
+% .detectorTableFile    : optional CSV path for detector table
+% .detectorShiftVectorPlotFile : optional PNG path for shift-vector plot
+% .detectorAverageIntensityPlotFile : optional PNG path for before/after
+%                                      dark-subtraction detector hex maps
 %
 % OUTPUT
 % ------
@@ -65,8 +76,11 @@ function results = run_ism_reconstruction_from_ptu(ptuOut, params)
 % .acoImage
 % .convHistory
 % .otfWF
-% .otfISMexp
+% .otfISMexp              backward-compatible alias for .otfISMmodel
+% .otfISMmodel            model ISM OTF D(q/2)^2, not fitted from scan data
 % .otfISMideal
+%
+% (c) Narain Karedla, 2026
 
 if nargin < 2 || isempty(params)
     params = struct();
@@ -102,11 +116,24 @@ params = setDefault(params, 'deconvLambda', 1e-3);
 params = setDefault(params, 'deconvClipNegative', true);
 params = setDefault(params, 'deconvPreserveFlux', true);
 
+params = setDefault(params, 'subtractDarkCounts', false);
+params = setDefault(params, 'darkCountFile', 'D:\Luminosa\Data\ISMdark_counts.ptu');
+params = setDefault(params, 'darkCountScale', 1);
+params = setDefault(params, 'darkCountStatistic', 'mean');
+params = setDefault(params, 'darkCountClipNegative', true);
+params = setDefault(params, 'darkCountPhotonsPerChunk', 1e6);
+
 params = setDefault(params, 'showChannelLabels', true);
 params = setDefault(params, 'channelLabelMode', 'channel');  % 'channel', 'index', or 'both'
-params = setDefault(params, 'channelLabelFontSize', 10);
+params = setDefault(params, 'channelLabelFontSize', 6);
 params = setDefault(params, 'channelLabelColor', [0 0 0]);
 params = setDefault(params, 'channelLabelWeight', 'bold');
+
+params = setDefault(params, 'printDetectorShifts', false);
+params = setDefault(params, 'detectorReportLabel', '');
+params = setDefault(params, 'detectorTableFile', '');
+params = setDefault(params, 'detectorShiftVectorPlotFile', '');
+params = setDefault(params, 'detectorAverageIntensityPlotFile', '');
 
 
     function s = setDefault(s, fieldName, defaultValue)
@@ -115,17 +142,31 @@ params = setDefault(params, 'channelLabelWeight', 'bold');
         end
     end
 
+%%
 % ------------------------------------------------------------
 % 1) Extract detector image stack from PTU output
 % ------------------------------------------------------------
 [imgStack, channelIDs] = extract_img_stack_from_ptu(ptuOut, params);
 [H, W, Nd] = size(imgStack);
+imgStackBeforeDark = imgStack;
+avgDetectorIntensityBeforeDark = detector_average_intensity(imgStackBeforeDark);
 
+% ------------------------------------------------------------
+% 1b) Optional dark-count subtraction
+%     Registration still uses imgStackBeforeDark so shift estimates stay
+%     tied to the measured images; APR/ACO/deconvolution use imgStack.
+% ------------------------------------------------------------
+[imgStack, darkCorrection] = apply_dark_count_correction(imgStack, channelIDs, params);
+avgDetectorIntensityAfterDark = detector_average_intensity(imgStack);
+
+%%
 % ------------------------------------------------------------
 % 2) Raw detector sum
 % ------------------------------------------------------------
+rawSumBeforeDark = sum(imgStackBeforeDark, 3);
 rawSum = sum(imgStack, 3);
 
+%%
 % ------------------------------------------------------------
 % 3) First-pass registration against a temporary reference
 %    Used only to recover detector geometry and identify center detector
@@ -133,11 +174,11 @@ rawSum = sum(imgStack, 3);
 procStack = zeros(H, W, Nd);
 for k = 1:Nd
     procStack(:,:,k) = preprocessForRegistration( ...
-        imgStack(:,:,k), params.smoothSigma, params.useWindow, params.normalizeImages);
+        imgStackBeforeDark(:,:,k), params.smoothSigma, params.useWindow, params.normalizeImages);
 end
 
 if isnan(params.tempReferenceIndex)
-    tempRefIdx = chooseBrightestDetector(imgStack);
+    tempRefIdx = chooseBrightestDetector(imgStackBeforeDark);
 else
     tempRefIdx = params.tempReferenceIndex;
 end
@@ -162,6 +203,7 @@ else
     centerIdx = params.centerDetectorIndex;
 end
 
+%%
 % ------------------------------------------------------------
 % 4) Final APR shifts: register all channels to the center detector
 % ------------------------------------------------------------
@@ -172,6 +214,7 @@ for k = 1:Nd
 end
 shiftsToCenter(centerIdx,:) = [0 0];
 
+%%
 % ------------------------------------------------------------
 % 5) APR image (same size as raw)
 %    This follows i_ISM(xs) = sum_d i(xs + mu(xd) | xd)
@@ -184,6 +227,7 @@ for k = 1:Nd
 end
 aprImage = max(aprImage, 0);
 
+%%
 % ------------------------------------------------------------
 % 6) Average autocorrelation of RAW detector images
 %    ACO-ISM uses autocorrelation of each raw detector image,
@@ -201,32 +245,34 @@ acoAverage = acoAverage / Nd;
 % mask/replace zero-shift spike
 acoAverageMasked = mask_zero_shift_pixel(acoAverage);
 
+%%
 % ------------------------------------------------------------
 % 7) Schultz-Snyder inversion initialized from APR
 % ------------------------------------------------------------
 [acoImage, convHistory] = schultz_snyder_from_apr( ...
     acoAverageMasked, aprImage, params);
 
+%%
 % ------------------------------------------------------------
 % 8) OTF diagnostics only (not used by ACO reconstruction)
 %    Based on PNAS focal-plane approximation:
-%    Uexp ~ D(q/2)^2, Uideal ~ D(q/2)
+%    Umodel ~ D(q/2)^2, Uideal ~ D(q/2)
 % ------------------------------------------------------------
 otfWF = theoreticalIncoherentOTF(H, W, params.pixelSize, params.lambda, params.NA);
 otfISMideal = rescaleOTFSupport(otfWF, 0.5);
-otfISMexp = otfISMideal .^ 2;
+otfISMmodel = otfISMideal .^ 2;
 
 otfWF = normalizeOTFdc(otfWF);
 otfISMideal = normalizeOTFdc(otfISMideal);
-otfISMexp = normalizeOTFdc(otfISMexp);
+otfISMmodel = normalizeOTFdc(otfISMmodel);
 
 % ------------------------------------------------------------
-% 8b) Enderlein-style OTF rectification / deconvolution
+% 8b) OTF rectification / deconvolution (Enderlein approach)
 %     IMPORTANT: these OTFs correspond to APR / ISM, not ACO.
 % ------------------------------------------------------------
 if params.doISMDeconv
     [deconvolvedImage, deconvFilter] = deconvolveToIdealOTF( ...
-        aprImage, otfISMexp, otfISMideal, ...
+        aprImage, otfISMmodel, otfISMideal, ...
         params.deconvLambda, ...
         params.deconvClipNegative, ...
         params.deconvPreserveFlux);
@@ -235,6 +281,7 @@ else
     deconvFilter = [];
 end
 
+%%
 % ------------------------------------------------------------
 % 9) Collect outputs
 % ------------------------------------------------------------
@@ -245,7 +292,10 @@ results.tempReferenceIndex = tempRefIdx;
 results.centerDetectorIndex = centerIdx;
 results.shiftsToTempRef = shiftsToTempRef;
 results.detectorPositions = detectorPositions;
+results.detectorCentroid = centroid;
+results.centerDetectorPosition = detectorPositions(centerIdx,:);
 results.shiftsToCenter = shiftsToCenter;
+results.rawSumBeforeDark = rawSumBeforeDark;
 results.rawSum = rawSum;
 results.aprImage = aprImage;
 results.acoAverage = acoAverage;
@@ -253,29 +303,484 @@ results.acoAverageMasked = acoAverageMasked;
 results.acoImage = acoImage;
 results.convHistory = convHistory;
 results.otfWF = otfWF;
-results.otfISMexp = otfISMexp;
+results.otfISMexp = otfISMmodel;
+results.otfISMmodel = otfISMmodel;
 results.otfISMideal = otfISMideal;
 results.paramsUsed = params;
 results.deconvolvedImage = deconvolvedImage;
 results.deconvFilter = deconvFilter;
+results.darkCorrection = darkCorrection;
+results.detectorAverageIntensityBeforeDark = avgDetectorIntensityBeforeDark;
+results.detectorAverageIntensityAfterDark = avgDetectorIntensityAfterDark;
 
 % Detector/channel lookup table
 results.detectorIndex = (1:numel(results.channelIDs)).';
 results.centerChannelID = results.channelIDs(results.centerDetectorIndex);
+isCenterDetector = false(numel(results.channelIDs), 1);
+isCenterDetector(results.centerDetectorIndex) = true;
 
 results.detectorTable = table( ...
     results.detectorIndex, ...
     results.channelIDs(:), ...
+    isCenterDetector, ...
     results.detectorPositions(:,1), ...
     results.detectorPositions(:,2), ...
     results.shiftsToCenter(:,1), ...
     results.shiftsToCenter(:,2), ...
-    'VariableNames', {'DetectorIndex','ChannelID','PosDY','PosDX','ShiftToCenterDY','ShiftToCenterDX'});
+    'VariableNames', {'DetectorIndex','ChannelID','IsCenter','PosDY','PosDX','ShiftToCenterDY','ShiftToCenterDX'});
 
+if params.printDetectorShifts
+    print_detector_shift_summary(results, params.detectorReportLabel);
+end
+
+detectorTableFile = char_if_string(params.detectorTableFile);
+if ~isempty(detectorTableFile)
+    writetable(results.detectorTable, detectorTableFile);
+end
+
+detectorShiftVectorPlotFile = char_if_string(params.detectorShiftVectorPlotFile);
+if ~isempty(detectorShiftVectorPlotFile)
+    save_detector_shift_vectors(results, detectorShiftVectorPlotFile);
+end
+
+detectorAverageIntensityPlotFile = char_if_string(params.detectorAverageIntensityPlotFile);
+if ~isempty(detectorAverageIntensityPlotFile)
+    save_detector_average_intensity_hex_maps(results, detectorAverageIntensityPlotFile, params.detectorReportLabel);
+end
 
 if params.showPlots
     show_aco_ism_results(results, params);
 end
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% All helper functions
+% =========================================================================
+% Dark-count correction and detector intensity maps
+% =========================================================================
+function [correctedStack, correction] = apply_dark_count_correction(imgStack, channelIDs, params)
+correctedStack = double(imgStack);
+
+correction = struct();
+correction.enabled = logical(params.subtractDarkCounts);
+correction.method = 'none';
+correction.darkFile = '';
+correction.darkScale = params.darkCountScale;
+correction.darkStatistic = char_if_string(params.darkCountStatistic);
+correction.channelIDs = channelIDs(:);
+correction.perChannelOffset = zeros(numel(channelIDs), 1);
+correction.averageIntensityBefore = detector_average_intensity(imgStack);
+correction.averageIntensityAfter = correction.averageIntensityBefore;
+
+if ~correction.enabled
+    return;
+end
+
+darkFile = char_if_string(params.darkCountFile);
+if isempty(darkFile)
+    error('run_ism_reconstruction_from_ptu:MissingDarkFile', ...
+        'params.darkCountFile must be set when subtractDarkCounts is true.');
+end
+if exist(darkFile, 'file') ~= 2
+    error('run_ism_reconstruction_from_ptu:MissingDarkFile', ...
+        'Dark-count PTU was not found: %s', darkFile);
+end
+
+[darkVector, darkMethod] = read_dark_count_vector(darkFile, params, size(imgStack), channelIDs);
+
+correction.method = darkMethod;
+correction.darkFile = darkFile;
+correction.perChannelOffset = darkVector(:);
+
+correctedStack = correctedStack - params.darkCountScale * reshape(darkVector, 1, 1, []);
+if params.darkCountClipNegative
+    correctedStack = max(correctedStack, 0);
+end
+correction.averageIntensityAfter = detector_average_intensity(correctedStack);
+end
+
+function [darkVector, darkMethod] = read_dark_count_vector(darkFile, params, rawSize, channelIDs)
+try
+    [darkStack, darkChannelIDs] = read_dark_count_stack(darkFile, params);
+    darkStack = align_channel_stack(darkStack, darkChannelIDs, channelIDs);
+    darkVector = estimate_dark_count_vector(darkStack, params.darkCountStatistic);
+    darkMethod = sprintf('dark PTU image per-channel %s', char_if_string(params.darkCountStatistic));
+catch
+    [darkVector, nPhotons] = read_dark_count_vector_from_tttr(darkFile, params, rawSize, channelIDs);
+    darkMethod = sprintf('dark PTU photon-count vector (%d photons; scan-reader fallback)', nPhotons);
+end
+end
+
+function [darkStack, darkChannelIDs] = read_dark_count_stack(darkFile, params)
+darkOut = PTU_MultiFrameScanReadFast(darkFile, params.darkCountPhotonsPerChunk, false, false);
+
+darkParams = params;
+darkParams.dropEmptyChannels = false;
+[darkStack, darkChannelIDs] = extract_img_stack_from_ptu(darkOut, darkParams);
+end
+
+function [darkVector, nPhotons] = read_dark_count_vector_from_tttr(darkFile, params, rawSize, channelIDs)
+head = PTU_Read_Head(darkFile);
+if isempty(head) || ~isfield(head, 'TTResult_NumberOfRecords')
+    error('run_ism_reconstruction_from_ptu:BadDarkPtu', ...
+        'Dark-count PTU has no TTResult_NumberOfRecords field: %s', darkFile);
+end
+
+targetIDs = double(channelIDs(:));
+nBins = max([64; targetIDs + 1]);
+channelCounts = zeros(nBins, 1);
+nRecords = double(head.TTResult_NumberOfRecords);
+chunkSize = max(1, double(params.darkCountPhotonsPerChunk));
+cnt = 0;
+nPhotons = 0;
+
+while cnt < nRecords
+    nRead = min(chunkSize, nRecords - cnt);
+    [~, ~, chan, special, num] = PTU_Read(darkFile, [cnt + 1, nRead], head);
+    cnt = cnt + double(num);
+    if num <= 0
+        break;
+    end
+
+    isPhoton = special == 0;
+    chan = double(chan(isPhoton));
+    chan = chan(isfinite(chan) & chan >= 0 & chan < nBins);
+    nPhotons = nPhotons + numel(chan);
+    if ~isempty(chan)
+        channelCounts = channelCounts + accumarray(chan(:) + 1, 1, [nBins, 1]);
+    end
+end
+
+if any(targetIDs < 0 | targetIDs + 1 > nBins)
+    error('run_ism_reconstruction_from_ptu:DarkChannelMismatch', ...
+        'Dark-count channel vector cannot cover detector channel(s): %s', num2str(targetIDs(:).'));
+end
+
+nScanPixels = max(1, prod(double(rawSize(1:2))));
+darkVector = channelCounts(targetIDs + 1) ./ nScanPixels;
+end
+
+function aligned = align_channel_stack(stack, sourceIDs, targetIDs)
+sourceIDs = double(sourceIDs(:));
+targetIDs = double(targetIDs(:));
+
+if isempty(sourceIDs) || isempty(targetIDs) || isequal(sourceIDs, targetIDs)
+    aligned = stack;
+    return;
+end
+
+[present, loc] = ismember(targetIDs, sourceIDs);
+if ~all(present)
+    missing = targetIDs(~present);
+    error('run_ism_reconstruction_from_ptu:DarkChannelMismatch', ...
+        'Dark-count PTU is missing detector channel(s): %s', num2str(missing(:).'));
+end
+aligned = stack(:,:,loc);
+end
+
+function darkVector = estimate_dark_count_vector(darkStack, statisticName)
+statisticName = lower(char_if_string(statisticName));
+nCh = size(darkStack, 3);
+darkVector = zeros(nCh, 1);
+
+for k = 1:nCh
+    vals = double(darkStack(:,:,k));
+    vals = vals(isfinite(vals));
+    if isempty(vals)
+        darkVector(k) = 0;
+        continue;
+    end
+
+    switch statisticName
+        case 'mean'
+            darkVector(k) = mean(vals);
+        case 'median'
+            darkVector(k) = median(vals);
+        otherwise
+            error('run_ism_reconstruction_from_ptu:BadDarkStatistic', ...
+                'darkCountStatistic must be ''mean'' or ''median''.');
+    end
+end
+end
+
+function avg = detector_average_intensity(stack)
+nCh = size(stack, 3);
+avg = zeros(nCh, 1);
+for k = 1:nCh
+    vals = double(stack(:,:,k));
+    vals = vals(isfinite(vals));
+    if isempty(vals)
+        avg(k) = 0;
+    else
+        avg(k) = mean(vals);
+    end
+end
+end
+
+function save_detector_average_intensity_hex_maps(results, outName, label)
+label = char_if_string(label);
+if isempty(label)
+    label = 'PTU input';
+end
+
+beforeValues = results.detectorAverageIntensityBeforeDark(:);
+afterValues = results.detectorAverageIntensityAfterDark(:);
+allValues = [beforeValues; afterValues];
+finiteValues = allValues(isfinite(allValues));
+if isempty(finiteValues)
+    clim = [0 1];
+else
+    clim = [min(finiteValues), max(finiteValues)];
+    if clim(1) == clim(2)
+        clim = clim + [-0.5 0.5] * max(abs(clim(1)), 1);
+    end
+end
+
+fig = figure('Visible', 'off', 'Color', 'w', 'Name', 'Detector dark-count subtraction', ...
+    'Position', [100 100 980 450]);
+tl = tiledlayout(fig, 1, 2, 'Padding', 'compact', 'TileSpacing', 'compact');
+
+ax1 = nexttile(tl, 1);
+plot_detector_hex_values(ax1, results.channelIDs, beforeValues, clim);
+title(ax1, 'Before dark subtraction');
+cb1 = colorbar(ax1);
+cb1.Label.String = 'mean counts / image pixel';
+
+ax2 = nexttile(tl, 2);
+plot_detector_hex_values(ax2, results.channelIDs, afterValues, clim);
+title(ax2, 'After dark subtraction');
+cb2 = colorbar(ax2);
+cb2.Label.String = 'mean counts / image pixel';
+
+dc = results.darkCorrection;
+if dc.enabled
+    title(tl, {sprintf('Detector average intensity: %s', label), ...
+        sprintf('Dark offset: %s, scale %.4g', dc.method, dc.darkScale)}, ...
+        'Interpreter', 'none');
+else
+    title(tl, sprintf('Detector average intensity: %s', label), 'Interpreter', 'none');
+end
+
+print(fig, outName, '-dpng', '-r300');
+close(fig);
+end
+
+function plot_detector_hex_values(ax, channelIDs, values, clim)
+values = double(values(:));
+[detXY, useHex] = local_detector_layout(numel(values));
+
+cla(ax);
+hold(ax, 'on');
+
+if useHex
+    pitch = estimate_nearest_detector_pitch(detXY);
+    cellRadius = 1.01 * pitch / sqrt(3);
+    theta = (0:5) * pi/3 + pi/6;
+    hx = cellRadius * cos(theta);
+    hy = cellRadius * sin(theta);
+
+    for k = 1:numel(values)
+        patch(ax, detXY(k,1) + hx, detXY(k,2) + hy, values(k), ...
+            'FaceColor', 'flat', ...
+            'EdgeColor', [0.55 0.55 0.55], ...
+            'LineWidth', 0.7);
+    end
+else
+    scatter(ax, detXY(:,1), detXY(:,2), 500, values, 'filled', ...
+        'MarkerEdgeColor', [0.55 0.55 0.55]);
+end
+
+for k = 1:numel(values)
+    text(ax, detXY(k,1), detXY(k,2), sprintf('%g', channelIDs(k)), ...
+        'HorizontalAlignment', 'center', ...
+        'VerticalAlignment', 'middle', ...
+        'FontSize', 8, ...
+        'FontWeight', 'bold', ...
+        'Color', [0 0 0]);
+end
+
+axis(ax, 'equal');
+axis(ax, 'off');
+set(ax, 'YDir', 'normal');
+colormap(ax, 'parula');
+caxis(ax, clim);
+
+pad = 0.75;
+xlim(ax, [min(detXY(:,1))-pad, max(detXY(:,1))+pad]);
+ylim(ax, [min(detXY(:,2))-pad, max(detXY(:,2))+pad]);
+hold(ax, 'off');
+end
+
+function [detXY, useHex] = local_detector_layout(nDet)
+if nDet == 23
+    rowCounts = [5 4 5 4 5];
+    detPitch = 1;
+    yPitch = sqrt(3)/2 * detPitch;
+    yGrid = ((numel(rowCounts)-1)/2:-1:-(numel(rowCounts)-1)/2) * yPitch;
+
+    detXY = zeros(sum(rowCounts), 2);
+    k = 0;
+    for r = 1:numel(rowCounts)
+        nThisRow = rowCounts(r);
+        if mod(nThisRow, 2) == 1
+            xRow = (-(nThisRow-1)/2:(nThisRow-1)/2) * detPitch;
+        else
+            xRow = ((-nThisRow/2):(nThisRow/2-1)) * detPitch + detPitch/2;
+        end
+        for c = 1:nThisRow
+            k = k + 1;
+            detXY(k,:) = [xRow(c), yGrid(r)];
+        end
+    end
+    useHex = true;
+else
+    theta = linspace(0, 2*pi, nDet + 1).';
+    theta(end) = [];
+    detXY = [cos(theta), sin(theta)];
+    useHex = false;
+end
+end
+
+function pitch = estimate_nearest_detector_pitch(detXY)
+n = size(detXY, 1);
+if n < 2
+    pitch = 1;
+    return;
+end
+
+nearest = nan(n, 1);
+for k = 1:n
+    dx = detXY(:,1) - detXY(k,1);
+    dy = detXY(:,2) - detXY(k,2);
+    d = sqrt(dx.^2 + dy.^2);
+    d = d(d > eps(max(d)));
+    if ~isempty(d)
+        nearest(k) = min(d);
+    end
+end
+
+nearest = nearest(isfinite(nearest) & nearest > 0);
+if isempty(nearest)
+    pitch = 1;
+else
+    pitch = median(nearest);
+end
+end
+
+
+% =========================================================================
+% Detector shift reporting
+% =========================================================================
+function txt = char_if_string(txt)
+if isstring(txt)
+    txt = char(txt);
+end
+end
+
+function print_detector_shift_summary(res, label)
+if nargin < 2 || isempty(label)
+    label = 'PTU input';
+end
+label = char_if_string(label);
+if isempty(label)
+    label = 'PTU input';
+end
+
+centerIdx = res.centerDetectorIndex;
+centerPos = res.centerDetectorPosition;
+centroid = res.detectorCentroid;
+
+fprintf('\nISM detector shift report: %s\n', label);
+fprintf('  Center detector: index %d, channel %g\n', centerIdx, res.centerChannelID);
+fprintf('  Center detector position [dy dx]: [%.3f %.3f] px\n', centerPos(1), centerPos(2));
+fprintf('  Shift-cloud centroid [dy dx]: [%.3f %.3f] px\n', centroid(1), centroid(2));
+fprintf('  Shift vectors to center are [dy dx] pixels:\n');
+disp(res.detectorTable);
+end
+
+function save_detector_shift_vectors(results, outName)
+% Save a detector shift-vector map for one processed detector stack.
+
+detPos = results.detectorPositions;
+shiftToCenter = results.shiftsToCenter;
+centerIdx = results.centerDetectorIndex;
+
+xpos = detPos(:,2);
+ypos = -detPos(:,1);
+% shiftsToCenter is the image shift applied during APR, stored as [dy dx].
+% Convert to display coordinates [x y] so the arrows show the applied shift.
+u =  shiftToCenter(:,2);
+v = -shiftToCenter(:,1);
+arrowScale = 1;
+uPlot = arrowScale * u;
+vPlot = arrowScale * v;
+
+centerX = xpos(centerIdx);
+centerY = ypos(centerIdx);
+centerChannel = results.channelIDs(centerIdx);
+cloudCenterX = mean(xpos);
+cloudCenterY = mean(ypos);
+
+%%%%%
+fig = figure('Visible', 'on', 'Color', 'w', 'Name', 'Detector shift vectors', ...
+    'Position', [100 100 1100 700]);
+ax = axes(fig);
+hold(ax, 'on');
+
+quiver(ax, xpos, ypos, -uPlot/2, -vPlot/2, 0, ...
+    'Color', [0.1 0.35 0.85], ...
+    'LineWidth', 0.9, ...
+    'MaxHeadSize', 0.35);
+plot(ax, xpos, ypos, 'ko', 'MarkerFaceColor', [0.85 0.85 0.85], 'MarkerSize', 6);
+plot(ax, centerX, centerY, 'rp', 'MarkerSize', 14, 'LineWidth', 2, 'MarkerFaceColor', 'r');
+plot(ax, cloudCenterX, cloudCenterY, 'mx', 'MarkerSize', 12, 'LineWidth', 2);
+
+labelOffsetX = 0.015 * max(max(xpos) - min(xpos), 1);
+labelOffsetY = 0.015 * max(max(ypos) - min(ypos), 1);
+for kk = 1:numel(xpos)
+    label = sprintf('%g', results.channelIDs(kk));
+    text(ax, xpos(kk) + labelOffsetX, ypos(kk) + labelOffsetY, label, ...
+        'FontSize', 8, ...
+        'Color', [0 0 0], ...
+        'HorizontalAlignment', 'left', ...
+        'VerticalAlignment', 'bottom');
+end
+
+axis(ax, 'equal');
+grid(ax, 'on');
+% --- Make limits include detector points, quiver arrow ends, and labels ---
+xArrowEnd = xpos - uPlot/2;
+yArrowEnd = ypos - vPlot/2;
+
+xAll = [xpos(:); xArrowEnd(:); centerX; cloudCenterX];
+yAll = [ypos(:); yArrowEnd(:); centerY; cloudCenterY];
+
+xRange = max(xAll) - min(xAll);
+yRange = max(yAll) - min(yAll);
+
+if xRange == 0, xRange = 1; end
+if yRange == 0, yRange = 1; end
+
+% Extra padding because text labels sit to the upper-right of each detector
+xPad = 0.18 * xRange;
+yPad = 0.18 * yRange;
+
+xlim(ax, [min(xAll) - xPad, max(xAll) + xPad]);
+ylim(ax, [min(yAll) - yPad, max(yAll) + yPad]);
+
+xlabel(ax, '\Delta x [px]');
+ylabel(ax, '\Delta y [px]');
+
+title(ax, {sprintf('Direction to APR in shift-cloud coordinates; center ch %d at (%.2f, %.2f) px', ...
+    centerChannel, centerX, centerY), ...
+    sprintf('Applied APR image shift direction; arrows shown at %.2fx length', arrowScale)});
+legend(ax, {'Applied APR image shift', 'Detector position', 'Selected center detector', ...
+    'Shift-cloud centroid'}, ...
+    'Location', 'eastoutside');
+box on
+
+print(fig, outName, '-dpng', '-r300');
+close(fig);
 end
 
 
@@ -537,8 +1042,8 @@ for it = 1:nIter
         xxNow = autocorr2_fft(x);
         relRMSE = sqrt(mean((xxNow(:) - Iaco(:)).^2)) / max(sqrt(mean(Iaco(:).^2)), eps);
 
-        history.iter(end+1,1) = it; %#ok<AGROW>
-        history.relRMSE(end+1,1) = relRMSE; %#ok<AGROW>
+        history.iter(end+1,1) = it;
+        history.relRMSE(end+1,1) = relRMSE;
 
         if it >= minIter && relRMSE < stopTol
             break;
@@ -559,9 +1064,13 @@ Ishift = real(ifft2(fft2(I) .* ramp));
 end
 
 function [KY, KX] = frequencyGrid(H, W)
-fy = ifftshift((-floor(H/2):ceil(H/2)-1) / H);
-fx = ifftshift((-floor(W/2):ceil(W/2)-1) / W);
+fy = ifftshift(shifted_frequency_axis(H));
+fx = ifftshift(shifted_frequency_axis(W));
 [KX, KY] = meshgrid(fx, fy);
+end
+
+function f = shifted_frequency_axis(n)
+f = (-floor(n/2):ceil(n/2)-1) / n;
 end
 
 function otf = theoreticalIncoherentOTF(H, W, pixelSize, lambda, NA)
@@ -584,16 +1093,13 @@ end
 function out = rescaleOTFSupport(otf, alpha)
 % out(k) = otf(alpha * k)
 [H, W] = size(otf);
-[x, y] = meshgrid(1:W, 1:H);
-cx = (W + 1) / 2;
-cy = (H + 1) / 2;
-
-xs = alpha * (x - cx) + cx;
-ys = alpha * (y - cy) + cy;
+fx = shifted_frequency_axis(W);
+fy = shifted_frequency_axis(H);
+[FX, FY] = meshgrid(fx, fy);
 
 otfShift = fftshift(otf);
-outShift = interp2(otfShift, xs, ys, 'linear', 0);
-out = ifftshift(outShift);
+outShift = interp2(FX, FY, otfShift, alpha * FX, alpha * FY, 'linear', 0);
+out = ifftshift(max(real(outShift), 0));
 end
 
 function otf = normalizeOTFdc(otf)
@@ -604,124 +1110,6 @@ end
 end
 
 
-% =========================================================================
-% Plotting
-% =========================================================================
-function show_aco_ism_results(res, params)
-
-if nargin < 2 || isempty(params)
-    params = struct();
-end
-if ~isfield(params, 'showChannelLabels'), params.showChannelLabels = false; end
-if ~isfield(params, 'channelLabelMode'), params.channelLabelMode = 'channel'; end
-if ~isfield(params, 'channelLabelFontSize'), params.channelLabelFontSize = 10; end
-if ~isfield(params, 'channelLabelColor'), params.channelLabelColor = [0 0 0]; end
-if ~isfield(params, 'channelLabelWeight'), params.channelLabelWeight = 'bold'; end
-
-imgStack = res.imgStack;
-[H, W, ~] = size(imgStack);
-
-figure('Color', 'w', 'Name', 'APR + ACO-ISM reconstruction');
-
-subplot(2,3,1);
-imagesc(res.rawSum); axis image off; colormap hot;
-title('Raw detector sum');
-
-subplot(2,3,2);
-imagesc(res.aprImage); axis image off; colormap hot;
-title('APR image');
-
-subplot(2,3,3);
-imagesc(res.acoImage); axis image off; colormap hot;
-title('ACO-ISM image');
-
-% subplot(2,3,4);
-% plot(res.detectorPositions(:,2), -res.detectorPositions(:,1), 'o', 'LineWidth', 1.4);
-% hold on;
-% plot(res.detectorPositions(res.centerDetectorIndex,2), ...
-%     -res.detectorPositions(res.centerDetectorIndex,1), ...
-%     'rp', 'MarkerSize', 12, 'LineWidth', 2);
-% axis equal; grid on;
-% xlabel('\Delta x [px]');
-% ylabel('\Delta y [px]');
-% title('Recovered detector geometry');
-subplot(2,3,4);
-xpos = res.detectorPositions(:,2);
-ypos = -res.detectorPositions(:,1);
-
-plot(xpos, ypos, 'o', 'LineWidth', 1.4, 'MarkerSize', 6);
-hold on;
-plot(xpos(res.centerDetectorIndex), ypos(res.centerDetectorIndex), ...
-     'rp', 'MarkerSize', 14, 'LineWidth', 2);
-
-if params.showChannelLabels
-    for k = 1:numel(xpos)
-        switch lower(params.channelLabelMode)
-            case 'channel'
-                lbl = sprintf('%d', res.channelIDs(k));
-            case 'index'
-                lbl = sprintf('%d', k);
-            case 'both'
-                lbl = sprintf('%d [%d]', res.channelIDs(k), k);
-            otherwise
-                lbl = sprintf('%d', res.channelIDs(k));
-        end
-
-        text(xpos(k) + 0.2, ypos(k) + 0.2, lbl, ...
-            'Color', params.channelLabelColor, ...
-            'FontSize', params.channelLabelFontSize, ...
-            'FontWeight', params.channelLabelWeight, ...
-            'BackgroundColor', 'w', ...
-            'Margin', 1, ...
-            'HorizontalAlignment', 'left', ...
-            'VerticalAlignment', 'bottom');
-    end
-end
-
-axis equal;
-grid on;
-xlabel('\Delta x [px]');
-ylabel('\Delta y [px]');
-title(sprintf('Recovered detector geometry (center ch %d)', res.centerChannelID));
-
-
-subplot(2,3,5);
-fx = (-floor(W/2):ceil(W/2)-1) / W;
-crow = floor(H/2) + 1;
-plot(fx, fftshift(abs(res.otfWF(crow,:))), 'LineWidth', 1.2); hold on;
-plot(fx, fftshift(abs(res.otfISMexp(crow,:))), 'LineWidth', 1.2);
-plot(fx, fftshift(abs(res.otfISMideal(crow,:))), '--', 'LineWidth', 1.2);
-xlabel('Spatial frequency [cycles/pixel]');
-ylabel('|OTF|');
-legend('WF OTF', 'ISM experimental', 'ISM ideal', 'Location', 'best');
-grid on;
-title('OTF cross-sections');
-
-subplot(2,3,6);
-montage(normalizeMontage(imgStack), ...
-    'Size', [ceil(sqrt(size(imgStack,3))) ceil(sqrt(size(imgStack,3)))]);
-title('Detector images');
-
-% convergence figure
-if ~isempty(res.convHistory.iter)
-    figure('Color', 'w', 'Name', 'ACO convergence');
-    semilogy(res.convHistory.iter, res.convHistory.relRMSE, '-o', 'LineWidth', 1.3);
-    xlabel('Iteration');
-    ylabel('Relative RMSE of autocorrelation');
-    grid on;
-    title('Schultz-Snyder convergence');
-end
-
-% show masked autocorrelation target
-figure('Color', 'w', 'Name', 'ACO target');
-subplot(1,2,1);
-imagesc(fftshift(res.acoAverage)); axis image off; colormap hot;
-title('Average autocorrelation');
-
-subplot(1,2,2);
-imagesc(fftshift(res.acoAverageMasked)); axis image off; colormap hot;
-title('Masked average autocorrelation');
-end
 
 function out = normalizeMontage(stack)
 [H,W,N] = size(stack);
@@ -734,6 +1122,73 @@ for k = 1:N
         I = I / mx;
     end
     out(:,:,1,k) = I;
+end
+end
+
+function plot_detector_image_grid(ax, imgStack, channelIDs)
+if nargin < 3 || isempty(channelIDs)
+    channelIDs = (1:size(imgStack, 3)).';
+end
+
+[detXY, useHoneycomb] = local_detector_layout(size(imgStack, 3));
+if ~useHoneycomb
+    detXY = rectangular_detector_layout(size(imgStack, 3));
+end
+
+cla(ax);
+hold(ax, 'on');
+set(ax, 'Color', 'w');
+
+tileHalfWidth = 0.43;
+tileHalfHeight = 0.36;
+cmap = hot(256);
+
+for k = 1:size(imgStack, 3)
+    I = double(imgStack(:,:,k));
+    I = I - min(I(:));
+    mx = max(I(:));
+    if mx > 0
+        I = I ./ mx;
+    end
+    idx = max(1, min(256, round(I * 255) + 1));
+    rgb = ind2rgb(idx, cmap);
+
+    x = detXY(k, 1);
+    y = detXY(k, 2);
+    image('Parent', ax, ...
+        'XData', [x - tileHalfWidth, x + tileHalfWidth], ...
+        'YData', [y - tileHalfHeight, y + tileHalfHeight], ...
+        'CData', rgb);
+    rectangle('Parent', ax, ...
+        'Position', [x - tileHalfWidth, y - tileHalfHeight, 2*tileHalfWidth, 2*tileHalfHeight], ...
+        'EdgeColor', [0.55 0.55 0.55], ...
+        'LineWidth', 0.4);
+    text(ax, x - tileHalfWidth + 0.03, y + tileHalfHeight - 0.04, sprintf('%g', channelIDs(k)), ...
+        'Color', [1 1 1], ...
+        'FontSize', 5, ...
+        'FontWeight', 'bold', ...
+        'HorizontalAlignment', 'left', ...
+        'VerticalAlignment', 'top');
+end
+
+axis(ax, 'equal');
+axis(ax, 'off');
+set(ax, 'YDir', 'normal');
+
+pad = 0.65;
+xlim(ax, [min(detXY(:,1)) - tileHalfWidth - pad, max(detXY(:,1)) + tileHalfWidth + pad]);
+ylim(ax, [min(detXY(:,2)) - tileHalfHeight - pad, max(detXY(:,2)) + tileHalfHeight + pad]);
+hold(ax, 'off');
+end
+
+function detXY = rectangular_detector_layout(nDet)
+nCol = ceil(sqrt(nDet));
+nRow = ceil(nDet / nCol);
+detXY = zeros(nDet, 2);
+for k = 1:nDet
+    row = floor((k - 1) / nCol);
+    col = mod(k - 1, nCol);
+    detXY(k,:) = [col - (nCol - 1)/2, (nRow - 1)/2 - row];
 end
 end
 
@@ -754,7 +1209,7 @@ function [imgOut, Hfilter] = deconvolveToIdealOTF(imgIn, otfExp, otfIdeal, lambd
 % Inputs
 % ------
 % imgIn         : APR / reassigned ISM image
-% otfExp        : experimental ISM OTF
+% otfExp        : input APR/ISM OTF model, or a measured OTF if supplied
 % otfIdeal      : ideal ISM OTF
 % lambda        : Tikhonov/Wiener-style regularization scalar
 % clipNegative  : if true, clip negative output values to zero
@@ -805,3 +1260,130 @@ if preserveFlux
     end
 end
 end
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% plottting results
+% =========================================================================
+% Plotting
+% =========================================================================
+function show_aco_ism_results(res, params)
+
+if nargin < 2 || isempty(params)
+    params = struct();
+end
+if ~isfield(params, 'showChannelLabels'), params.showChannelLabels = false; end
+if ~isfield(params, 'channelLabelMode'), params.channelLabelMode = 'channel'; end
+if ~isfield(params, 'channelLabelFontSize'), params.channelLabelFontSize = 6; end
+if ~isfield(params, 'channelLabelColor'), params.channelLabelColor = [0 0 0]; end
+if ~isfield(params, 'channelLabelWeight'), params.channelLabelWeight = 'bold'; end
+
+imgStack = res.imgStack;
+[H, W, ~] = size(imgStack);
+
+figure('Color', 'w', 'Name', 'APR + ACO-ISM reconstruction');
+
+subplot(2,3,1);
+imagesc(res.rawSum); axis image off; colormap hot;
+title('Raw detector sum');
+
+subplot(2,3,2);
+imagesc(res.aprImage); axis image off; colormap hot;
+title('APR image');
+
+subplot(2,3,3);
+imagesc(res.acoImage); axis image off; colormap hot;
+title('ACO-ISM image');
+
+% subplot(2,3,4);
+% plot(res.detectorPositions(:,2), -res.detectorPositions(:,1), 'o', 'LineWidth', 1.4);
+% hold on;
+% plot(res.detectorPositions(res.centerDetectorIndex,2), ...
+%     -res.detectorPositions(res.centerDetectorIndex,1), ...
+%     'rp', 'MarkerSize', 12, 'LineWidth', 2);
+% axis equal; grid on;
+% xlabel('\Delta x [px]');
+% ylabel('\Delta y [px]');
+% title('Recovered detector geometry');
+subplot(2,3,4);
+xpos = res.detectorPositions(:,2);
+ypos = -res.detectorPositions(:,1);
+
+plot(xpos, ypos, 'o', 'LineWidth', 1.4, 'MarkerSize', 6);
+hold on;
+plot(xpos(res.centerDetectorIndex), ypos(res.centerDetectorIndex), ...
+     'rp', 'MarkerSize', 14, 'LineWidth', 2);
+
+if params.showChannelLabels
+    labelOffsetX = 0.055 * max(max(xpos) - min(xpos), 1);
+    labelOffsetY = 0.055 * max(max(ypos) - min(ypos), 1);
+    for k = 1:numel(xpos)
+        switch lower(params.channelLabelMode)
+            case 'channel'
+                lbl = sprintf('%d', res.channelIDs(k));
+            case 'index'
+                lbl = sprintf('%d', k);
+            case 'both'
+                lbl = sprintf('%d [%d]', res.channelIDs(k), k);
+            otherwise
+                lbl = sprintf('%d', res.channelIDs(k));
+        end
+
+        text(xpos(k) + labelOffsetX, ypos(k) + labelOffsetY, lbl, ...
+            'Color', params.channelLabelColor, ...
+            'FontSize', params.channelLabelFontSize, ...
+            'FontWeight', params.channelLabelWeight, ...
+            'HorizontalAlignment', 'left', ...
+            'VerticalAlignment', 'bottom');
+    end
+end
+
+axis equal;
+grid on;
+xlabel('\Delta x [px]');
+ylabel('\Delta y [px]');
+title(sprintf('Recovered detector geometry (center ch %d)', res.centerChannelID));
+
+
+subplot(2,3,5);
+fx = shifted_frequency_axis(W);
+otfWFShift = fftshift(max(real(res.otfWF), 0));
+otfISMmodelShift = fftshift(max(real(res.otfISMmodel), 0));
+otfISMidealShift = fftshift(max(real(res.otfISMideal), 0));
+crow = floor(H/2) + 1;
+plot(fx, otfWFShift(crow,:), 'LineWidth', 1.2); hold on;
+plot(fx, otfISMmodelShift(crow,:), 'LineWidth', 1.2);
+plot(fx, otfISMidealShift(crow,:), '--', 'LineWidth', 1.2);
+xlabel('Spatial frequency [cycles/pixel]');
+ylabel('|OTF|');
+legend('WF OTF', 'ISM model D(q/2)^2', 'ISM ideal D(q/2)', 'Location', 'best');
+grid on;
+ylim([0 1.02]);
+xlim([-0.1 0.1])
+title('OTF cross-sections');
+
+subplot(2,3,6);
+plot_detector_image_grid(gca, imgStack, res.channelIDs);
+title('Detector images');
+
+% convergence figure
+if ~isempty(res.convHistory.iter)
+    figure('Color', 'w', 'Name', 'ACO convergence');
+    semilogy(res.convHistory.iter, res.convHistory.relRMSE, '-o', 'LineWidth', 1.3);
+    xlabel('Iteration');
+    ylabel('Relative RMSE of autocorrelation');
+    grid on;
+    title('Schultz-Snyder convergence');
+end
+
+% show masked autocorrelation target
+figure('Color', 'w', 'Name', 'ACO target');
+subplot(1,2,1);
+imagesc(fftshift(res.acoAverage)); axis image off; colormap hot;
+title('Average autocorrelation');
+
+subplot(1,2,2);
+imagesc(fftshift(res.acoAverageMasked)); axis image off; colormap hot;
+title('Masked average autocorrelation');
+end
+
