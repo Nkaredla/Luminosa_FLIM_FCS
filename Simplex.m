@@ -73,9 +73,14 @@ xin = x(:);
 v = xin;
 v(v<xmin) = xmin(v<xmin);
 v(v>xmax) = xmax(v>xmax);
-x(:) = v; fv = eval(evalstr); 
-for j = 1:n
-	y = xin;
+	x(:) = v; fv = eval(evalstr);
+    if ~isscalar(fv) || ~isfinite(fv) || abs(imag(fv)) > 1e-10*max(1, abs(real(fv)))
+        fv = Inf;
+    else
+        fv = real(fv);
+    end
+	for j = 1:n
+		y = xin;
     if y(j) ~= 0
         y(j) = (1 +.2*rand)*y(j);
     else
@@ -88,8 +93,13 @@ for j = 1:n
         y(j) = xmin(j);
     end
     v = [v y];
-	x(:) = y; f = eval(evalstr);
-	fv = [fv f];
+		x(:) = y; f = eval(evalstr);
+        if ~isscalar(f) || ~isfinite(f) || abs(imag(f)) > 1e-10*max(1, abs(real(f)))
+            f = Inf;
+        else
+            f = real(f);
+        end
+		fv = [fv f];
 end
 [fv, j] = sort(fv);
 v = v(:,j);
@@ -107,16 +117,34 @@ while count < steps
 	% Reflection:
 	vmean = mean(v(:, 1:n),2);
 	vr = (1 + alpha)*vmean - alpha*v(:, n+1);
-	x(:) = vr;
-	fr = eval(evalstr); 
+    if all(xmin<=vr) && all(vr<=xmax)
+        x(:) = vr;
+        fr = eval(evalstr);
+        if ~isscalar(fr) || ~isfinite(fr) || abs(imag(fr)) > 1e-10*max(1, abs(real(fr)))
+            fr = Inf;
+        else
+            fr = real(fr);
+        end
+    else
+        fr = Inf;
+    end
 	count = count + 1; 
 	vk = vr; fk = fr;
 
 	if fr < fv(1) && all(xmin<=vr) && all(vr<=xmax)
 		% Expansion:
 		ve = gamma*vr + (1-gamma)*vmean;
-		x(:) = ve;
-		fe = eval(evalstr);
+        if all(xmin<=ve) && all(ve<=xmax)
+            x(:) = ve;
+            fe = eval(evalstr);
+            if ~isscalar(fe) || ~isfinite(fe) || abs(imag(fe)) > 1e-10*max(1, abs(real(fe)))
+                fe = Inf;
+            else
+                fe = real(fe);
+            end
+        else
+            fe = Inf;
+        end
 		count = count + 1;
 		if fe < fv(1) && all(xmin<=ve) && all(ve<=xmax)
 			vk = ve; fk = fe;
@@ -128,8 +156,17 @@ while count < steps
 		end
 		% Contraction:
 		vc = beta*vtmp + (1-beta)*vmean;
-		x(:) = vc;
-		fc = eval(evalstr); 
+        if all(xmin<=vc) && all(vc<=xmax)
+            x(:) = vc;
+            fc = eval(evalstr);
+            if ~isscalar(fc) || ~isfinite(fc) || abs(imag(fc)) > 1e-10*max(1, abs(real(fc)))
+                fc = Inf;
+            else
+                fc = real(fc);
+            end
+        else
+            fc = Inf;
+        end
 		count = count + 1;
 		if fc < fv(n) && all(xmin<=vc) && all(vc<=xmax)
 			vk = vc; fk = fc;
@@ -138,12 +175,23 @@ while count < steps
 			for j = 2:n
 				v(:, j) = (v(:, 1) + v(:, j))/2;
 				x(:) = v(:, j);
-				fv(j) = eval(evalstr); 
+				fshrink = eval(evalstr);
+                if ~isscalar(fshrink) || ~isfinite(fshrink) || abs(imag(fshrink)) > 1e-10*max(1, abs(real(fshrink)))
+                    fshrink = Inf;
+                else
+                    fshrink = real(fshrink);
+                end
+                fv(j) = fshrink;
 			end
 			count = count + n-1;
 			vk = (v(:, 1) + v(:, n+1))/2;
 			x(:) = vk;
-			fk = eval(evalstr); 
+			fk = eval(evalstr);
+            if ~isscalar(fk) || ~isfinite(fk) || abs(imag(fk)) > 1e-10*max(1, abs(real(fk)))
+                fk = Inf;
+            else
+                fk = real(fk);
+            end
 			count = count + 1;
 		end
 	end
