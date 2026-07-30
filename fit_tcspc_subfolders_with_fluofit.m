@@ -6,31 +6,43 @@ function batch = fit_tcspc_subfolders_with_fluofit(rootFolder, outputFolder, opt
 %
 % Expected layout:
 %   rootFolder\
-%       sample_001\one_file.ptu
-%       sample_002\one_file.pqres
+%       sample_001\...\one_file.ptu
+%       sample_002\...\one_file.pqres
 %       ...
 %
-% The function reads one PTU or PQRES file from each immediate subfolder,
+% The function reads one PTU or PQRES file from inside each main subfolder,
 % collects the TCSPC curves, estimates one global IRF from the collected
 % curves when possible, fits every curve with Fluofit, and saves:
-%   - one MAT file per fitted curve
-%   - batch_irf.mat
-%   - global_irf.mat when opts.irfMode='global'
-%   - tcspc_batch_fluofit_summary.csv
-%   - tcspc_batch_fluofit_all.mat
+%   - one MAT file per fitted curve in the main subfolder result folder
+%   - root-level batch_irf.mat
+%   - root-level global_irf.mat when opts.irfMode='global'
+%   - root-level tcspc_batch_fluofit_summary.csv
+%   - root-level tcspc_batch_fluofit_all.mat
 %
 % Main options:
-%   opts.tau0                  lifetime starts in ns, default [0.3 1.0 2.0 4.0]
+%   opts.tau0                  lifetime starts in ns. Default [] lets
+%                              DistFluofit choose the component seeds.
 %   opts.limits                Fluofit lifetime limits in ns, default []
-%   opts.init                  Fluofit init flag, default 0
+%   opts.init                  Fluofit init flag, default 1 when tau0 is
+%                              empty, otherwise 0
 %   opts.fluofitSolver         'mle', 'ls', or 'pirls', default 'mle'
 %   opts.plotFits              draw Fluofit figures, default false
+%   opts.saveFitFigures        save each fit figure, default opts.plotFits
+%   opts.figureFormats         figure formats, default {'png', 'fig'}
 %   opts.irfMode               'global', 'supplied', or 'per_curve',
 %                              default 'global'
 %   opts.irfFile               supplied PTU/PQRES IRF file for
 %                              opts.irfMode='supplied'
 %   opts.globalIrfMethod       'calc_mirf', 'gamma_shifted_fast', or
 %                              'exgauss_fast', default 'calc_mirf'
+%   opts.searchRecursively     search inside sub-subfolders, default true
+%   opts.multipleFileMode      'largest_ptu', 'error', or 'first',
+%                              default 'largest_ptu'. With recursive
+%                              folder data, 'largest_ptu' selects the
+%                              largest PTU candidate under each main
+%                              subfolder.
+%   opts.resultFolderName      created in each main subfolder, default
+%                              'tcspc_fluofit_results'
 %   opts.rejectFirstTimePoint  default true for the Natasha dataset
 %   opts.rejectTailAtOrAfterNs default 12.5; set [] to disable
 %   opts.rejectTailNPoints     default 8
@@ -38,13 +50,16 @@ function batch = fit_tcspc_subfolders_with_fluofit(rootFolder, outputFolder, opt
 if nargin < 1 || isempty(rootFolder)
     rootFolder = 'D:\Luminosa\Data\Natasha';
 end
-if nargin < 2 || isempty(outputFolder)
-    outputFolder = fullfile(rootFolder, 'tcspc_batch_fluofit_results');
+if nargin < 2
+    outputFolder = '';
 end
 if nargin < 3 || isempty(opts)
     opts = struct();
 end
 opts = defaultBatchOptions(opts);
+if isempty(outputFolder)
+    outputFolder = fullfile(rootFolder, opts.batchResultFolderName);
+end
 
 if ~isfolder(rootFolder)
     error('Input root folder does not exist: %s', rootFolder);
@@ -79,6 +94,7 @@ for kk = 1:numel(targets)
     summary(kk).folder = target.folder;
     summary(kk).file = target.file;
     summary(kk).fileType = target.fileType;
+    summary(kk).resultFolder = target.resultFolder;
 
     if ~strcmp(target.status, 'ok')
         curves(kk).status = target.status;
@@ -105,6 +121,7 @@ for kk = 1:numel(targets)
         curves(kk).folderName = target.folderName;
         curves(kk).file = target.file;
         curves(kk).fileType = target.fileType;
+        curves(kk).resultFolder = target.resultFolder;
         summary(kk).status = 'failed';
         summary(kk).message = ME.message;
         warning('Read failed for %s: %s', target.file, ME.message);
@@ -142,17 +159,27 @@ for kk = 1:numel(curves)
 
         [~, stem] = fileparts(curves(kk).file);
         outStem = safeFileStem([curves(kk).folderName '_' stem]);
-        outPath = fullfile(outputFolder, [outStem '_fluofit.mat']);
+        if ~exist(curves(kk).resultFolder, 'dir')
+            mkdir(curves(kk).resultFolder);
+        end
+        fitResult.figureFiles = {};
+        if opts.saveFitFigures
+            fitResult.figureFiles = saveCurrentFitFigure( ...
+                curves(kk).resultFolder, outStem, fitInput, opts);
+        end
+        outPath = fullfile(curves(kk).resultFolder, [outStem '_fluofit.mat']);
         save(outPath, 'fitInput', 'fitResult', '-v7.3');
 
         fits(kk).fitInput = fitInput;
         fits(kk).fitResult = fitResult;
         fits(kk).outputFile = outPath;
+        fits(kk).figureFiles = fitResult.figureFiles;
         fits(kk).status = 'ok';
         fits(kk).message = '';
 
         summary(kk).irfSource = fitInput.irfSource;
         summary(kk).outputFile = outPath;
+        summary(kk).figureFiles = strjoin(fitResult.figureFiles, ';');
         summary(kk).dtNs = fitInput.dtNs;
         summary(kk).pulsePeriodNs = fitInput.pulsePeriodNs;
         summary(kk).nBins = numel(fitInput.counts);
@@ -192,14 +219,15 @@ fprintf('Saved combined batch data to %s\n', allPath);
 end
 
 function opts = defaultBatchOptions(opts)
-if ~isfield(opts, 'tau0') || isempty(opts.tau0)
-    opts.tau0 = [0.3 1.0 2.0 4.0];
+tau0Provided = isfield(opts, 'tau0') && ~isempty(opts.tau0);
+if ~isfield(opts, 'tau0')
+    opts.tau0 = [];
 end
 if ~isfield(opts, 'limits')
     opts.limits = [];
 end
 if ~isfield(opts, 'init') || isempty(opts.init)
-    opts.init = 0;
+    opts.init = double(~tau0Provided);
 end
 if isempty(opts.tau0) && opts.init == 0
     opts.init = 1;
@@ -216,6 +244,13 @@ end
 if ~isfield(opts, 'plotFits') || isempty(opts.plotFits)
     opts.plotFits = false;
 end
+if ~isfield(opts, 'saveFitFigures') || isempty(opts.saveFitFigures)
+    opts.saveFitFigures = opts.plotFits;
+end
+if ~isfield(opts, 'figureFormats') || isempty(opts.figureFormats)
+    opts.figureFormats = {'png', 'fig'};
+end
+opts.figureFormats = normalizeFigureFormats(opts.figureFormats);
 if ~isfield(opts, 'irfMode') || isempty(opts.irfMode)
     opts.irfMode = 'global';
 end
@@ -253,15 +288,28 @@ end
 if ~isfield(opts, 'fallbackPerCurveIrf') || isempty(opts.fallbackPerCurveIrf)
     opts.fallbackPerCurveIrf = true;
 end
+if ~isfield(opts, 'batchResultFolderName') || isempty(opts.batchResultFolderName)
+    opts.batchResultFolderName = 'tcspc_batch_fluofit_results';
+end
+if ~isfield(opts, 'resultFolderName') || isempty(opts.resultFolderName)
+    opts.resultFolderName = 'tcspc_fluofit_results';
+end
+if ~isfield(opts, 'searchRecursively') || isempty(opts.searchRecursively)
+    opts.searchRecursively = true;
+end
+if ~isfield(opts, 'maxSearchDepth') || isempty(opts.maxSearchDepth)
+    opts.maxSearchDepth = Inf;
+end
 if ~isfield(opts, 'includeRootFiles') || isempty(opts.includeRootFiles)
     opts.includeRootFiles = false;
 end
 if ~isfield(opts, 'multipleFileMode') || isempty(opts.multipleFileMode)
-    opts.multipleFileMode = 'error';
+    opts.multipleFileMode = 'largest_ptu';
 end
-opts.multipleFileMode = lower(char(opts.multipleFileMode));
-if ~any(strcmp(opts.multipleFileMode, {'error', 'first'}))
-    error('opts.multipleFileMode must be ''error'' or ''first''.');
+opts.multipleFileMode = lower(strrep(char(opts.multipleFileMode), '-', '_'));
+validMultipleFileModes = {'largest_ptu', 'largestptu', 'largest', 'error', 'first'};
+if ~any(strcmp(opts.multipleFileMode, validMultipleFileModes))
+    error('opts.multipleFileMode must be ''largest_ptu'', ''error'', or ''first''.');
 end
 if ~isfield(opts, 'ptuResolutionSec')
     opts.ptuResolutionSec = [];
@@ -283,27 +331,51 @@ if ~isfield(opts, 'rejectTailNPoints') || isempty(opts.rejectTailNPoints)
 end
 end
 
+function formats = normalizeFigureFormats(formats)
+if ischar(formats) || isstring(formats)
+    formats = cellstr(formats);
+elseif ~iscell(formats)
+    error('opts.figureFormats must be a character vector, string, or cell array.');
+end
+
+out = {};
+for ii = 1:numel(formats)
+    fmt = lower(strrep(strtrim(char(formats{ii})), '.', ''));
+    if isempty(fmt)
+        continue;
+    end
+    out{end + 1} = fmt; %#ok<AGROW>
+end
+
+if isempty(out)
+    error('opts.figureFormats must contain at least one non-empty format.');
+end
+formats = out;
+end
+
 function target = emptyTarget()
 target = struct('folder', '', 'folderName', '', 'file', '', 'fileType', '', ...
-    'status', 'pending', 'message', '');
+    'resultFolder', '', 'status', 'pending', 'message', '');
 end
 
 function curve = emptyCurve()
 curve = struct('folder', '', 'folderName', '', 'file', '', 'fileType', '', ...
     'curveName', '', 'timeSec', [], 'counts', [], 'meta', struct(), ...
     'head', [], 'rawTcspc', [], 'nChannels', NaN, 'status', 'pending', ...
-    'message', '');
+    'resultFolder', '', 'message', '');
 end
 
 function fit = emptyFit()
 fit = struct('folder', '', 'file', '', 'fitInput', [], 'fitResult', [], ...
     'outputFile', '', 'status', 'pending', 'message', '');
+fit.figureFiles = {};
 end
 
 function summary = emptySummary()
 summary = struct('folder', '', 'file', '', 'fileType', '', 'irfSource', '', ...
-    'outputFile', '', 'dtNs', NaN, 'pulsePeriodNs', NaN, 'nBins', NaN, ...
-    'nRejected', NaN, 'totalCounts', NaN, 'peakCounts', NaN, 'tauNs', '', ...
+    'resultFolder', '', 'outputFile', '', 'figureFiles', '', 'dtNs', NaN, ...
+    'pulsePeriodNs', NaN, 'nBins', NaN, 'nRejected', NaN, ...
+    'totalCounts', NaN, 'peakCounts', NaN, 'tauNs', '', ...
     'amplitudes', '', 'chi', NaN, 'status', 'pending', 'message', '');
 end
 
@@ -332,8 +404,9 @@ function target = targetFromFolder(folder, opts)
 target = emptyTarget();
 target.folder = folder;
 [~, target.folderName] = fileparts(folder);
+target.resultFolder = fullfile(folder, opts.resultFolderName);
 
-files = listTcspcFiles(folder);
+files = listTcspcFiles(folder, opts);
 files = removeExplicitIrfFile(files, opts);
 if isempty(files)
     target.status = 'skipped';
@@ -343,11 +416,15 @@ end
 if strcmp(opts.irfMode, 'supplied') && numel(files) > 1
     isIrf = isIrfFileName({files.name});
     decayFiles = files(~isIrf);
-    if numel(decayFiles) == 1
+    if ~isempty(decayFiles)
         files = decayFiles;
     end
 end
-if numel(files) > 1 && strcmp(opts.multipleFileMode, 'error')
+if numel(files) > 1
+    [files, selectionMessage] = resolveMultipleTcspcFiles(files, opts);
+    target.message = selectionMessage;
+end
+if numel(files) > 1
     target.status = 'failed';
     target.message = sprintf('Expected one .ptu or .pqres file, found %d.', numel(files));
     return;
@@ -357,13 +434,80 @@ target.file = fullfile(files(1).folder, files(1).name);
 [~, ~, ext] = fileparts(target.file);
 target.fileType = lower(ext(2:end));
 target.status = 'ok';
-target.message = '';
 end
 
-function files = listTcspcFiles(folder)
+function [files, message] = resolveMultipleTcspcFiles(files, opts)
+message = '';
+if numel(files) <= 1
+    return;
+end
+
+switch opts.multipleFileMode
+    case 'error'
+        return;
+    case 'first'
+        message = sprintf('Selected first TCSPC file from %d candidate files.', numel(files));
+        files = files(1);
+    case {'largest_ptu', 'largestptu', 'largest'}
+        originalCount = numel(files);
+        ptuMask = false(numel(files), 1);
+        for ii = 1:numel(files)
+            [~, ~, ext] = fileparts(files(ii).name);
+            ptuMask(ii) = strcmpi(ext, '.ptu');
+        end
+
+        if any(ptuMask)
+            candidates = files(ptuMask);
+            candidateType = 'PTU';
+        else
+            candidates = files;
+            candidateType = 'TCSPC';
+        end
+
+        [~, idx] = max([candidates.bytes]);
+        files = candidates(idx);
+        message = sprintf('Selected largest %s file from %d candidate files.', ...
+            candidateType, originalCount);
+    otherwise
+        error('Unsupported opts.multipleFileMode: %s', opts.multipleFileMode);
+end
+end
+
+function files = listTcspcFiles(folder, opts)
+if opts.searchRecursively
+    files = listTcspcFilesRecursive(folder, opts, 0);
+else
+    files = listTcspcFilesFlat(folder);
+end
+files = removeDuplicateDirEntries(files);
+end
+
+function files = listTcspcFilesFlat(folder)
 files = [dir(fullfile(folder, '*.ptu')); dir(fullfile(folder, '*.PTU')); ...
     dir(fullfile(folder, '*.pqres')); dir(fullfile(folder, '*.PQRES'))];
-files = removeDuplicateDirEntries(files);
+end
+
+function files = listTcspcFilesRecursive(folder, opts, depth)
+files = listTcspcFilesFlat(folder);
+if depth >= opts.maxSearchDepth
+    return;
+end
+
+entries = dir(folder);
+for ii = 1:numel(entries)
+    if ~entries(ii).isdir
+        continue;
+    end
+    name = entries(ii).name;
+    if strcmp(name, '.') || strcmp(name, '..') || startsWith(name, '.')
+        continue;
+    end
+    if strcmpi(name, opts.resultFolderName) || strcmpi(name, opts.batchResultFolderName)
+        continue;
+    end
+    subFolder = fullfile(entries(ii).folder, name);
+    files = [files; listTcspcFilesRecursive(subFolder, opts, depth + 1)]; %#ok<AGROW>
+end
 end
 
 function files = removeExplicitIrfFile(files, opts)
@@ -401,6 +545,7 @@ curve.folder = target.folder;
 curve.folderName = target.folderName;
 curve.file = target.file;
 curve.fileType = target.fileType;
+curve.resultFolder = target.resultFolder;
 curve.status = 'ok';
 curve.message = '';
 
@@ -529,6 +674,7 @@ target.folder = irfFolder;
 target.folderName = irfStem;
 target.file = irfFile;
 target.fileType = lower(regexprep(ext, '^\.', ''));
+target.resultFolder = irfFolder;
 target.status = 'ok';
 
 try
@@ -784,10 +930,11 @@ params = struct('source', 'Calc_mIRF', 'model', 'IRF_Fun', 'head', head, ...
 end
 
 function fitResult = runBatchFluofit(fitInput, opts)
+makePlot = opts.plotFits || opts.saveFitFigures;
 [cshift, offset, amplitudes, tauNs, dc, dtau, irfShifted, components, tAxisNs, chi] = ...
     Fluofit(fitInput.irf, fitInput.counts, fitInput.pulsePeriodNs, ...
     fitInput.dtNs, fitInput.tau0Ns, fitInput.limitsNs, fitInput.init, ...
-    opts.fluofitSolver, opts.plotFits);
+    opts.fluofitSolver, makePlot);
 
 fitResult = struct();
 fitResult.signature = 'Fluofit(irf, y, p, dt, tau, lim, init, fitMode, plotFlag)';
@@ -802,6 +949,31 @@ fitResult.irfShifted = irfShifted;
 fitResult.components = components;
 fitResult.timeAxisNs = tAxisNs;
 fitResult.chi = chi;
+fitResult.figureFiles = {};
+end
+
+function figureFiles = saveCurrentFitFigure(resultFolder, outStem, fitInput, opts)
+figureFiles = {};
+fig = gcf;
+if isempty(fig) || ~ishandle(fig) || isempty(findall(fig, 'Type', 'axes'))
+    error('No Fluofit figure is available to save for %s.', fitInput.file);
+end
+
+set(fig, 'Name', sprintf('Fluofit: %s', fitInput.curveName), 'NumberTitle', 'off');
+drawnow;
+
+basePath = fullfile(resultFolder, [outStem '_fit']);
+for ii = 1:numel(opts.figureFormats)
+    fmt = opts.figureFormats{ii};
+    figPath = [basePath '.' fmt];
+    switch fmt
+        case 'fig'
+            savefig(fig, figPath);
+        otherwise
+            saveas(fig, figPath);
+    end
+    figureFiles{end + 1} = figPath; %#ok<AGROW>
+end
 end
 
 function irf = sanitizeIrf(irf)

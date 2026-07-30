@@ -7,7 +7,8 @@ function [c, offset, A, tau, dc, dtau, irs, zz, t, chi] = Fluofit(irf, y, p, dt,
 % y 	= 	Fluorescence decay data
 % p 	= 	Time between laser exciation pulses (in nanoseconds)
 % dt 	= 	Time width of one TCSPC channel (in nanoseconds)
-% tau 	= 	Initial guess times
+% tau 	= 	Initial guess times. Use [] with init > 0 to let
+%           DistFluofit choose the component seeds.
 % lim   = 	limits for the lifetimes guess times
 % init	=	Whether to use a initial guess routine or not
 % fitMode = 'mle', 'ls', or 'pirls' (optional, default 'mle')
@@ -60,6 +61,11 @@ irf = irf(:);
 offset = 0;
 y = y(:);
 n = length(irf); 
+if nargin > 4
+    tauInput = tau;
+else
+    tauInput = [];
+end
 if nargin>6
     if isempty(init)
         init = 1;
@@ -69,36 +75,30 @@ elseif nargin>4
 else
     init = 1;
 end
+if isempty(tauInput) && init == 0
+    init = 1;
+end
 
 if init>0 
-    [cx, tau, ~, c] = DistFluofit(irf, y, p, dt);    
-    cx = cx(:)';
-    tmp = cx>0;
-%    tmp = cx>0.1*max(cx);
-    t = 1:length(tmp);
-    t1 = t(tmp(2:end)>tmp(1:end-1)) + 1;
-    t2 = t(tmp(1:end-1)>tmp(2:end));
-    if length(t1)==length(t2)+1 
-        t1(end)=[]; 
+    [distAmps, tauRates, ~, c] = DistFluofit(irf, y, p, dt, [], 0);
+    tau = distDistributionToLifetimeSeeds(distAmps, tauRates);
+    if isempty(tau)
+        tau = validLifetimeSeeds(tauInput);
     end
-    if length(t2)==length(t1)+1 
-        t2(1)=[]; 
+    if isempty(tau)
+        tau = fallbackLifetimeSeed(y, p, dt);
     end
-    if t1(1)>t2(1)
-        t1(end)=[]; 
-        t2(1)=[];
-    end
-    tmp = [];
-    for j=1:length(t1)
-        tmp = [tmp cx(t1(j):t2(j))*tau(t1(j):t2(j))/sum(cx(t1(j):t2(j)))];
-    end
-    tau = tmp;
 else
     c = 0;
 end
 
 if (nargin<6)||isempty(lim)
     lim = [zeros(1,length(tau)) 100.*ones(1,length(tau))];
+else
+    lim = double(lim(:)).';
+    if numel(lim) ~= 2*numel(tau)
+        error('lim must contain lower and upper lifetime bounds for each fitted component.');
+    end
 end;
 
 p = p/dt;
@@ -213,4 +213,61 @@ if ~strcmpi(ampMode, 'ls')
     A = max(A, 0);
 end
 zfit = M * A;
+end
+
+function tauNs = distDistributionToLifetimeSeeds(distAmps, tauRates)
+distAmps = real(double(distAmps(:).'));
+tauRates = real(double(tauRates(:).'));
+valid = isfinite(distAmps) & distAmps > 0 & isfinite(tauRates) & tauRates > 0;
+if ~any(valid)
+    tauNs = [];
+    return;
+end
+
+distAmps(~valid) = 0;
+threshold = 0.2 * max(distAmps(valid));
+active = valid & distAmps >= threshold;
+if ~any(active)
+    [~, idx] = max(distAmps);
+    active(idx) = true;
+end
+
+edges = diff([false active false]);
+starts = find(edges == 1);
+stops = find(edges == -1) - 1;
+tauNs = zeros(1, numel(starts));
+for jj = 1:numel(starts)
+    idx = starts(jj):stops(jj);
+    weights = distAmps(idx);
+    totalWeight = sum(weights);
+    if totalWeight <= 0
+        continue;
+    end
+    lifetimeNs = 1 ./ tauRates(idx);
+    tauNs(jj) = sum(weights .* lifetimeNs) / totalWeight;
+end
+tauNs = tauNs(isfinite(tauNs) & tauNs > 0);
+tauNs = unique(tauNs, 'stable');
+end
+
+function tauNs = validLifetimeSeeds(tauInput)
+tauNs = real(double(tauInput(:).'));
+tauNs = tauNs(isfinite(tauNs) & tauNs > 0);
+tauNs = unique(tauNs, 'stable');
+end
+
+function tauNs = fallbackLifetimeSeed(y, p, dt)
+y = real(double(y(:)));
+y(~isfinite(y) | y < 0) = 0;
+t = (0:numel(y)-1).' * dt;
+s = sum(y);
+if s > 0
+    tauNs = sum(t .* y) / s;
+else
+    tauNs = p / 4;
+end
+if ~isfinite(tauNs) || tauNs <= 0
+    tauNs = p / 4;
+end
+tauNs = min(max(tauNs, dt), p);
 end

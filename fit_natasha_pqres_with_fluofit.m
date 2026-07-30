@@ -10,9 +10,11 @@ function results = fit_natasha_pqres_with_fluofit(dataFolder, outputFolder, opts
 % treated as TCSPC decay files.
 %
 % Optional fit settings:
-%   opts.tau0        - initial lifetime guesses in ns, see defaultFitOptions
+%   opts.tau0        - initial lifetime guesses in ns. Default [] lets
+%                      DistFluofit choose the component seeds.
 %   opts.limits      - Fluofit lifetime limits in ns, default []
-%   opts.init        - Fluofit init flag, default 0
+%   opts.init        - Fluofit init flag, default 1 when tau0 is empty,
+%                      otherwise 0
 %   opts.fluofitSolver - 'mle', 'ls', or 'pirls', default 'mle'
 %   opts.plotFits    - draw Fluofit figures, default false
 %   opts.irfMode     - 'supplied' or 'parametric', default 'supplied'
@@ -165,15 +167,15 @@ fprintf('Saved summary to %s\n', summaryPath);
 end
 
 function opts = defaultFitOptions(opts)
-if ~isfield(opts, 'tau0') || isempty(opts.tau0)
-    opts.tau0 = [0.3 1.0 2.0 4.0];
-%     opts.tau0 = [];
+tau0Provided = isfield(opts, 'tau0') && ~isempty(opts.tau0);
+if ~isfield(opts, 'tau0')
+    opts.tau0 = [];
 end
 if ~isfield(opts, 'limits')
     opts.limits = [];
 end
 if ~isfield(opts, 'init') || isempty(opts.init)
-    opts.init = 0;
+    opts.init = double(~tau0Provided);
 end
 if isempty(opts.tau0) && opts.init == 0
     opts.init = 1;
