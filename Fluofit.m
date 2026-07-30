@@ -1,4 +1,4 @@
-function [c, offset, A, tau, dc, dtau, irs, zz, t, chi] = Fluofit(irf, y, p, dt, tau, lim, init)
+function [c, offset, A, tau, dc, dtau, irs, zz, t, chi] = Fluofit(irf, y, p, dt, tau, lim, init, fitMode, plotFlag)
 % The function FLUOFIT performs a fit of a multi-exponential decay curve.
 % It is called by: 
 % [c, offset, A, tau, dc, doffset, dtau, irs, z, t, chi] = fluofit(irf, y, p, dt, tau, limits, init).
@@ -9,7 +9,9 @@ function [c, offset, A, tau, dc, dtau, irs, zz, t, chi] = Fluofit(irf, y, p, dt,
 % dt 	= 	Time width of one TCSPC channel (in nanoseconds)
 % tau 	= 	Initial guess times
 % lim   = 	limits for the lifetimes guess times
-% init	=	Whether to use a initial guess routine or not 
+% init	=	Whether to use a initial guess routine or not
+% fitMode = 'mle', 'ls', or 'pirls' (optional, default 'mle')
+% plotFlag = draw diagnostic figure (optional, default true)
 %
 % The return parameters are:
 % c	=	Color Shift (time shift of the IRF with respect to the fluorescence curve)
@@ -27,11 +29,33 @@ function [c, offset, A, tau, dc, dtau, irs, zz, t, chi] = Fluofit(irf, y, p, dt,
 % The program needs the following m-files: simplex.m, lsfit.m, mlfit.m, and convol.m.
 % (c) 1996 J�rg Enderlein
 
+if nargin < 8 || isempty(fitMode)
+    fitMode = 'mle';
+end
+fitMode = lower(char(fitMode));
+fitMode = strrep(fitMode, '-', '_');
 
-fitfun = 'mlfit';
-% fitfun = 'lsfit';
+switch fitMode
+    case {'mle', 'ml', 'maximum_likelihood'}
+        fitfun = 'mlfit';
+        ampMode = 'mle';
+    case {'ls', 'least_squares'}
+        fitfun = 'lsfit';
+        ampMode = 'ls';
+    case {'pirls', 'pirlsnonneg', 'poisson_irls'}
+        fitfun = 'pirlsfit';
+        ampMode = 'pirls';
+    otherwise
+        error('fitMode must be ''mle'', ''ls'', or ''pirls''.');
+end
 
-close all
+if nargin < 9 || isempty(plotFlag)
+    plotFlag = true;
+end
+
+if plotFlag
+    close all
+end
 irf = irf(:);
 offset = 0;
 y = y(:);
@@ -88,12 +112,12 @@ x = exp(-(tp-1)*(1./tau))*diag(1./(1-exp(-p./tau)));
 irs = (1-c+floor(c))*irf(rem(rem(t-floor(c)-1, n)+n,n)+1) + (c-floor(c))*irf(rem(rem(t-ceil(c)-1, n)+n,n)+1);
 z = Convol(irs, x);
 z = [ones(size(z,1),1) z];
-% A = z\y;
-% A = lsqnonneg(z,y);
-
-A = PIRLSnonneg(z,y,10);
-z = z*A;
-close all
+basis = z;
+[A, z] = solveFluofitAmplitudes(basis, y, ampMode);
+zz = basis.*(ones(size(basis,1),1)*A');
+if plotFlag
+    close all
+end
 if init<2
 %     disp('Fit =                Parameters =');
     param = [c; tau'];
@@ -109,24 +133,26 @@ if init<2
     irs = (1-c+floor(c))*irf(rem(rem(t-floor(c)-1, n)+n,n)+1) + (c-floor(c))*irf(rem(rem(t-ceil(c)-1, n)+n,n)+1);
     z = Convol(irs, x);
     z = [ones(size(z,1),1) z];
-    z = z./(ones(n,1)*sum(z));
+    zsum = sum(z);
+    zsum(~isfinite(zsum) | zsum == 0) = 1;
+    z = z./(ones(n,1)*zsum);
 %     A = z\y;
-    A = lsqnonneg(z,y);
+    [A, zfit] = solveFluofitAmplitudes(z, y, ampMode);
     zz = z.*(ones(size(z,1),1)*A');
-    z = z*A;
+    z = zfit;
     dtau = dtau;
     dc = dt*dc;
 else
     dtau = 0;
     dc = 0;
 end
-chi = sum((y-z).^2./abs(z))/(n-m);
+chi = sum((y-z).^2./max(abs(z), eps))/(n-m);
 t = dt*t;
 tau = dt*tau';
 c = dt*c;
 offset = zz(1,1); 
 A(1) = [];
-if 1
+if plotFlag
 	hold off
     subplot('position',[0.1 0.4 0.8 0.5])
 	plot(t,log10(y),t,log10(irs),t,log10(z));
@@ -160,4 +186,31 @@ if 1
 	s = sprintf('%3.3f', chi);
 	text(max(t)/2,v(4)-0.1*(v(4)-v(3)),['\chi^2 = ' s]);
     set(gcf,'units','normalized','position',[0.01 0.05 0.98 0.83])
+end
+end
+
+function [A, zfit] = solveFluofitAmplitudes(M, y, ampMode)
+M = real(double(M));
+y = real(double(y(:)));
+
+switch lower(ampMode)
+    case 'ls'
+        A = M \ y;
+    case 'pirls'
+        if exist('PIRLSnonneg', 'file') == 2
+            A = PIRLSnonneg(M, y, 10);
+        else
+            warning('PIRLSnonneg.m not found; falling back to lsqnonneg.');
+            A = lsqnonneg(M, y);
+        end
+    otherwise
+        A = lsqnonneg(M, y);
+end
+
+A = real(double(A));
+A(~isfinite(A)) = 0;
+if ~strcmpi(ampMode, 'ls')
+    A = max(A, 0);
+end
+zfit = M * A;
 end

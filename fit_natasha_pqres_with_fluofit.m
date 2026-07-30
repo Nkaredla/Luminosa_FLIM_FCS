@@ -13,6 +13,8 @@ function results = fit_natasha_pqres_with_fluofit(dataFolder, outputFolder, opts
 %   opts.tau0        - initial lifetime guesses in ns, see defaultFitOptions
 %   opts.limits      - Fluofit lifetime limits in ns, default []
 %   opts.init        - Fluofit init flag, default 0
+%   opts.fluofitSolver - 'mle', 'ls', or 'pirls', default 'mle'
+%   opts.plotFits    - draw Fluofit figures, default false
 %   opts.irfMode     - 'supplied' or 'parametric', default 'supplied'
 %   opts.irfModel    - parametric IRF model, default 'calc_mirf'
 %   opts.rejectFirstTimePoint - default true for this Natasha dataset
@@ -175,6 +177,18 @@ if ~isfield(opts, 'init') || isempty(opts.init)
 end
 if isempty(opts.tau0) && opts.init == 0
     opts.init = 1;
+end
+if ~isfield(opts, 'fluofitSolver') || isempty(opts.fluofitSolver)
+    opts.fluofitSolver = 'mle';
+end
+opts.fluofitSolver = lower(strrep(char(opts.fluofitSolver), '-', '_'));
+validSolvers = {'mle', 'ml', 'maximum_likelihood', 'ls', 'least_squares', ...
+    'pirls', 'pirlsnonneg', 'poisson_irls'};
+if ~any(strcmp(opts.fluofitSolver, validSolvers))
+    error('opts.fluofitSolver must be ''mle'', ''ls'', or ''pirls''.');
+end
+if ~isfield(opts, 'plotFits') || isempty(opts.plotFits)
+    opts.plotFits = false;
 end
 if ~isfield(opts, 'irfMode') || isempty(opts.irfMode)
     opts.irfMode = 'supplied';
@@ -708,13 +722,15 @@ counts = counts(keep);
 irfOnAxis = irfOnAxis(keep);
 end
 
-function fitResult = runLocalFluofit(fitInput, ~)
+function fitResult = runLocalFluofit(fitInput, opts)
 [cshift, offset, amplitudes, tauNs, dc, dtau, irfShifted, components, tAxisNs, chi] = ...
     Fluofit(fitInput.irf, fitInput.counts, fitInput.pulsePeriodNs, ...
-    fitInput.dtNs, fitInput.tau0Ns, fitInput.limitsNs, fitInput.init);
+    fitInput.dtNs, fitInput.tau0Ns, fitInput.limitsNs, fitInput.init, ...
+    opts.fluofitSolver, opts.plotFits);
 
 fitResult = struct();
-fitResult.signature = 'Fluofit(irf, y, p, dt, tau, lim, init)';
+fitResult.signature = 'Fluofit(irf, y, p, dt, tau, lim, init, fitMode, plotFlag)';
+fitResult.fitMode = opts.fluofitSolver;
 fitResult.colorShiftNs = cshift;
 fitResult.offset = offset;
 fitResult.amplitudes = amplitudes;
