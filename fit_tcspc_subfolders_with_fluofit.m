@@ -14,7 +14,8 @@ function batch = fit_tcspc_subfolders_with_fluofit(rootFolder, outputFolder, opt
 % collects the TCSPC curves, estimates one global IRF from the collected
 % curves when possible, fits every curve with Fluofit, and saves:
 %   - one MAT file per fitted curve
-%   - global_irf.mat
+%   - batch_irf.mat
+%   - global_irf.mat when opts.irfMode='global'
 %   - tcspc_batch_fluofit_summary.csv
 %   - tcspc_batch_fluofit_all.mat
 %
@@ -24,7 +25,10 @@ function batch = fit_tcspc_subfolders_with_fluofit(rootFolder, outputFolder, opt
 %   opts.init                  Fluofit init flag, default 0
 %   opts.fluofitSolver         'mle', 'ls', or 'pirls', default 'mle'
 %   opts.plotFits              draw Fluofit figures, default false
-%   opts.irfMode               'global' or 'per_curve', default 'global'
+%   opts.irfMode               'global', 'supplied', or 'per_curve',
+%                              default 'global'
+%   opts.irfFile               supplied PTU/PQRES IRF file for
+%                              opts.irfMode='supplied'
 %   opts.globalIrfMethod       'calc_mirf', 'gamma_shifted_fast', or
 %                              'exgauss_fast', default 'calc_mirf'
 %   opts.rejectFirstTimePoint  default true for the Natasha dataset
@@ -86,7 +90,7 @@ for kk = 1:numel(targets)
 
     fprintf('Reading %d/%d: %s\n', kk, numel(targets), target.file);
     try
-        curves(kk) = readTcspcFile(target, opts);
+        curves(kk) = readTcspcFile(target, opts, 'decay');
         summary(kk).dtNs = curves(kk).meta.tcspcResolutionSec * 1e9;
         summary(kk).pulsePeriodNs = curves(kk).meta.periodSec * 1e9;
         summary(kk).nBins = numel(curves(kk).counts);
@@ -107,13 +111,19 @@ for kk = 1:numel(targets)
     end
 end
 
-globalIrf = calculateGlobalIrf(curves, opts);
-if strcmp(globalIrf.status, 'ok')
-    globalIrfPath = fullfile(outputFolder, 'global_irf.mat');
-    save(globalIrfPath, 'globalIrf');
-    fprintf('Saved global IRF to %s\n', globalIrfPath);
+batchIrf = loadBatchIrf(curves, opts);
+if strcmp(batchIrf.status, 'ok')
+    batchIrfPath = fullfile(outputFolder, 'batch_irf.mat');
+    save(batchIrfPath, 'batchIrf');
+    fprintf('Saved batch IRF to %s\n', batchIrfPath);
+    if strcmp(opts.irfMode, 'global')
+        globalIrf = batchIrf; %#ok<NASGU>
+        globalIrfPath = fullfile(outputFolder, 'global_irf.mat');
+        save(globalIrfPath, 'globalIrf');
+        fprintf('Saved global IRF to %s\n', globalIrfPath);
+    end
 else
-    fprintf('Global IRF not available: %s\n', globalIrf.message);
+    fprintf('Batch IRF not available: %s\n', batchIrf.message);
 end
 
 for kk = 1:numel(curves)
@@ -127,7 +137,7 @@ for kk = 1:numel(curves)
     fits(kk).status = 'failed';
 
     try
-        fitInput = buildBatchFitInput(curves(kk), globalIrf, opts);
+        fitInput = buildBatchFitInput(curves(kk), batchIrf, opts);
         fitResult = runBatchFluofit(fitInput, opts);
 
         [~, stem] = fileparts(curves(kk).file);
@@ -169,7 +179,8 @@ batch.outputFolder = outputFolder;
 batch.options = opts;
 batch.targets = targets;
 batch.curves = curves;
-batch.globalIrf = globalIrf;
+batch.batchIrf = batchIrf;
+batch.globalIrf = batchIrf;
 batch.fits = fits;
 batch.results = summary;
 batch.summaryPath = summaryPath;
@@ -209,8 +220,17 @@ if ~isfield(opts, 'irfMode') || isempty(opts.irfMode)
     opts.irfMode = 'global';
 end
 opts.irfMode = lower(strrep(char(opts.irfMode), '-', '_'));
-if ~any(strcmp(opts.irfMode, {'global', 'per_curve'}))
-    error('opts.irfMode must be ''global'' or ''per_curve''.');
+if ~any(strcmp(opts.irfMode, {'global', 'supplied', 'per_curve'}))
+    error('opts.irfMode must be ''global'', ''supplied'', or ''per_curve''.');
+end
+if ~isfield(opts, 'irfFile') || isempty(opts.irfFile)
+    opts.irfFile = '';
+end
+if isfield(opts, 'suppliedIrfFile') && ~isempty(opts.suppliedIrfFile)
+    opts.irfFile = opts.suppliedIrfFile;
+end
+if strcmp(opts.irfMode, 'supplied') && isempty(opts.irfFile)
+    error('opts.irfFile must be set when opts.irfMode is ''supplied''.');
 end
 if ~isfield(opts, 'globalIrfMethod') || isempty(opts.globalIrfMethod)
     opts.globalIrfMethod = 'calc_mirf';
@@ -314,10 +334,18 @@ target.folder = folder;
 [~, target.folderName] = fileparts(folder);
 
 files = listTcspcFiles(folder);
+files = removeExplicitIrfFile(files, opts);
 if isempty(files)
     target.status = 'skipped';
     target.message = 'No .ptu or .pqres file found.';
     return;
+end
+if strcmp(opts.irfMode, 'supplied') && numel(files) > 1
+    isIrf = isIrfFileName({files.name});
+    decayFiles = files(~isIrf);
+    if numel(decayFiles) == 1
+        files = decayFiles;
+    end
 end
 if numel(files) > 1 && strcmp(opts.multipleFileMode, 'error')
     target.status = 'failed';
@@ -338,12 +366,33 @@ files = [dir(fullfile(folder, '*.ptu')); dir(fullfile(folder, '*.PTU')); ...
 files = removeDuplicateDirEntries(files);
 end
 
-function curve = readTcspcFile(target, opts)
+function files = removeExplicitIrfFile(files, opts)
+if isempty(files) || ~isfield(opts, 'irfFile') || isempty(opts.irfFile)
+    return;
+end
+irfPath = lower(char(opts.irfFile));
+keep = true(numel(files), 1);
+for ii = 1:numel(files)
+    keep(ii) = ~strcmp(lower(fullfile(files(ii).folder, files(ii).name)), irfPath);
+end
+files = files(keep);
+end
+
+function tf = isIrfFileName(names)
+names = lowerCell(names);
+tf = containsAny(names, {'irf', 'instrument', 'response', 'prompt'});
+tf = tf(:);
+end
+
+function curve = readTcspcFile(target, opts, preferredCurve)
+if nargin < 3 || isempty(preferredCurve)
+    preferredCurve = 'decay';
+end
 switch target.fileType
     case 'ptu'
         curve = readPtuTcspcFile(target.file, opts);
     case 'pqres'
-        curve = readPqresTcspcFile(target.file);
+        curve = readPqresTcspcFile(target.file, preferredCurve);
     otherwise
         error('Unsupported TCSPC file type: %s', target.fileType);
 end
@@ -434,8 +483,11 @@ curve.rawTcspc = counts;
 curve.nChannels = NaN;
 end
 
-function curve = readPqresTcspcFile(filePath)
-data = readPqresFile(filePath, 'decay');
+function curve = readPqresTcspcFile(filePath, preferredCurve)
+if nargin < 2 || isempty(preferredCurve)
+    preferredCurve = 'decay';
+end
+data = readPqresFile(filePath, preferredCurve);
 curve = emptyCurve();
 curve.curveName = data.curveName;
 curve.timeSec = data.timeSec;
@@ -444,6 +496,66 @@ curve.meta = data.meta;
 curve.head = [];
 curve.rawTcspc = data.counts;
 curve.nChannels = 1;
+end
+
+function batchIrf = loadBatchIrf(curves, opts)
+switch opts.irfMode
+    case 'supplied'
+        batchIrf = readSuppliedIrf(opts);
+    case 'global'
+        batchIrf = calculateGlobalIrf(curves, opts);
+    otherwise
+        batchIrf = struct('status', 'failed', 'message', 'opts.irfMode is per_curve.', ...
+            'method', 'per_curve', 'timeSec', [], 'counts', [], ...
+            'summedCounts', [], 'included', [], 'excluded', [], ...
+            'head', [], 'params', []);
+end
+end
+
+function suppliedIrf = readSuppliedIrf(opts)
+suppliedIrf = struct('status', 'failed', 'message', '', 'method', 'supplied', ...
+    'timeSec', [], 'counts', [], 'summedCounts', [], 'included', [], ...
+    'excluded', [], 'head', [], 'params', []);
+
+irfFile = char(opts.irfFile);
+if exist(irfFile, 'file') ~= 2
+    suppliedIrf.message = sprintf('Supplied IRF file does not exist: %s', irfFile);
+    return;
+end
+
+[irfFolder, irfStem, ext] = fileparts(irfFile);
+target = emptyTarget();
+target.folder = irfFolder;
+target.folderName = irfStem;
+target.file = irfFile;
+target.fileType = lower(regexprep(ext, '^\.', ''));
+target.status = 'ok';
+
+try
+    curve = readTcspcFile(target, opts, 'irf');
+catch ME
+    suppliedIrf.message = ME.message;
+    return;
+end
+
+irf = sanitizeIrf(curve.counts);
+if ~any(irf > 0)
+    suppliedIrf.message = 'Supplied IRF contains no positive counts.';
+    return;
+end
+
+suppliedIrf.status = 'ok';
+suppliedIrf.message = sprintf('Supplied IRF read from %s.', irfFile);
+suppliedIrf.method = ['supplied_' curve.fileType];
+suppliedIrf.file = irfFile;
+suppliedIrf.curveName = curve.curveName;
+suppliedIrf.timeSec = curve.timeSec(:);
+suppliedIrf.counts = irf(:);
+suppliedIrf.summedCounts = curve.counts(:);
+suppliedIrf.head = curve.head;
+suppliedIrf.params = struct('source', 'supplied', 'file', irfFile, ...
+    'fileType', curve.fileType, 'curveName', curve.curveName, ...
+    'meta', curve.meta);
 end
 
 function globalIrf = calculateGlobalIrf(curves, opts)
@@ -607,9 +719,13 @@ end
 
 irfSource = '';
 irfInfo = struct();
-if strcmp(opts.irfMode, 'global') && strcmp(globalIrf.status, 'ok')
+if any(strcmp(opts.irfMode, {'global', 'supplied'})) && strcmp(globalIrf.status, 'ok')
     irfOnAxis = mapIrfToDecayAxis(globalIrf.timeSec, globalIrf.counts, decayTimeSec, dtSec);
-    irfSource = ['global_' globalIrf.method];
+    if strcmp(opts.irfMode, 'global')
+        irfSource = ['global_' globalIrf.method];
+    else
+        irfSource = globalIrf.method;
+    end
     irfInfo = globalIrf;
 else
     irfOnAxis = zeros(size(decayCounts));
@@ -617,7 +733,7 @@ end
 
 if ~any(irfOnAxis > 0)
     if ~opts.fallbackPerCurveIrf
-        error('No usable global IRF for %s, and fallbackPerCurveIrf is false.', curve.file);
+        error('No usable batch IRF for %s, and fallbackPerCurveIrf is false.', curve.file);
     end
     [irfOnAxis, params] = calcMirfOnDecayAxis(decayCounts, dtSec, pulsePeriodSec);
     irfSource = 'per_curve_calc_mirf';
@@ -1024,6 +1140,24 @@ end
 
 [~, keep] = unique(paths, 'stable');
 files = files(keep);
+end
+
+function mask = containsAny(values, needles)
+mask = false(size(values));
+for ii = 1:numel(values)
+    for jj = 1:numel(needles)
+        if ~isempty(strfind(values{ii}, needles{jj}))
+            mask(ii) = true;
+            break;
+        end
+    end
+end
+end
+
+function values = lowerCell(values)
+for ii = 1:numel(values)
+    values{ii} = lower(values{ii});
+end
 end
 
 function stem = safeFileStem(stem)
