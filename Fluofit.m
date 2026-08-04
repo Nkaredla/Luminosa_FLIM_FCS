@@ -80,8 +80,13 @@ if isempty(tauInput) && init == 0
 end
 
 if init>0 
-    [distAmps, tauRates, ~, c] = DistFluofit(irf, y, p, dt, [], 0);
-    tau = distDistributionToLifetimeSeeds(distAmps, tauRates);
+    try
+        [~, tauRates, ~, c] = DistFluofit(irf, y, p, dt, [], 1);
+        tau = distRatesToLifetimeSeeds(tauRates);
+    catch
+        [distAmps, tauRates, ~, c] = DistFluofit(irf, y, p, dt, [], 0);
+        tau = distDistributionToLifetimeSeeds(distAmps, tauRates);
+    end
     if isempty(tau)
         tau = validLifetimeSeeds(tauInput);
     end
@@ -213,6 +218,14 @@ if ~strcmpi(ampMode, 'ls')
     A = max(A, 0);
 end
 zfit = M * A;
+end
+
+function tauNs = distRatesToLifetimeSeeds(tauRates)
+tauRates = real(double(tauRates(:).'));
+tauRates = tauRates(isfinite(tauRates) & tauRates > 0);
+tauNs = 1 ./ tauRates;
+tauNs = tauNs(isfinite(tauNs) & tauNs > 0);
+tauNs = unique(tauNs, 'stable');
 end
 
 function tauNs = distDistributionToLifetimeSeeds(distAmps, tauRates)

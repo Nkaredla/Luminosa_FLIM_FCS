@@ -18,10 +18,18 @@ function results = fit_natasha_pqres_with_fluofit(dataFolder, outputFolder, opts
 %   opts.fluofitSolver - 'mle', 'ls', or 'pirls', default 'mle'
 %   opts.plotFits    - draw Fluofit figures, default false
 %   opts.irfMode     - 'supplied' or 'parametric', default 'supplied'
-%   opts.irfModel    - parametric IRF model, default 'calc_mirf'
+%   opts.irfModel    - parametric IRF model, default 'calc_mirf'.
+%                      Use 'spad_exgauss' for a SPAD Gaussian peak plus
+%                      one-sided exponential tail model.
+%   opts.irfClipFraction - for Calc_mIRF IRFs, set values below this
+%                      fraction of max(IRF) to zero before fitting,
+%                      default 1e-3
 %   opts.rejectFirstTimePoint - default true for this Natasha dataset
 %   opts.rejectTailAtOrAfterNs - default 12.5; set [] to disable
 %   opts.rejectTailNPoints - default 8; used with rejectTailAtOrAfterNs
+%   opts.summaryAmplitudeThreshold - omit components below this relative
+%                      amplitude from the summary CSV only, default 0.02.
+%                      Use 0 to disable.
 
 if nargin < 1 || isempty(dataFolder)
     dataFolder = 'D:\Luminosa\Data\Natasha';
@@ -105,6 +113,10 @@ results = repmat(struct( ...
     'peakCounts', NaN, ...
     'tauNs', '', ...
     'amplitudes', '', ...
+    'relativeAmplitudes', '', ...
+    'nComponents', NaN, ...
+    'nReportedComponents', NaN, ...
+    'nRemovedLowAmplitude', NaN, ...
     'chi', NaN, ...
     'status', '', ...
     'message', ''), numel(decayFiles), 1);
@@ -149,8 +161,14 @@ for kk = 1:numel(decayFiles)
         results(kk).nBins = numel(fitInput.counts);
         results(kk).nRejected = fitInput.gateInfo.nRejected;
         results(kk).peakCounts = max(fitInput.counts);
-        results(kk).tauNs = mat2str(fitResult.tauNs(:).', 5);
-        results(kk).amplitudes = mat2str(fitResult.amplitudes(:).', 5);
+        summaryComponents = filterSummaryComponents( ...
+            fitResult.tauNs, fitResult.amplitudes, opts.summaryAmplitudeThreshold);
+        results(kk).tauNs = mat2str(summaryComponents.tauNs(:).', 5);
+        results(kk).amplitudes = mat2str(summaryComponents.amplitudes(:).', 5);
+        results(kk).relativeAmplitudes = mat2str(summaryComponents.relativeAmplitudes(:).', 5);
+        results(kk).nComponents = summaryComponents.nComponents;
+        results(kk).nReportedComponents = summaryComponents.nReportedComponents;
+        results(kk).nRemovedLowAmplitude = summaryComponents.nRemovedLowAmplitude;
         results(kk).chi = fitResult.chi;
         results(kk).status = 'ok';
         results(kk).message = '';
@@ -192,6 +210,20 @@ end
 if ~isfield(opts, 'plotFits') || isempty(opts.plotFits)
     opts.plotFits = false;
 end
+if ~isfield(opts, 'summaryAmplitudeThreshold') || isempty(opts.summaryAmplitudeThreshold)
+    opts.summaryAmplitudeThreshold = 0.02;
+end
+opts.summaryAmplitudeThreshold = double(opts.summaryAmplitudeThreshold);
+if ~isscalar(opts.summaryAmplitudeThreshold) || ~isfinite(opts.summaryAmplitudeThreshold) || opts.summaryAmplitudeThreshold < 0
+    error('opts.summaryAmplitudeThreshold must be a finite non-negative scalar.');
+end
+if opts.summaryAmplitudeThreshold > 1
+    if opts.summaryAmplitudeThreshold <= 100
+        opts.summaryAmplitudeThreshold = opts.summaryAmplitudeThreshold / 100;
+    else
+        error('opts.summaryAmplitudeThreshold must be given as a fraction or percentage.');
+    end
+end
 if ~isfield(opts, 'irfMode') || isempty(opts.irfMode)
     opts.irfMode = 'supplied';
 %     opts.irfMode = 'parametric';
@@ -205,12 +237,19 @@ if ~isfield(opts, 'irfModel') || isempty(opts.irfModel)
 end
 opts.irfModel = lower(char(opts.irfModel));
 opts.irfModel = strrep(opts.irfModel, '-', '_');
-validIrfModels = {'calc_mirf', 'calcirf', 'walther', 'irf_fun', 'gaussian'};
+validIrfModels = {'calc_mirf', 'calcirf', 'walther', 'irf_fun', ...
+    'gaussian', 'spad_exgauss', 'spad_exgaussian', 'exgauss', 'ex_gauss'};
 if ~any(strcmp(opts.irfModel, validIrfModels))
-    error('opts.irfModel must be ''calc_mirf'' or ''gaussian''.');
+    error('opts.irfModel must be ''calc_mirf'', ''gaussian'', or ''spad_exgauss''.');
 end
 if ~isfield(opts, 'irfParams')
     opts.irfParams = [];
+end
+if ~isfield(opts, 'spadIrfOptions') || isempty(opts.spadIrfOptions)
+    opts.spadIrfOptions = struct();
+end
+if ~isfield(opts, 'irfClipFraction')
+    opts.irfClipFraction = 1e-3;
 end
 if ~isfield(opts, 'rejectFirstTimePoint') || isempty(opts.rejectFirstTimePoint)
     opts.rejectFirstTimePoint = true;
@@ -574,7 +613,9 @@ function [irfOnAxis, params] = parametricIrfOnDecayAxis(irfTimeSec, irfCounts, .
     decayTimeSec, decayCounts, dtSec, pulsePeriodSec, opts)
 switch lower(opts.irfModel)
     case {'calc_mirf', 'calcirf', 'walther', 'irf_fun'}
-        [irfOnAxis, params] = calcMirfOnDecayAxis(decayCounts, dtSec, pulsePeriodSec);
+        [irfOnAxis, params] = calcMirfOnDecayAxis(decayCounts, dtSec, pulsePeriodSec, opts);
+    case {'spad_exgauss', 'spad_exgaussian', 'exgauss', 'ex_gauss'}
+        [irfOnAxis, params] = spadExGaussIrfOnDecayAxis(decayCounts, dtSec, pulsePeriodSec, opts);
     case 'gaussian'
         if ~isempty(opts.irfParams)
             params = parseIrfParams(opts.irfParams);
@@ -591,7 +632,7 @@ end
 irfOnAxis = max(double(irfOnAxis(:)), 0);
 end
 
-function [irfOnAxis, params] = calcMirfOnDecayAxis(decayCounts, dtSec, pulsePeriodSec)
+function [irfOnAxis, params] = calcMirfOnDecayAxis(decayCounts, dtSec, pulsePeriodSec, opts)
 if exist('Calc_mIRF', 'file') ~= 2
     error('Could not find Calc_mIRF.m on the MATLAB path.');
 end
@@ -602,6 +643,7 @@ head.SyncRate = 1 / pulsePeriodSec;
 
 tcspc = double(decayCounts(:).');
 irf = Calc_mIRF(head, tcspc);
+[irf, clipInfo] = clipIrfBelowFraction(irf, opts.irfClipFraction);
 irfOnAxis = squeeze(irf);
 irfOnAxis = double(irfOnAxis(:));
 
@@ -609,7 +651,59 @@ params = struct();
 params.source = 'Calc_mIRF';
 params.model = 'IRF_Fun';
 params.head = head;
+params.clipInfo = clipInfo;
 params.note = 'Estimated by existing Calc_mIRF(head, tcspc) code.';
+end
+
+function [irfOnAxis, params] = spadExGaussIrfOnDecayAxis(decayCounts, dtSec, pulsePeriodSec, opts)
+if exist('Calc_mIRF_Global_ExGauss_fast', 'file') ~= 2
+    error('Could not find Calc_mIRF_Global_ExGauss_fast.m.');
+end
+
+head = struct();
+head.Resolution = dtSec * 1e9;
+head.SyncRate = 1 / pulsePeriodSec;
+
+out = Calc_mIRF_Global_ExGauss_fast(head, double(decayCounts(:)), opts.tau0, opts.spadIrfOptions);
+[irf, clipInfo] = clipIrfBelowFraction(out.IRF, opts.irfClipFraction);
+irfOnAxis = double(irf(:));
+
+params = out;
+params.source = 'Calc_mIRF_Global_ExGauss_fast';
+params.model = 'SPAD ex-Gaussian';
+params.modelKey = 'spad_exgauss';
+params.head = head;
+params.clipInfo = clipInfo;
+params.note = ['SPAD IRF model: Gaussian avalanche timing peak convolved ', ...
+    'with a one-sided exponential diffusion/timing tail.'];
+end
+
+function [irf, clipInfo] = clipIrfBelowFraction(irf, fraction)
+if nargin < 2 || isempty(fraction)
+    fraction = 0;
+end
+fraction = double(fraction);
+if ~isscalar(fraction) || ~isfinite(fraction) || fraction < 0
+    error('opts.irfClipFraction must be a finite non-negative scalar.');
+end
+
+irf = real(double(squeeze(irf)));
+irf = irf(:);
+irf(~isfinite(irf)) = 0;
+irf = max(irf, 0);
+
+maxVal = max(irf);
+threshold = 0;
+nClipped = 0;
+if fraction > 0 && maxVal > 0
+    threshold = fraction * maxVal;
+    clipMask = irf < threshold;
+    nClipped = sum(clipMask);
+    irf(clipMask) = 0;
+end
+
+clipInfo = struct('fraction', fraction, 'threshold', threshold, ...
+    'maxValue', maxVal, 'nClipped', nClipped);
 end
 
 function params = fitGaussianIrfParams(irfTimeSec, irfCounts, decayTimeSec)
@@ -743,6 +837,44 @@ fitResult.irfShifted = irfShifted;
 fitResult.components = components;
 fitResult.timeAxisNs = tAxisNs;
 fitResult.chi = chi;
+end
+
+function components = filterSummaryComponents(tauNs, amplitudes, relThreshold)
+tauNs = real(double(tauNs(:)));
+amplitudes = real(double(amplitudes(:)));
+n = min(numel(tauNs), numel(amplitudes));
+tauNs = tauNs(1:n);
+amplitudes = amplitudes(1:n);
+
+valid = isfinite(tauNs) & tauNs > 0 & isfinite(amplitudes);
+positiveAmplitudes = amplitudes;
+positiveAmplitudes(~isfinite(positiveAmplitudes) | positiveAmplitudes < 0) = 0;
+totalPositiveAmplitude = sum(positiveAmplitudes(valid));
+
+relativeAmplitudes = NaN(size(amplitudes));
+if totalPositiveAmplitude > 0
+    relativeAmplitudes(valid) = positiveAmplitudes(valid) ./ totalPositiveAmplitude;
+end
+
+if relThreshold > 0 && totalPositiveAmplitude > 0
+    keep = valid & relativeAmplitudes >= relThreshold;
+else
+    keep = valid;
+end
+
+if ~any(keep) && any(valid)
+    validIdx = find(valid);
+    [~, bestIdx] = max(positiveAmplitudes(validIdx));
+    keep(validIdx(bestIdx)) = true;
+end
+
+components = struct();
+components.tauNs = tauNs(keep);
+components.amplitudes = amplitudes(keep);
+components.relativeAmplitudes = relativeAmplitudes(keep);
+components.nComponents = sum(valid);
+components.nReportedComponents = sum(keep);
+components.nRemovedLowAmplitude = max(0, components.nComponents - components.nReportedComponents);
 end
 
 function idx = chooseIrfForDecay(decayName, irfFiles)
