@@ -51,6 +51,15 @@ function batch = fit_tcspc_subfolders_with_fluofit(rootFolder, outputFolder, opt
 %                              omit components below this relative
 %                              amplitude from the summary CSV only,
 %                              default 0.02. Use 0 to disable.
+%   opts.errorMethod           'none', 'bootstrap', or 'chunk'. Bootstrap
+%                              Poisson-resamples the fitted/observed TCSPC
+%                              histogram and refits each sample. Chunk uses
+%                              Poisson-thinned histogram chunks. Default
+%                              'none'.
+%   opts.nErrorSamples         bootstrap sample count, default 25
+%   opts.errorChunks           chunk count when opts.errorMethod='chunk',
+%                              default 8
+%   opts.errorResampleSource   'fit' or 'counts', default 'fit'
 %   opts.irfMode               'per_curve', 'best_per_curve', 'global', or
 %                              'supplied', default 'per_curve'.
 %                              'best_per_curve' estimates one IRF per file,
@@ -211,6 +220,7 @@ for kk = 1:numel(curves)
             fitInput = buildBatchFitInput(curves(kk), batchIrf, opts);
             [fitResult, fitFigures] = runBatchFluofit(fitInput, opts);
         end
+        fitResult = addFitUncertainty(fitInput, fitResult, opts);
 
         [~, stem] = fileparts(curves(kk).file);
         outStem = safeFileStem([curves(kk).folderName '_' stem]);
@@ -262,6 +272,18 @@ for kk = 1:numel(curves)
         summary(kk).nComponents = summaryComponents.nComponents;
         summary(kk).nReportedComponents = summaryComponents.nReportedComponents;
         summary(kk).nRemovedLowAmplitude = summaryComponents.nRemovedLowAmplitude;
+        summary(kk).tauErrorNs = mat2str( ...
+            filterVectorForSummary(getResampleErrorVector(fitResult, 'tauStdNs'), ...
+            summaryComponents.keepMask), 5);
+        summary(kk).amplitudeError = mat2str( ...
+            filterVectorForSummary(getResampleErrorVector(fitResult, 'amplitudeStd'), ...
+            summaryComponents.keepMask), 5);
+        summary(kk).relativeAmplitudeError = mat2str( ...
+            filterVectorForSummary(getResampleErrorVector(fitResult, 'relativeAmplitudeStd'), ...
+            summaryComponents.keepMask), 5);
+        [summary(kk).errorMethod, summary(kk).nErrorSamples, summary(kk).nErrorSamplesOk, ...
+            summary(kk).errorStatus, summary(kk).errorMessage] = ...
+            summarizeResampleErrorStatus(fitResult);
         summary(kk).chi = fitResult.chi;
         summary(kk).status = 'ok';
         summary(kk).message = '';
@@ -356,6 +378,53 @@ if opts.summaryAmplitudeThreshold > 1
         opts.summaryAmplitudeThreshold = opts.summaryAmplitudeThreshold / 100;
     else
         error('opts.summaryAmplitudeThreshold must be given as a fraction or percentage.');
+    end
+end
+if ~isfield(opts, 'errorMethod') || isempty(opts.errorMethod)
+    opts.errorMethod = 'none';
+end
+opts.errorMethod = lower(strrep(char(opts.errorMethod), '-', '_'));
+if any(strcmp(opts.errorMethod, {'off', 'disable', 'disabled', 'false'}))
+    opts.errorMethod = 'none';
+elseif any(strcmp(opts.errorMethod, {'poisson', 'poisson_bootstrap', 'boot'}))
+    opts.errorMethod = 'bootstrap';
+end
+if ~any(strcmp(opts.errorMethod, {'none', 'bootstrap', 'chunk'}))
+    error('opts.errorMethod must be ''none'', ''bootstrap'', or ''chunk''.');
+end
+if ~isfield(opts, 'nErrorSamples') || isempty(opts.nErrorSamples)
+    opts.nErrorSamples = 25;
+end
+opts.nErrorSamples = double(opts.nErrorSamples);
+if ~isscalar(opts.nErrorSamples) || ~isfinite(opts.nErrorSamples) || opts.nErrorSamples < 0
+    error('opts.nErrorSamples must be a finite non-negative scalar.');
+end
+opts.nErrorSamples = round(opts.nErrorSamples);
+if ~isfield(opts, 'errorChunks') || isempty(opts.errorChunks)
+    opts.errorChunks = 8;
+end
+opts.errorChunks = double(opts.errorChunks);
+if ~isscalar(opts.errorChunks) || ~isfinite(opts.errorChunks) || opts.errorChunks < 0
+    error('opts.errorChunks must be a finite non-negative scalar.');
+end
+opts.errorChunks = round(opts.errorChunks);
+if ~isfield(opts, 'errorResampleSource') || isempty(opts.errorResampleSource)
+    opts.errorResampleSource = 'fit';
+end
+opts.errorResampleSource = lower(strrep(char(opts.errorResampleSource), '-', '_'));
+if ~any(strcmp(opts.errorResampleSource, {'fit', 'counts', 'data'}))
+    error('opts.errorResampleSource must be ''fit'' or ''counts''.');
+end
+if strcmp(opts.errorResampleSource, 'data')
+    opts.errorResampleSource = 'counts';
+end
+if ~isfield(opts, 'errorRandomSeed')
+    opts.errorRandomSeed = [];
+end
+if ~isempty(opts.errorRandomSeed)
+    opts.errorRandomSeed = double(opts.errorRandomSeed);
+    if ~isscalar(opts.errorRandomSeed) || ~isfinite(opts.errorRandomSeed) || opts.errorRandomSeed < 0
+        error('opts.errorRandomSeed must be empty or a finite non-negative scalar.');
     end
 end
 if ~isfield(opts, 'irfMode') || isempty(opts.irfMode)
@@ -589,6 +658,9 @@ summary = struct('folder', '', 'file', '', 'fileType', '', 'fitMethod', '', ...
     'totalCounts', NaN, 'peakCounts', NaN, 'tauNs', '', ...
     'amplitudes', '', 'relativeAmplitudes', '', 'nComponents', NaN, ...
     'nReportedComponents', NaN, 'nRemovedLowAmplitude', NaN, ...
+    'tauErrorNs', '', 'amplitudeError', '', 'relativeAmplitudeError', '', ...
+    'errorMethod', '', 'nErrorSamples', NaN, 'nErrorSamplesOk', NaN, ...
+    'errorStatus', '', 'errorMessage', '', ...
     'chi', NaN, 'status', 'pending', 'message', '');
 end
 
@@ -1798,6 +1870,383 @@ components.relativeAmplitudes = relativeAmplitudes(keep);
 components.nComponents = sum(valid);
 components.nReportedComponents = sum(keep);
 components.nRemovedLowAmplitude = max(0, components.nComponents - components.nReportedComponents);
+components.keepMask = keep(:);
+end
+
+function fitResult = addFitUncertainty(fitInput, fitResult, opts)
+fitResult.resampleError = emptyResampleError(opts.errorMethod, ...
+    'Resampling was not run.');
+
+if strcmp(opts.errorMethod, 'none')
+    fitResult.resampleError.message = 'Disabled by opts.errorMethod=''none''.';
+    return;
+end
+
+if strcmp(opts.errorMethod, 'bootstrap')
+    nSamples = opts.nErrorSamples;
+    stderrDivisor = 1;
+elseif strcmp(opts.errorMethod, 'chunk')
+    nSamples = opts.errorChunks;
+    stderrDivisor = sqrt(max(nSamples, 1));
+else
+    error('Unsupported uncertainty method: %s', opts.errorMethod);
+end
+
+if nSamples < 2
+    fitResult.resampleError.status = 'skipped';
+    fitResult.resampleError.message = 'At least two resamples are required.';
+    return;
+end
+
+if ~isempty(opts.errorRandomSeed)
+    rngSeed = mod(round(double(opts.errorRandomSeed)) + stringHash(fitInput.file), 2^31 - 1);
+    rng(rngSeed, 'twister');
+else
+    rngSeed = NaN;
+end
+
+lambdaFull = uncertaintyLambda(fitInput, fitResult, opts);
+if strcmp(opts.errorMethod, 'chunk')
+    lambdaPerSample = lambdaFull ./ nSamples;
+    sampleScale = nSamples;
+else
+    lambdaPerSample = lambdaFull;
+    sampleScale = 1;
+end
+
+refTauNs = real(double(fitResult.tauNs(:)));
+refAmplitudes = real(double(fitResult.amplitudes(:)));
+nComp = min(numel(refTauNs), numel(refAmplitudes));
+refTauNs = refTauNs(1:nComp);
+refAmplitudes = refAmplitudes(1:nComp);
+
+tauSamples = NaN(nSamples, nComp);
+amplitudeSamples = NaN(nSamples, nComp);
+relativeAmplitudeSamples = NaN(nSamples, nComp);
+offsetSamples = NaN(nSamples, 1);
+chiSamples = NaN(nSamples, 1);
+messages = cell(nSamples, 1);
+ok = false(nSamples, 1);
+
+for ii = 1:nSamples
+    try
+        ySample = poissonRandomCounts(lambdaPerSample) .* sampleScale;
+        sample = refitSampleCounts(fitInput, fitResult, opts, ySample);
+        [tauAligned, ampAligned] = alignComponentsToReference( ...
+            refTauNs, sample.tauNs, sample.amplitudes);
+        tauSamples(ii, :) = tauAligned(:).';
+        amplitudeSamples(ii, :) = ampAligned(:).';
+        relativeAmplitudeSamples(ii, :) = relativeAmplitudesFromAmplitudes(ampAligned).';
+        offsetSamples(ii) = sample.offset;
+        chiSamples(ii) = sample.chi;
+        ok(ii) = true;
+    catch ME
+        messages{ii} = ME.message;
+    end
+end
+
+resampleError = emptyResampleError(opts.errorMethod, '');
+resampleError.status = 'ok';
+if ~any(ok)
+    resampleError.status = 'failed';
+    resampleError.message = 'All resampled fits failed.';
+elseif sum(ok) < max(3, ceil(0.5*nSamples))
+    resampleError.status = 'partial';
+    resampleError.message = sprintf('%d of %d resampled fits succeeded.', sum(ok), nSamples);
+else
+    resampleError.message = sprintf('%d of %d resampled fits succeeded.', sum(ok), nSamples);
+end
+
+resampleError.method = opts.errorMethod;
+resampleError.source = opts.errorResampleSource;
+resampleError.randomSeed = rngSeed;
+resampleError.nRequested = nSamples;
+resampleError.nSucceeded = sum(ok);
+resampleError.stderrDivisor = stderrDivisor;
+resampleError.referenceTauNs = refTauNs(:);
+resampleError.referenceAmplitudes = refAmplitudes(:);
+resampleError.referenceRelativeAmplitudes = relativeAmplitudesFromAmplitudes(refAmplitudes);
+resampleError.tauSamplesNs = tauSamples;
+resampleError.amplitudeSamples = amplitudeSamples;
+resampleError.relativeAmplitudeSamples = relativeAmplitudeSamples;
+resampleError.offsetSamples = offsetSamples;
+resampleError.chiSamples = chiSamples;
+resampleError.failedMessages = messages(~ok);
+resampleError.tauStdNs = nanStdColumns(tauSamples(ok, :)) ./ stderrDivisor;
+resampleError.amplitudeStd = nanStdColumns(amplitudeSamples(ok, :)) ./ stderrDivisor;
+resampleError.relativeAmplitudeStd = nanStdColumns(relativeAmplitudeSamples(ok, :)) ./ stderrDivisor;
+resampleError.offsetStd = nanStdColumns(offsetSamples(ok)) ./ stderrDivisor;
+resampleError.chiStd = nanStdColumns(chiSamples(ok)) ./ stderrDivisor;
+resampleError.tauMedianNs = nanPercentileColumns(tauSamples(ok, :), 50);
+resampleError.amplitudeMedian = nanPercentileColumns(amplitudeSamples(ok, :), 50);
+resampleError.relativeAmplitudeMedian = nanPercentileColumns(relativeAmplitudeSamples(ok, :), 50);
+resampleError.tauCI68Ns = [nanPercentileColumns(tauSamples(ok, :), 16); ...
+    nanPercentileColumns(tauSamples(ok, :), 84)];
+resampleError.amplitudeCI68 = [nanPercentileColumns(amplitudeSamples(ok, :), 16); ...
+    nanPercentileColumns(amplitudeSamples(ok, :), 84)];
+resampleError.relativeAmplitudeCI68 = [nanPercentileColumns(relativeAmplitudeSamples(ok, :), 16); ...
+    nanPercentileColumns(relativeAmplitudeSamples(ok, :), 84)];
+
+fitResult.resampleError = resampleError;
+fitResult.tauResampleErrorNs = resampleError.tauStdNs(:);
+fitResult.amplitudeResampleError = resampleError.amplitudeStd(:);
+fitResult.relativeAmplitudeResampleError = resampleError.relativeAmplitudeStd(:);
+end
+
+function resampleError = emptyResampleError(method, message)
+resampleError = struct();
+resampleError.status = 'skipped';
+resampleError.method = method;
+resampleError.source = '';
+resampleError.message = message;
+resampleError.randomSeed = NaN;
+resampleError.nRequested = 0;
+resampleError.nSucceeded = 0;
+resampleError.stderrDivisor = 1;
+resampleError.referenceTauNs = [];
+resampleError.referenceAmplitudes = [];
+resampleError.referenceRelativeAmplitudes = [];
+resampleError.tauSamplesNs = [];
+resampleError.amplitudeSamples = [];
+resampleError.relativeAmplitudeSamples = [];
+resampleError.offsetSamples = [];
+resampleError.chiSamples = [];
+resampleError.failedMessages = {};
+resampleError.tauStdNs = [];
+resampleError.amplitudeStd = [];
+resampleError.relativeAmplitudeStd = [];
+resampleError.offsetStd = NaN;
+resampleError.chiStd = NaN;
+resampleError.tauMedianNs = [];
+resampleError.amplitudeMedian = [];
+resampleError.relativeAmplitudeMedian = [];
+resampleError.tauCI68Ns = [];
+resampleError.amplitudeCI68 = [];
+resampleError.relativeAmplitudeCI68 = [];
+end
+
+function lambda = uncertaintyLambda(fitInput, fitResult, opts)
+if strcmp(opts.errorResampleSource, 'counts')
+    lambda = fitInput.counts(:);
+else
+    lambda = [];
+    if strcmp(fitResult.fitMethod, 'tail') && isfield(fitResult, 'tailFit')
+        lambda = fitResult.tailFit(:);
+    elseif isfield(fitResult, 'components') && ~isempty(fitResult.components)
+        lambda = sum(real(double(fitResult.components)), 2);
+    end
+    if numel(lambda) ~= numel(fitInput.counts) || ~any(isfinite(lambda) & lambda > 0)
+        lambda = fitInput.counts(:);
+    end
+end
+lambda = real(double(lambda(:)));
+lambda(~isfinite(lambda)) = 0;
+lambda = max(lambda, 0);
+end
+
+function sample = refitSampleCounts(fitInput, fitResult, opts, ySample)
+ySample = max(real(double(ySample(:))), 0);
+switch fitResult.fitMethod
+    case 'tail'
+        tauStart = real(double(fitResult.tauNs(:))).';
+        limits = resampleLimitsForTau(fitInput.limitsNs, tauStart);
+        [tauNs, amplitudes, offset, ~, ~, chi] = Tailfit(ySample, fitInput.dtNs, ...
+            tauStart, limits, opts.tailSolver, 0, opts.tailSimplexSteps);
+    case 'fluofit'
+        tauStart = real(double(fitResult.tauNs(:))).';
+        limits = resampleLimitsForTau(fitInput.limitsNs, tauStart);
+        [~, offset, amplitudes, tauNs, ~, ~, ~, ~, ~, chi] = ...
+            Fluofit(fitInput.irf, ySample, fitInput.pulsePeriodNs, ...
+            fitInput.dtNs, tauStart, limits, 0, ...
+            opts.fluofitSolver, false);
+    otherwise
+        error('Unsupported fit method for uncertainty refit: %s', fitResult.fitMethod);
+end
+sample = struct();
+sample.tauNs = real(double(tauNs(:)));
+sample.amplitudes = real(double(amplitudes(:)));
+sample.offset = real(double(offset));
+sample.chi = real(double(chi));
+end
+
+function limits = resampleLimitsForTau(limitsIn, tauStart)
+limits = [];
+if isempty(limitsIn)
+    return;
+end
+
+tauStart = real(double(tauStart(:)));
+nTau = numel(tauStart);
+limitsIn = real(double(limitsIn));
+if isvector(limitsIn)
+    if numel(limitsIn) == 2 || numel(limitsIn) == 2*nTau
+        limits = limitsIn(:).';
+    end
+elseif isequal(size(limitsIn), [nTau 2])
+    limits = limitsIn;
+end
+end
+
+function y = poissonRandomCounts(lambda)
+lambda = max(real(double(lambda(:))), 0);
+if exist('poissrnd', 'file') == 2
+    y = poissrnd(lambda);
+    y = double(y(:));
+    return;
+end
+
+y = zeros(size(lambda));
+small = lambda < 35;
+idx = find(small & lambda > 0);
+for ii = 1:numel(idx)
+    lam = lambda(idx(ii));
+    limit = exp(-lam);
+    count = 0;
+    product = 1;
+    while product > limit
+        count = count + 1;
+        product = product * rand;
+    end
+    y(idx(ii)) = count - 1;
+end
+
+large = ~small;
+if any(large)
+    approx = lambda(large) + sqrt(lambda(large)) .* randn(sum(large), 1);
+    y(large) = max(0, round(approx));
+end
+end
+
+function [tauAligned, ampAligned] = alignComponentsToReference(refTau, tau, amp)
+refTau = real(double(refTau(:)));
+tau = real(double(tau(:)));
+amp = real(double(amp(:)));
+nRef = numel(refTau);
+tauAligned = NaN(nRef, 1);
+ampAligned = NaN(nRef, 1);
+
+validSample = isfinite(tau) & tau > 0 & isfinite(amp);
+tau = tau(validSample);
+amp = amp(validSample);
+unused = true(numel(tau), 1);
+
+for jj = 1:nRef
+    if isempty(tau) || ~isfinite(refTau(jj)) || refTau(jj) <= 0 || ~any(unused)
+        continue;
+    end
+    candidates = find(unused);
+    distance = abs(log(tau(candidates) ./ refTau(jj)));
+    [~, bestLocal] = min(distance);
+    bestIdx = candidates(bestLocal);
+    tauAligned(jj) = tau(bestIdx);
+    ampAligned(jj) = amp(bestIdx);
+    unused(bestIdx) = false;
+end
+end
+
+function relAmp = relativeAmplitudesFromAmplitudes(amplitudes)
+amplitudes = real(double(amplitudes(:)));
+positiveAmplitudes = amplitudes;
+positiveAmplitudes(~isfinite(positiveAmplitudes) | positiveAmplitudes < 0) = 0;
+total = sum(positiveAmplitudes);
+relAmp = NaN(size(amplitudes));
+if total > 0
+    relAmp = positiveAmplitudes ./ total;
+end
+end
+
+function values = getResampleErrorVector(fitResult, fieldName)
+values = [];
+if isfield(fitResult, 'resampleError') && isfield(fitResult.resampleError, fieldName)
+    values = fitResult.resampleError.(fieldName);
+end
+end
+
+function values = filterVectorForSummary(values, keepMask)
+values = real(double(values(:)));
+keepMask = logical(keepMask(:));
+if isempty(values) || isempty(keepMask)
+    values = [];
+    return;
+end
+n = min(numel(values), numel(keepMask));
+values = values(1:n);
+keepMask = keepMask(1:n);
+values = values(keepMask);
+end
+
+function [method, nRequested, nSucceeded, status, message] = summarizeResampleErrorStatus(fitResult)
+method = '';
+nRequested = NaN;
+nSucceeded = NaN;
+status = '';
+message = '';
+if isfield(fitResult, 'resampleError') && isstruct(fitResult.resampleError)
+    method = fitResult.resampleError.method;
+    nRequested = fitResult.resampleError.nRequested;
+    nSucceeded = fitResult.resampleError.nSucceeded;
+    status = fitResult.resampleError.status;
+    message = fitResult.resampleError.message;
+end
+end
+
+function s = nanStdColumns(x)
+x = double(x);
+if isempty(x)
+    s = [];
+    return;
+end
+if isvector(x)
+    x = x(:);
+end
+s = NaN(1, size(x, 2));
+for jj = 1:size(x, 2)
+    col = x(:, jj);
+    col = col(isfinite(col));
+    if numel(col) >= 2
+        s(jj) = std(col, 0);
+    elseif numel(col) == 1
+        s(jj) = 0;
+    end
+end
+end
+
+function p = nanPercentileColumns(x, pct)
+x = double(x);
+if isempty(x)
+    p = [];
+    return;
+end
+if isvector(x)
+    x = x(:);
+end
+p = NaN(1, size(x, 2));
+for jj = 1:size(x, 2)
+    col = sort(x(isfinite(x(:, jj)), jj));
+    if isempty(col)
+        continue;
+    end
+    if numel(col) == 1
+        p(jj) = col(1);
+    else
+        pos = 1 + (numel(col) - 1) * pct / 100;
+        lo = floor(pos);
+        hi = ceil(pos);
+        if lo == hi
+            p(jj) = col(lo);
+        else
+            p(jj) = col(lo) + (pos - lo) * (col(hi) - col(lo));
+        end
+    end
+end
+end
+
+function value = stringHash(txt)
+txt = char(txt);
+value = 0;
+for ii = 1:numel(txt)
+    value = mod(value * 131 + double(txt(ii)), 2^31 - 1);
+end
 end
 
 function val = distRateMeanTau(rates, amplitudes)
