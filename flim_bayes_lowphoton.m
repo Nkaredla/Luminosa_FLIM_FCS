@@ -56,6 +56,12 @@ function out = flim_bayes_lowphoton(tcspc_pix, irf, pulsePeriodNs, dtNs, tau0, o
     if ~isfield(opts, 'shiftBounds') || isempty(opts.shiftBounds)
         opts.shiftBounds = [-5 5];
     end
+    if ~isfield(opts, 'minStateSeparationFraction') || isempty(opts.minStateSeparationFraction)
+        opts.minStateSeparationFraction = 0.10;
+    end
+    if ~isfield(opts, 'minStateAmplitudeFraction') || isempty(opts.minStateAmplitudeFraction)
+        opts.minStateAmplitudeFraction = 0.02;
+    end
     Ypix = single(tcspc_pix);
     if ndims(Ypix) == 4
         Ypix = sum(Ypix, 4);
@@ -91,6 +97,8 @@ function out = flim_bayes_lowphoton(tcspc_pix, irf, pulsePeriodNs, dtNs, tau0, o
     globalDecay = double(globalDecay(:));
 
     seedFit = fit_global_bayes_seed(globalDecay, irf, modelPeriodNs, dtNs, tau0Use, opts);
+    [seedFit, modelSelection] = collapse_redundant_two_state_seed( ...
+        seedFit, globalDecay, irf, modelPeriodNs, dtNs, opts);
 
     [AmpSeed, ~, pmSeedInfo] = PatternMatchIm_matlab(Ypix, seedFit.modelMatrix, 'PIRLS', opts.useGPU, opts.batchSize);
     if opts.includeBackground
@@ -117,6 +125,7 @@ function out = flim_bayes_lowphoton(tcspc_pix, irf, pulsePeriodNs, dtNs, tau0, o
     out.tau0Used = tau0Use(:).';
     out.includeBackground = logical(opts.includeBackground);
     out.optimizeTau = logical(opts.optimizeTau);
+    out.modelSelection = modelSelection;
 
     out.globalFit = seedFit;
     out.seedAmp = AmpSeed;
@@ -130,6 +139,52 @@ function out = flim_bayes_lowphoton(tcspc_pix, irf, pulsePeriodNs, dtNs, tau0, o
     out.signalFractionMean = posterior.signalFractionMean;
     out.stateFractionMean = posterior.stateFractionMean;
     out.posteriorInfo = posterior.posteriorInfo;
+end
+
+function [seedFit, info] = collapse_redundant_two_state_seed(seedFit, globalDecay, irf, modelPeriodNs, dtNs, opts)
+    requestedStates = numel(seedFit.tauFit);
+    info = struct('requestedStates', requestedStates, 'usedStates', requestedStates, ...
+        'collapsed', false, 'reason', '', 'separationFraction', NaN, ...
+        'minimumAmplitudeFraction', NaN);
+    if requestedStates ~= 2
+        return;
+    end
+
+    tauFit = sort(double(seedFit.tauFit(:)), 'ascend');
+    separationFraction = abs(diff(tauFit)) / max(mean(tauFit), eps);
+    signalCoeff = double(seedFit.coeff(:));
+    if opts.includeBackground && numel(signalCoeff) >= 3
+        signalCoeff = signalCoeff(2:3);
+    else
+        signalCoeff = signalCoeff(1:min(2, numel(signalCoeff)));
+    end
+    signalCoeff = max(signalCoeff, 0);
+    if numel(signalCoeff) == 2 && sum(signalCoeff) > 0
+        amplitudeFraction = signalCoeff / sum(signalCoeff);
+        minimumAmplitudeFraction = min(amplitudeFraction);
+    else
+        amplitudeFraction = [0.5; 0.5];
+        minimumAmplitudeFraction = 0;
+    end
+
+    info.separationFraction = separationFraction;
+    info.minimumAmplitudeFraction = minimumAmplitudeFraction;
+    collapseForSeparation = separationFraction < opts.minStateSeparationFraction;
+    collapseForAmplitude = minimumAmplitudeFraction < opts.minStateAmplitudeFraction;
+    if ~(collapseForSeparation || collapseForAmplitude)
+        return;
+    end
+
+    tauSeed = sum(tauFit(:) .* amplitudeFraction(:));
+    tauSeed = max(tauSeed, 0.03);
+    seedFit = fit_global_bayes_seed(globalDecay, irf, modelPeriodNs, dtNs, tauSeed, opts);
+    info.usedStates = 1;
+    info.collapsed = true;
+    if collapseForSeparation
+        info.reason = sprintf('two-state lifetimes were unresolved (relative separation %.3g); using one state.', separationFraction);
+    else
+        info.reason = sprintf('one state carried only %.3g of the signal amplitude; using one state.', minimumAmplitudeFraction);
+    end
 end
 
 function seedFit = fit_global_bayes_seed(globalDecay, irf, modelPeriodNs, dtNs, tau0, opts)

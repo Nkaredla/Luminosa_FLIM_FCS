@@ -161,7 +161,7 @@ function Luminosa_GUI
             'Value', 'Channel 1', ...
             'Enable', 'off', ...
             'ValueChangedFcn', @onDisplayChannelChanged);
-        app.dropDisplayChannel.Tooltip = 'PIE files expose Channel 1 (L1D1) and Channel 2 (L2D2).';
+        app.dropDisplayChannel.Tooltip = 'PIE files expose every recorded laser-gate/detector combination.';
 
         % Row 4
         rowFlimWindow = uigridlayout(ctlGrid, [1 3]);
@@ -384,7 +384,7 @@ function Luminosa_GUI
 
         app.btnLoadFCS = uibutton(ctlGrid, 'Text', 'Load PTU (FCS)', 'ButtonPushedFcn', @onLoadPTU);
         app.btnUseLoaded = uibutton(ctlGrid, 'Text', 'Use Loaded PTU', 'ButtonPushedFcn', @onUseLoadedPTU);
-        uilabel(ctlGrid, 'Text', 'cnum');
+        uilabel(ctlGrid, 'Text', 'cnum (laser pulses)');
         app.editCnum = uieditfield(ctlGrid, 'numeric', 'Value', 1, 'Limits', [1 16]);
         uilabel(ctlGrid, 'Text', 'maxtime (s)');
         app.editMaxtime = uieditfield(ctlGrid, 'numeric', 'Value', 10, 'Limits', [0.01 1e3]);
@@ -757,9 +757,11 @@ function Luminosa_GUI
                             
                             addStatus(sprintf('PTU loaded with %d frames. Global IRF calculated. Use frame slider to navigate.', numFrames));
                         else
-                            % Single frame file
+                            % PTU_FLIM_GPU already loaded this single-frame file successfully.
+                            % Re-reading it with a different reader can change channel handling
+                            % and used to trigger an out-of-range subscript here.
                             app.frameSlider.Visible = 'off';
-                            loadSingleFramePTU();
+                            finalizeLoadedSingleFramePTU();
                         end
                     else
                         % Single frame file
@@ -779,6 +781,9 @@ function Luminosa_GUI
             
         catch ME
             addStatus(['Load failed: ' ME.message]);
+            if ~isempty(ME.stack)
+                addStatus(sprintf('  at %s (line %d)', ME.stack(1).name, ME.stack(1).line));
+            end
         end
         
         function loadSingleFramePTU()
@@ -798,6 +803,15 @@ function Luminosa_GUI
             app.ptuOut = buildDisplayPtuData(app.ptuOutRaw, app.currentDisplayChannel);
             app.ptuOutOriginalRaw = app.ptuOutRaw;
             app.ptuOutOriginal = app.ptuOut;
+
+            finalizeLoadedSingleFramePTU();
+        end
+
+        function finalizeLoadedSingleFramePTU()
+            % Complete display and global-fit setup for an already loaded PTU.
+            if isempty(app.ptuOut)
+                error('Loaded PTU data are empty.');
+            end
 
             img = getIntensityMap();
             if isempty(img)
@@ -1431,6 +1445,11 @@ function Luminosa_GUI
         else
             tau0Use = tau0Requested;
         end
+        if ~isempty(app.globalFit) && isfield(app.globalFit, 'nExp') && app.globalFit.nExp == 1 && ...
+                isfield(app.globalFit, 'tauFit') && ~isempty(app.globalFit.tauFit)
+            tau0Use = double(app.globalFit.tauFit(1));
+            addStatus(sprintf('Whole-file BIC selected 1-exp; FLIM_bayes will use a one-state posterior seeded at %.4g ns.', tau0Use));
+        end
 
         cacheIdx = [];
         windowSmoothingActive = hasEffectiveFlimSmoothing();
@@ -1479,6 +1498,8 @@ function Luminosa_GUI
         opts.fractionGrid = linspace(0.0, 1.0, 41);
         opts.shiftBounds = [-5 5];
         opts.singleExpTauGrid = [];
+        opts.minStateSeparationFraction = 0.10;
+        opts.minStateAmplitudeFraction = 0.02;
 
         try
             addStatus(sprintf('Running FLIM_bayes with whole-file IRF using %s...', tcspcSrc));
@@ -1498,6 +1519,9 @@ function Luminosa_GUI
 
         showFlimBayesOverlay();
         addStatus(sprintf('FLIM_bayes complete (%s, %s).', tcspcSrc, outBayes.posteriorInfo.method));
+        if isfield(outBayes, 'modelSelection') && outBayes.modelSelection.collapsed
+            addStatus(['FLIM_bayes model order: ' outBayes.modelSelection.reason]);
+        end
     end
 
     function onShowIntensity(~, ~)
@@ -3093,11 +3117,35 @@ function Luminosa_GUI
         end
         if hasPieDisplayChannels(ptuData)
             labels = getPieDisplayChannelLabels(ptuData);
-            addStatus(sprintf('PIE detected: %s and %s are available in the display selector.', labels{1}, labels{2}));
+            if isfield(ptuData.pie, 'laserIndices') && ~isempty(ptuData.pie.laserIndices)
+                nLasers = numel(unique(double(ptuData.pie.laserIndices(:))));
+            else
+                nLasers = numel(unique(double(ptuData.pie.gateStarts(:))));
+            end
+            if isfield(ptuData.pie, 'uniqueDetectorIDs') && ~isempty(ptuData.pie.uniqueDetectorIDs)
+                nDetectors = numel(ptuData.pie.uniqueDetectorIDs);
+            else
+                nDetectors = numel(unique(double(ptuData.pie.detectorIDs(:))));
+            end
+            if isfield(app, 'editCnum') && ~isempty(app.editCnum) && isvalid(app.editCnum)
+                app.editCnum.Value = nLasers;
+            end
+            addStatus(sprintf(['PIE detected: cnum=%d laser gates, dnum=%d detectors; ' ...
+                '%d recorded combinations are available in the display selector.'], ...
+                nLasers, nDetectors, numel(labels)));
+            if isfield(ptuData.pie, 'info') && isfield(ptuData.pie.info, 'peakBins') && ...
+                    isfield(ptuData.pie.info, 'gatePreNs') && ...
+                    numel(ptuData.pie.info.peakBins) == numel(ptuData.pie.laserGateStarts)
+                dtNs = double(ptuData.head.MeasDesc_Resolution) * 1e9;
+                peakOffsetsNs = (double(ptuData.pie.info.peakBins(:)) - ...
+                    double(ptuData.pie.laserGateStarts(:))) * dtNs;
+                addStatus(sprintf('PIE gates use the detected rise - %.3g ns; shifted peak offsets: %s ns.', ...
+                    ptuData.pie.info.gatePreNs, strtrim(sprintf('%.2f ', peakOffsetsNs))));
+            end
         elseif isfield(ptuData.pie, 'reason') && ~isempty(ptuData.pie.reason)
             addStatus(ptuData.pie.reason);
         elseif isfield(ptuData.pie, 'checked') && ptuData.pie.checked
-            addStatus('No PIE double-peak detected; using a single display channel.');
+            addStatus('No multiple PIE laser gates detected; using a single display channel.');
         end
     end
 
@@ -3113,11 +3161,18 @@ function Luminosa_GUI
             'checked', false, ...
             'isDetected', false, ...
             'reason', '', ...
+            'cnum', 0, ...
+            'dnum', 0, ...
             'detectorIDs', [], ...
+            'uniqueDetectorIDs', [], ...
+            'laserIndices', [], ...
+            'laserGateStarts', [], ...
+            'laserGateStops', [], ...
             'gateStarts', [], ...
             'gateStops', [], ...
             'gateLen', [], ...
-            'channelLabels', {{'Channel 1 (L1D1)', 'Channel 2 (L2D2)'}}, ...
+            'channelLabels', {{'Channel 1'}}, ...
+            'photonCounts', [], ...
             'info', struct(), ...
             'activeIndex', 1, ...
             'activeLabel', '', ...
@@ -3130,39 +3185,100 @@ function Luminosa_GUI
             return;
         end
 
-        detectorIDs = [];
+        detectorIDs = zeros(0, 1);
         if isfield(ptuData, 'dind') && ~isempty(ptuData.dind)
-            detectorIDs = double(ptuData.dind(:));
-        else
-            detectorIDs = unique(double(ptuData.im_chan(:)));
+            detectorIDs = [detectorIDs; double(ptuData.dind(:))];
         end
-        detectorIDs = detectorIDs(isfinite(detectorIDs));
-        if numel(detectorIDs) < 2
+        if isfield(ptuData, 'im_chan') && ~isempty(ptuData.im_chan)
+            detectorIDs = [detectorIDs; double(ptuData.im_chan(:))];
+        end
+        detectorIDs = unique(detectorIDs(isfinite(detectorIDs)), 'stable');
+        if isempty(detectorIDs)
             pie.checked = true;
-            pie.reason = 'PIE check skipped: fewer than two detector channels were found.';
+            pie.reason = 'PIE check skipped: no detector channels were found.';
             ptuData.pie = pie;
             return;
         end
 
         try
+            coarseDtNs = double(ptuData.head.MeasDesc_Resolution) * 1e9;
+            if ~(isfinite(coarseDtNs) && coarseDtNs > 0)
+                coarseDtNs = 0.128;
+            end
             cfg = struct( ...
                 'gateThresholdFrac', 0.15, ...
-                'gatePreBins', 100, ...
+                'gatePreBins', max(1, round(1.5 / coarseDtNs)), ...
+                'gatePreNs', 1.5, ...
                 'minGateSeparationBins', 50, ...
-                'secondPeakMinFraction', 0.12);
+                'secondPeakMinFraction', 0.05);
             tcspcByDetector = buildPieDetectorHistogram(ptuData);
-            [gateStarts, gateStops, gateLen, gateInfo] = detectPieGatesFromHistogram(tcspcByDetector, 2, cfg);
+            gateStarts = [];
+            gateStops = [];
+            gateLen = [];
+            gateInfo = struct();
+            for expectedLasers = 3:-1:2
+                [candidateStarts, candidateStops, candidateLen, candidateInfo] = ...
+                    detectPieGatesFromHistogram(tcspcByDetector, expectedLasers, cfg);
+                if numel(candidateStarts) == expectedLasers
+                    gateStarts = candidateStarts;
+                    gateStops = candidateStops;
+                    gateLen = candidateLen;
+                    gateInfo = candidateInfo;
+                    break;
+                end
+            end
 
             pie.checked = true;
             if numel(gateStarts) >= 2
-                pie.isDetected = true;
-                pie.detectorIDs = detectorIDs(1:2).';
-                pie.gateStarts = gateStarts(:).';
-                pie.gateStops = gateStops(:).';
+                nLasers = numel(gateStarts);
+                nDetectors = numel(detectorIDs);
+                pie.cnum = nLasers;
+                pie.dnum = nDetectors;
+                maxCombinations = nLasers * nDetectors;
+                comboDetectorIDs = zeros(1, maxCombinations);
+                comboLaserIndices = zeros(1, maxCombinations);
+                comboGateStarts = zeros(1, maxCombinations);
+                comboGateStops = zeros(1, maxCombinations);
+                comboPhotonCounts = zeros(1, maxCombinations);
+                comboLabels = cell(1, maxCombinations);
+                nRecorded = 0;
+
+                for laserIdx = 1:nLasers
+                    firstBin = max(1, round(gateStarts(laserIdx)));
+                    lastBin = min(size(tcspcByDetector, 1), round(gateStops(laserIdx)));
+                    for detectorIdx = 1:nDetectors
+                        photonCount = sum(tcspcByDetector(firstBin:lastBin, detectorIdx), 'all');
+                        if photonCount <= 0
+                            continue;
+                        end
+                        nRecorded = nRecorded + 1;
+                        comboDetectorIDs(nRecorded) = detectorIDs(detectorIdx);
+                        comboLaserIndices(nRecorded) = laserIdx;
+                        comboGateStarts(nRecorded) = gateStarts(laserIdx);
+                        comboGateStops(nRecorded) = gateStops(laserIdx);
+                        comboPhotonCounts(nRecorded) = photonCount;
+                        comboLabels{nRecorded} = sprintf('Channel %d (L%dD%d)', ...
+                            nRecorded, laserIdx, detectorIdx);
+                    end
+                end
+
+                pie.isDetected = nRecorded >= 2;
+                pie.uniqueDetectorIDs = detectorIDs(:).';
+                pie.detectorIDs = comboDetectorIDs(1:nRecorded);
+                pie.laserIndices = comboLaserIndices(1:nRecorded);
+                pie.laserGateStarts = gateStarts(:).';
+                pie.laserGateStops = gateStops(:).';
+                pie.gateStarts = comboGateStarts(1:nRecorded);
+                pie.gateStops = comboGateStops(1:nRecorded);
                 pie.gateLen = gateLen;
+                pie.channelLabels = comboLabels(1:nRecorded);
+                pie.photonCounts = comboPhotonCounts(1:nRecorded);
                 pie.info = gateInfo;
+                if ~pie.isDetected
+                    pie.reason = 'Multiple laser gates were found, but fewer than two combinations contained photons.';
+                end
             else
-                pie.reason = 'No second TCSPC peak was detected in one sync period.';
+                pie.reason = 'No second or third laser gate was detected in one sync period.';
             end
         catch ME
             pie.reason = sprintf('PIE detection failed: %s', ME.message);
@@ -3174,14 +3290,17 @@ function Luminosa_GUI
     function tf = hasPieDisplayChannels(ptuData)
         tf = ~isempty(ptuData) && isstruct(ptuData) && isfield(ptuData, 'pie') && ...
             isstruct(ptuData.pie) && isfield(ptuData.pie, 'isDetected') && logical(ptuData.pie.isDetected) && ...
-            isfield(ptuData.pie, 'detectorIDs') && numel(ptuData.pie.detectorIDs) >= 2 && ...
-            isfield(ptuData.pie, 'gateStarts') && numel(ptuData.pie.gateStarts) >= 2;
+            isfield(ptuData.pie, 'detectorIDs') && ~isempty(ptuData.pie.detectorIDs) && ...
+            isfield(ptuData.pie, 'gateStarts') && ...
+            numel(ptuData.pie.gateStarts) == numel(ptuData.pie.detectorIDs) && ...
+            isfield(ptuData.pie, 'channelLabels') && ...
+            numel(ptuData.pie.channelLabels) == numel(ptuData.pie.detectorIDs);
     end
 
     function labels = getPieDisplayChannelLabels(ptuData)
         labels = {'Channel 1'};
         if hasPieDisplayChannels(ptuData) && isfield(ptuData.pie, 'channelLabels') && ...
-                numel(ptuData.pie.channelLabels) >= 2
+                ~isempty(ptuData.pie.channelLabels)
             if iscell(ptuData.pie.channelLabels)
                 labels = ptuData.pie.channelLabels(:).';
             else
@@ -3628,12 +3747,14 @@ function Luminosa_GUI
     end
 
     function tcspcByDetector = buildPieDetectorHistogram(ptuData)
+        detectorIDs = zeros(0, 1);
         if isfield(ptuData, 'dind') && ~isempty(ptuData.dind)
-            detectorIDs = double(ptuData.dind(:));
-        else
-            detectorIDs = unique(double(ptuData.im_chan(:)));
+            detectorIDs = [detectorIDs; double(ptuData.dind(:))];
         end
-        detectorIDs = detectorIDs(isfinite(detectorIDs));
+        if isfield(ptuData, 'im_chan') && ~isempty(ptuData.im_chan)
+            detectorIDs = [detectorIDs; double(ptuData.im_chan(:))];
+        end
+        detectorIDs = unique(detectorIDs(isfinite(detectorIDs)), 'stable');
         nDet = numel(detectorIDs);
         if isfield(ptuData, 'Ngate') && ~isempty(ptuData.Ngate)
             nBins = double(ptuData.Ngate);
@@ -3715,7 +3836,9 @@ function Luminosa_GUI
         stopsRaw = stopsRaw(orderByStart);
         scoresRaw = scoresRaw(orderByStart);
 
-        gateStarts = max(1, startsRaw - cfg.gatePreBins);
+        [riseBins, detectedPeakBins] = refinePieRiseBins( ...
+            profileSmooth, startsRaw, stopsRaw, baseline, cfg.gateThresholdFrac);
+        gateStarts = max(1, riseBins - cfg.gatePreBins);
         nextStart = [gateStarts(2:end) - 1; numel(profileSmooth)];
         gateLen = min(nextStart - gateStarts + 1);
         gateLen = max(1, gateLen);
@@ -3737,7 +3860,7 @@ function Luminosa_GUI
             gateLen = [];
             return;
         end
-        if numel(peakBins) >= 2 && abs(peakBins(2) - peakBins(1)) < cfg.minGateSeparationBins
+        if numel(peakBins) >= 2 && any(diff(sort(peakBins)) < cfg.minGateSeparationBins)
             gateStarts = [];
             gateStops = [];
             gateLen = [];
@@ -3750,8 +3873,43 @@ function Luminosa_GUI
         info.rawStarts = startsRaw;
         info.rawStops = stopsRaw;
         info.rawScores = scoresRaw;
+        info.riseBins = riseBins;
+        info.detectedPeakBins = detectedPeakBins;
+        info.gatePreBins = cfg.gatePreBins;
+        info.gatePreNs = cfg.gatePreNs;
         info.peakBins = peakBins;
         info.peakHeights = peakHeights;
+    end
+
+    function [riseBins, peakBins] = refinePieRiseBins(profile, starts, stops, baseline, thresholdFrac)
+        profile = double(profile(:));
+        starts = max(1, round(double(starts(:))));
+        stops = min(numel(profile), round(double(stops(:))));
+        nPeaks = numel(starts);
+        peakBins = zeros(nPeaks, 1);
+        peakHeights = zeros(nPeaks, 1);
+
+        for k = 1:nPeaks
+            [peakHeights(k), relIdx] = max(profile(starts(k):stops(k)));
+            peakBins(k) = starts(k) + relIdx - 1;
+        end
+
+        riseBins = zeros(nPeaks, 1);
+        for k = 1:nPeaks
+            if k == 1
+                leftBound = 1;
+            else
+                leftBound = max(1, floor((peakBins(k - 1) + peakBins(k)) / 2));
+            end
+            threshold = baseline + thresholdFrac * max(peakHeights(k) - baseline, 0);
+            leftTrace = profile(leftBound:peakBins(k));
+            lastBelow = find(leftTrace <= threshold, 1, 'last');
+            if isempty(lastBelow)
+                riseBins(k) = starts(k);
+            else
+                riseBins(k) = min(peakBins(k), leftBound + lastBelow);
+            end
+        end
     end
 
     function m = meanOfLowestFractionLocal(x, frac)
@@ -6075,6 +6233,11 @@ function Luminosa_GUI
         end
         if app.chkAutoTauRange.Value
             trange = prctile(tvals, [5 95]);
+            minAutoSpanNs = 0.25;
+            if diff(trange) < minAutoSpanNs
+                center = median(tvals);
+                trange = center + 0.5 * minAutoSpanNs * [-1 1];
+            end
         else
             trange = [app.editTauMin.Value, app.editTauMax.Value];
         end
