@@ -140,7 +140,8 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
         for modelIndex = 1:3
             evaluations(modelIndex) = evaluate_fixed_count_grid(Y, ...
                 validFlat, grids(modelIndex), slbPattern, tauSlbNs, ...
-                opts.fixedSlbPhotonCount, opts.useGPU, opts.batchSize);
+                opts.fixedSlbPhotonCount, opts.useGPU, opts.batchSize, ...
+                opts.slbCountRelTol);
         end
     else
         grids(1) = build_model_grid(0, slbPattern, membranePatterns, ...
@@ -312,6 +313,7 @@ function opts = fill_options(opts, nx, ny, tauSlbNs, dtNs, modelPeriodNs)
     defaults.modelPrior = [1 1 1] / 3;
     defaults.fixedSlbPhotonCount = [];
     defaults.fixedSlbPhotonCountStd = [];
+    defaults.slbCountRelTol = 0.02;
     defaults.irfShiftBins = 0;
     defaults.convolutionMethod = 'auto';
 
@@ -331,6 +333,8 @@ function opts = fill_options(opts, nx, ny, tauSlbNs, dtNs, modelPeriodNs)
         {'real','finite','scalar','nonnegative'});
     validateattributes(opts.batchSize, {'numeric'}, ...
         {'real','finite','scalar','integer','positive'});
+    validateattributes(opts.slbCountRelTol, {'numeric'}, ...
+        {'real','finite','scalar','nonnegative','<',1});
     validateattributes(opts.includeBackground, {'numeric','logical'}, {'scalar'});
     opts.includeBackground = logical(opts.includeBackground);
     validateattributes(opts.irfShiftBins, {'numeric'}, ...
@@ -786,7 +790,11 @@ function evaluation = evaluate_grid(Y, validFlat, grid, useGPU, batchSize)
 end
 
 function evaluation = evaluate_fixed_count_grid(Y, validFlat, residualGrid, ...
-        slbPattern, tauSlbNs, fixedSlbPhotonCount, useGPU, batchSize)
+        slbPattern, tauSlbNs, fixedSlbPhotonCount, useGPU, batchSize, ...
+        slbCountRelTol)
+    if nargin < 9 || isempty(slbCountRelTol)
+        slbCountRelTol = 0;
+    end
     pixelCount = size(Y, 2);
     evaluation = empty_evaluation(pixelCount);
     evaluation.stateCount = residualGrid.stateCount;
@@ -796,19 +804,39 @@ function evaluation = evaluate_fixed_count_grid(Y, validFlat, residualGrid, ...
     end
 
     photonTotal = sum(double(Y(:, validIndex)), 1);
-    [uniqueTotal, ~, totalGroup] = unique(photonTotal, 'sorted');
+    % One grid instantiation per distinct fixed-SLB fraction. Grouping on the
+    % exact photon total gives a separate grid - and a separate pattern build,
+    % log and GPU upload - for every distinct total, which is the dominant
+    % cost. Binning totals to a relative tolerance collapses neighbouring
+    % totals whose fixed-SLB fraction is indistinguishable.
+    if slbCountRelTol > 0
+        binKey = -ones(1, numel(photonTotal));
+        positive = photonTotal > 0;
+        binKey(positive) = floor(log(photonTotal(positive)) / ...
+            log1p(slbCountRelTol));
+        [~, ~, totalGroup] = unique(binKey, 'sorted');
+        groupCount = max(totalGroup);
+        representativeTotal = zeros(1, groupCount);
+        for groupIndex = 1:groupCount
+            representativeTotal(groupIndex) = ...
+                median(photonTotal(totalGroup == groupIndex));
+        end
+    else
+        [representativeTotal, ~, totalGroup] = unique(photonTotal, 'sorted');
+        groupCount = numel(representativeTotal);
+    end
+    totalGroup = reshape(totalGroup, 1, []);
+
     gpuUsed = false;
-    for groupIndex = 1:numel(uniqueTotal)
-        groupPixel = validIndex(totalGroup == groupIndex);
-        total = uniqueTotal(groupIndex);
+    for groupIndex = 1:groupCount
+        member = totalGroup == groupIndex;
+        groupPixel = validIndex(member);
+        total = representativeTotal(groupIndex);
         if total <= 0
             fixedFraction = 1;
-            appliedCount = 0;
         else
             fixedFraction = min(fixedSlbPhotonCount / total, 1);
-            appliedCount = fixedFraction * total;
         end
-        clipped = total < fixedSlbPhotonCount;
         groupGrid = instantiate_fixed_count_grid(residualGrid, ...
             slbPattern, tauSlbNs, fixedFraction);
         [logEvidence, meanValue, stdValue, mapValue, groupUsedGPU] = ...
@@ -817,8 +845,12 @@ function evaluation = evaluate_fixed_count_grid(Y, validFlat, residualGrid, ...
         evaluation.mean(:, groupPixel) = meanValue;
         evaluation.std(:, groupPixel) = stdValue;
         evaluation.map(:, groupPixel) = mapValue;
-        evaluation.appliedSlbPhotonCount(groupPixel) = appliedCount;
-        evaluation.fixedSlbCountClipped(groupPixel) = clipped;
+        % Per-pixel bookkeeping stays exact even when the grid is shared.
+        memberTotal = photonTotal(member);
+        evaluation.appliedSlbPhotonCount(groupPixel) = ...
+            min(fixedSlbPhotonCount, memberTotal);
+        evaluation.fixedSlbCountClipped(groupPixel) = ...
+            memberTotal < fixedSlbPhotonCount;
         gpuUsed = gpuUsed || groupUsedGPU;
     end
     evaluation.usedGPU = gpuUsed;
@@ -831,42 +863,70 @@ function [logEvidence, meanOutput, stdOutput, mapOutput, gpuUsed] = ...
     meanOutput = nan(11, outputCount, 'single');
     stdOutput = nan(11, outputCount, 'single');
     mapOutput = nan(11, outputCount, 'single');
-    logPattern = log(max(double(grid.patterns), realmin('double')));
-    parameters = double(grid.parameters);
-    parameterSquares = parameters .^ 2;
+    logStateCount = log(grid.stateCount);
+    logPattern = [];
+    parameters = [];
+    parameterSquares = [];
 
     gpuUsed = false;
     if useGPU
         try
-            logPatternGpu = gpuArray(single(logPattern));
+            % Take the log on the device. The log of the
+            % [bins x stateCount] pattern matrix is evaluated once per
+            % group and is the single largest CPU cost in this loop.
+            logPatternGpu = log(max(gpuArray(single(grid.patterns)), ...
+                realmin('single')));
+            parametersGpu = gpuArray(single(grid.parameters));
+            parameterSquaresGpu = parametersGpu .^ 2;
             gpuUsed = true;
         catch
             gpuUsed = false;
         end
     end
+    if ~gpuUsed
+        logPattern = log(max(double(grid.patterns), realmin('double')));
+        parameters = double(grid.parameters);
+        parameterSquares = parameters .^ 2;
+    end
+
     for first = 1:batchSize:outputCount
         localIndex = first:min(first + batchSize - 1, outputCount);
         counts = Y(:, pixelIndex(localIndex));
         if gpuUsed
-            likelihood = gather(logPatternGpu.' * gpuArray(single(counts)));
-            likelihood = double(likelihood);
+            % Reduce on the device and move only the per-pixel summaries
+            % back, instead of the full [stateCount x batch] likelihood.
+            likelihood = logPatternGpu.' * gpuArray(single(counts));
+            maximum = max(likelihood, [], 1);
+            weight = exp(likelihood - maximum);
+            weightSum = sum(weight, 1);
+            weightSum(weightSum <= 0) = 1;
+            weight = weight ./ weightSum;
+            meanValue = parametersGpu * weight;
+            secondMoment = parameterSquaresGpu * weight;
+            [~, mapIndex] = max(likelihood, [], 1);
+            mapValue = parametersGpu(:, mapIndex);
+            meanValue = double(gather(meanValue));
+            secondMoment = double(gather(secondMoment));
+            mapValue = gather(mapValue);
+            maximum = double(gather(maximum));
+            weightSum = double(gather(weightSum));
         else
             likelihood = logPattern.' * double(counts);
+            maximum = max(likelihood, [], 1);
+            weight = exp(likelihood - maximum);
+            weightSum = sum(weight, 1);
+            weightSum(weightSum <= 0) = 1;
+            weight = weight ./ weightSum;
+            meanValue = parameters * weight;
+            secondMoment = parameterSquares * weight;
+            [~, mapIndex] = max(likelihood, [], 1);
+            mapValue = parameters(:, mapIndex);
         end
-        maximum = max(likelihood, [], 1);
-        weight = exp(likelihood - maximum);
-        weightSum = sum(weight, 1);
-        weightSum(weightSum <= 0) = 1;
-        weight = weight ./ weightSum;
-        meanValue = parameters * weight;
-        secondMoment = parameterSquares * weight;
         meanOutput(:, localIndex) = single(meanValue);
         stdOutput(:, localIndex) = single(sqrt(max( ...
             secondMoment - meanValue .^ 2, 0)));
-        [~, mapIndex] = max(likelihood, [], 1);
-        mapOutput(:, localIndex) = single(parameters(:, mapIndex));
-        logEvidence(localIndex) = maximum + log(weightSum) - ...
-            log(grid.stateCount);
+        mapOutput(:, localIndex) = single(mapValue);
+        logEvidence(localIndex) = maximum + log(weightSum) - logStateCount;
     end
 end
 
