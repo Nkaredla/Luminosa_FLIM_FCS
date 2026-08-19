@@ -1716,7 +1716,7 @@ function h = showComponentPhotonMap(layers, visibility, analysisLabel)
                  'Component 3 (longest)'});
 
     h = figure('Name', 'immune_cell_MIET: component photon counts', ...
-        'Color', 'w', 'Visible', visibility, 'Position', [80 80 1500 560]);
+        'Color', 'w', 'Visible', visibility, 'Position', [80 80 1500 700]);
     layout = tiledlayout(h, 1, 3, 'Padding', 'compact', ...
         'TileSpacing', 'compact');
 
@@ -1734,17 +1734,27 @@ function h = showComponentPhotonMap(layers, visibility, analysisLabel)
         values = data(mask);
         if isempty(values)
             clim(ax, [0 1]);
-            titleText = sprintf('%s | no identified pixels', ...
-                panels(index).name);
+            titleText = {panels(index).name, 'no identified pixels'};
         else
+            % Robust range on BOTH ends. The fixed-SLB component is nearly
+            % constant by construction - its expected count is
+            % min(fixedSlbPhotonCount, N) - so anchoring the scale at zero
+            % pushes every pixel to the top of the colour map and hides all
+            % structure. A 1st-99th percentile window keeps each panel
+            % readable whether its values are spread or tightly clustered.
+            lower = prctile(values, 1);
             upper = prctile(values, 99);
-            if ~isfinite(upper) || upper <= 0
+            if ~isfinite(lower) || ~isfinite(upper) || upper <= lower
+                lower = min(values);
                 upper = max(values);
             end
-            clim(ax, [0 max(upper, eps)]);
-            titleText = sprintf(['%s | %d px | median %.0f, ' ...
-                'total %.3g photons'], panels(index).name, nnz(mask), ...
-                median(values), sum(values));
+            if upper <= lower
+                upper = lower + max(abs(lower) * 1e-3, eps);
+            end
+            clim(ax, [lower upper]);
+            titleText = {panels(index).name, ...
+                sprintf('%d px | median %.0f | total %.3g photons', ...
+                    nnz(mask), median(values), sum(values))};
         end
         colourBar = colorbar(ax);
         colourBar.Label.String = 'Expected detected photons';
@@ -1755,9 +1765,9 @@ function h = showComponentPhotonMap(layers, visibility, analysisLabel)
     if ~isempty(analysisLabel)
         headline = sprintf('%s | %s', headline, analysisLabel);
     end
-    title(layout, headline);
-    subtitle(layout, ['Photon total x posterior photon fraction. Colour ' ...
-        'limits are per panel, capped at the 99th percentile.']);
+    title(layout, headline, 'FontWeight', 'bold');
+    subtitle(layout, ['photon total x posterior photon fraction; ' ...
+        'per-panel 1st-99th percentile colour limits'], 'FontSize', 8);
 end
 
 function h = showOrderedLifetimeMap(layers, ~, component, limits, ...
