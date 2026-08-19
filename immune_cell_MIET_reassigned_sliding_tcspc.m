@@ -115,6 +115,12 @@ function [pixelCube, pixelLinearIndices, intensity, meta] = ...
         numel(ptu.im_tcspc), numel(ptu.im_chan)]);
     windowPhotonContributionCount = 0;
     uniqueContributingPhotonCount = 0;
+    % The MEX performs the same reduction as the MATLAB branch below with a
+    % direct pointer increment per window hit. It is optional: if it is not
+    % built, the MATLAB path runs and results are identical.
+    useMex = exist('immune_cell_MIET_window_accumulate', 'file') == 3;
+    accumulateDims = [imageHeight, maximumAnchorRow, maximumAnchorColumn, ...
+        windowHeight, windowWidth, selectedPixelCount, gateLength];
 
     for first = 1:photonBlockSize:alignedCount
         last = min(first + photonBlockSize - 1, alignedCount);
@@ -154,6 +160,31 @@ function [pixelCube, pixelLinearIndices, intensity, meta] = ...
         % A source photon contributes to every selected upper-left anchor
         % whose spatial window contains that source pixel. For a 2-by-2
         % window this is at most four overlapping output samples.
+        %
+        % The destination indices for all window offsets are gathered first
+        % and reduced in a single pass per photon block. Reducing per offset
+        % instead cost one sort per offset (unique) for every block, which
+        % profiled as the largest single self-time in the pipeline.
+        if useMex
+            [contributionCount, contributedMask, overflow] = ...
+                immune_cell_MIET_window_accumulate(pixelCube, rowBin, ...
+                columnBin, timeBin, selectedLookup, accumulateDims);
+            if overflow
+                error('immune_cell_MIET_reassigned_sliding_tcspc:Uint16Overflow', ...
+                    ['A sliding-window TCSPC bin exceeds the uint16 count ' ...
+                     'range. Reduce the spatial window or use a wider ' ...
+                     'compact storage type.']);
+            end
+            windowPhotonContributionCount = ...
+                windowPhotonContributionCount + contributionCount;
+            uniqueContributingPhotonCount = ...
+                uniqueContributingPhotonCount + nnz(contributedMask);
+            continue;
+        end
+
+        offsetCount = windowHeight * windowWidth;
+        linearParts = cell(offsetCount, 1);
+        partCount = 0;
         for rowOffset = 0:windowHeight-1
             anchorRow = rowBin - rowOffset;
             validRow = anchorRow >= 1 & anchorRow <= maximumAnchorRow;
@@ -174,17 +205,24 @@ function [pixelCube, pixelLinearIndices, intensity, meta] = ...
                 end
                 sourceIndex = sourceIndex(selected);
                 compactPixel = compactPixel(selected);
-                compactLinear = double(compactPixel) + ...
+                partCount = partCount + 1;
+                linearParts{partCount} = double(compactPixel(:)) + ...
                     (timeBin(sourceIndex) - 1) * selectedPixelCount;
-                [uniqueIndex, additions] = groupedCounts(compactLinear);
-                updated = double(pixelCube(uniqueIndex)) + additions;
-                assertUint16Range(updated);
-                pixelCube(uniqueIndex) = uint16(updated);
-                contributionCount = sum(additions);
-                windowPhotonContributionCount = ...
-                    windowPhotonContributionCount + contributionCount;
                 contributed(sourceIndex) = true;
             end
+        end
+        if partCount > 0
+            allLinear = vertcat(linearParts{1:partCount});
+            clear linearParts
+            % Dense scatter-add over the compact cube index space. accumarray
+            % reduces duplicates directly, so no unique() sort is needed.
+            delta = accumarray(allLinear, 1, [selectedPixelCount * gateLength, 1]);
+            touched = find(delta);
+            updated = double(pixelCube(touched)) + delta(touched);
+            assertUint16Range(updated);
+            pixelCube(touched) = uint16(updated);
+            windowPhotonContributionCount = ...
+                windowPhotonContributionCount + numel(allLinear);
         end
         uniqueContributingPhotonCount = uniqueContributingPhotonCount + ...
             nnz(contributed);
@@ -231,12 +269,6 @@ function [pixelCube, pixelLinearIndices, intensity, meta] = ...
     meta.tAxisNs = ((0:gateLength-1).' + 0.5) * dtNs;
     meta.photonBlockSize = photonBlockSize;
     meta.temporalDetectorAlignmentApplied = false;
-end
-
-function [uniqueIndex, additions] = groupedCounts(linearIndex)
-    linearIndex = double(linearIndex(:));
-    [uniqueIndex, ~, group] = unique(linearIndex);
-    additions = accumarray(group, 1);
 end
 
 function assertUint16Range(updated)
