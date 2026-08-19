@@ -410,6 +410,9 @@ function result = immune_cell_MIET(ptuFile, cfg)
         'immune_cell_MIET_640nm_red_2x2_step1_sorted_lifetime_layers.png');
     binnedComponentPhotonPngFile = fullfile(outputDir, ...
         'immune_cell_MIET_640nm_red_2x2_step1_component_photons.png');
+    binnedComponentLifetimeFigureHandle = [];
+    binnedComponentLifetimePngFile = fullfile(outputDir, ...
+        'immune_cell_MIET_640nm_red_2x2_step1_component_lifetimes.png');
     if cfg.spatialBinning.enabled
         fprintf(['immune_cell_MIET: collecting overlapping 2x2 reassigned ' ...
             'TCSPC windows (one-pixel step).\n']);
@@ -507,6 +510,9 @@ function result = immune_cell_MIET(ptuFile, cfg)
         'immune_cell_MIET_640nm_red_4x4_step1_sorted_lifetime_layers.png');
     binned4x4ComponentPhotonPngFile = fullfile(outputDir, ...
         'immune_cell_MIET_640nm_red_4x4_step1_component_photons.png');
+    binned4x4ComponentLifetimeFigureHandle = [];
+    binned4x4ComponentLifetimePngFile = fullfile(outputDir, ...
+        'immune_cell_MIET_640nm_red_4x4_step1_component_lifetimes.png');
     if cfg.spatialBinning4x4.enabled
         fprintf(['immune_cell_MIET: collecting overlapping 4x4 reassigned ' ...
             'TCSPC windows (one-pixel step).\n']);
@@ -616,6 +622,9 @@ function result = immune_cell_MIET(ptuFile, cfg)
     componentPhotonFigureHandle = [];
     componentPhotonPngFile = fullfile(outputDir, ...
         'immune_cell_MIET_640nm_red_component_photons.png');
+    componentLifetimeFigureHandle = [];
+    componentLifetimePngFile = fullfile(outputDir, ...
+        'immune_cell_MIET_640nm_red_component_lifetimes.png');
     if cfg.showFigure || cfg.saveOutputs
         visibility = figureVisibility(cfg.showFigure);
         bayesFigureHandle = showBayesSummary(meanArrivalNs, intensity, ...
@@ -634,6 +643,9 @@ function result = immune_cell_MIET(ptuFile, cfg)
                 tauSlbNs, slbAmplitude);
             componentPhotonFigureHandle = showComponentPhotonMap( ...
                 orderedComponents, visibility, 'native pixels');
+            componentLifetimeFigureHandle = showComponentLifetimeMap( ...
+                orderedComponents, lifetimeLimits, tauSlbNs, visibility, ...
+                'native pixels');
         end
         if cfg.spatialBinning.enabled
             binnedMeanFigureHandle = showRedMeanFlim( ...
@@ -669,6 +681,11 @@ function result = immune_cell_MIET(ptuFile, cfg)
                     spatialBinningResult.bayesian.orderedComponents, ...
                     visibility, ...
                     '2x2 sliding TCSPC, one-pixel step; photons per window');
+                binnedComponentLifetimeFigureHandle = ...
+                    showComponentLifetimeMap( ...
+                    spatialBinningResult.bayesian.orderedComponents, ...
+                    binnedLifetimeLimits, tauSlbNs, visibility, ...
+                    '2x2 sliding TCSPC, one-pixel step');
             end
         end
         if cfg.spatialBinning4x4.enabled
@@ -707,6 +724,11 @@ function result = immune_cell_MIET(ptuFile, cfg)
                     spatialBinning4x4Result.bayesian.orderedComponents, ...
                     visibility, ...
                     '4x4 sliding TCSPC, one-pixel step; photons per window');
+                binned4x4ComponentLifetimeFigureHandle = ...
+                    showComponentLifetimeMap( ...
+                    spatialBinning4x4Result.bayesian.orderedComponents, ...
+                    binned4x4LifetimeLimits, tauSlbNs, visibility, ...
+                    '4x4 sliding TCSPC, one-pixel step');
             end
         end
     end
@@ -786,7 +808,12 @@ function result = immune_cell_MIET(ptuFile, cfg)
             binned4x4LayeredLifetimePngFile, ...
         'componentPhotonPng', componentPhotonPngFile, ...
         'sliding2x2Step1ComponentPhotonPng', binnedComponentPhotonPngFile, ...
-        'sliding4x4Step1ComponentPhotonPng', binned4x4ComponentPhotonPngFile);
+        'sliding4x4Step1ComponentPhotonPng', binned4x4ComponentPhotonPngFile, ...
+        'componentLifetimePng', componentLifetimePngFile, ...
+        'sliding2x2Step1ComponentLifetimePng', ...
+            binnedComponentLifetimePngFile, ...
+        'sliding4x4Step1ComponentLifetimePng', ...
+            binned4x4ComponentLifetimePngFile);
 
     if cfg.saveOutputs
         matFile = analysisMatFile;
@@ -865,6 +892,18 @@ function result = immune_cell_MIET(ptuFile, cfg)
             exportgraphics(binned4x4ComponentPhotonFigureHandle, ...
                 binned4x4ComponentPhotonPngFile, 'Resolution', 300);
         end
+        if ~isempty(componentLifetimeFigureHandle)
+            exportgraphics(componentLifetimeFigureHandle, ...
+                componentLifetimePngFile, 'Resolution', 300);
+        end
+        if ~isempty(binnedComponentLifetimeFigureHandle)
+            exportgraphics(binnedComponentLifetimeFigureHandle, ...
+                binnedComponentLifetimePngFile, 'Resolution', 300);
+        end
+        if ~isempty(binned4x4ComponentLifetimeFigureHandle)
+            exportgraphics(binned4x4ComponentLifetimeFigureHandle, ...
+                binned4x4ComponentLifetimePngFile, 'Resolution', 300);
+        end
         if cfg.spatialBinning4x4.enabled
             expected4x4Figures = {binned4x4MeanPngFile, binned4x4BayesPngFile};
             if cfg.componentMaps.enabled
@@ -872,7 +911,8 @@ function result = immune_cell_MIET(ptuFile, cfg)
                     {binned4x4SecondLifetimePngFile, ...
                      binned4x4ThirdLifetimePngFile, ...
                      binned4x4LayeredLifetimePngFile, ...
-                     binned4x4ComponentPhotonPngFile}];
+                     binned4x4ComponentPhotonPngFile, ...
+                     binned4x4ComponentLifetimePngFile}];
             end
             for figureIndex = 1:numel(expected4x4Figures)
                 if ~isfile(expected4x4Figures{figureIndex})
@@ -1748,13 +1788,25 @@ function h = showComponentPhotonMap(layers, visibility, analysisLabel)
                 lower = min(values);
                 upper = max(values);
             end
-            if upper <= lower
-                upper = lower + max(abs(lower) * 1e-3, eps);
+            middle = median(values);
+            spread = upper - lower;
+            if spread <= 1e-6 * max(abs(middle), eps)
+                % Genuinely uniform. This is the normal state of the
+                % fixed-SLB component wherever it is not clipped, because
+                % its expected count is min(fixedSlbPhotonCount, N). Centre
+                % the constant in the colour map and say so, rather than
+                % stretching the scale over numerical noise and implying
+                % spatial structure that does not exist.
+                pad = max(abs(middle) * 0.1, eps);
+                clim(ax, [middle - pad, middle + pad]);
+                extra = sprintf('uniform at %.0f photons', middle);
+            else
+                clim(ax, [lower upper]);
+                extra = sprintf('median %.0f | total %.3g photons', ...
+                    middle, sum(values));
             end
-            clim(ax, [lower upper]);
             titleText = {panels(index).name, ...
-                sprintf('%d px | median %.0f | total %.3g photons', ...
-                    nnz(mask), median(values), sum(values))};
+                sprintf('%d px | %s', nnz(mask), extra)};
         end
         colourBar = colorbar(ax);
         colourBar.Label.String = 'Expected detected photons';
@@ -1768,6 +1820,72 @@ function h = showComponentPhotonMap(layers, visibility, analysisLabel)
     title(layout, headline, 'FontWeight', 'bold');
     subtitle(layout, ['photon total x posterior photon fraction; ' ...
         'per-panel 1st-99th percentile colour limits'], 'FontSize', 8);
+end
+
+function h = showComponentLifetimeMap(layers, limits, tauSlbNs, ...
+        visibility, analysisLabel)
+%SHOWCOMPONENTLIFETIMEMAP Per-component lifetime maps, one panel each.
+%
+% The plain counterpart to showOrderedLifetimeLayers: no alpha-blended
+% stacking, no cyan or magenta support outlines, no probability contours.
+% Panel order and pixel gating match showComponentPhotonMap exactly, so the
+% lifetime and photon figures can be read side by side panel for panel.
+%
+% Unlike the photon figure, all panels share one colour scale. Component
+% magnitudes differ by orders of magnitude for photons, so per-panel limits
+% are right there; lifetimes are directly comparable, so a shared scale is
+% what makes component 2 and component 3 meaningful against each other.
+    if nargin < 5
+        analysisLabel = '';
+    end
+
+    fixedLifetime = nan(size(layers.masks.cell));
+    fixedLifetime(layers.masks.cell) = tauSlbNs;
+
+    panels = struct( ...
+        'data', {fixedLifetime, layers.display.secondLifetimeNs, ...
+                 layers.display.thirdLifetimeNs}, ...
+        'mask', {layers.masks.cell, layers.masks.secondDisplay, ...
+                 layers.masks.thirdDisplay}, ...
+        'name', {'Component 1 (fixed SLB)', 'Component 2', ...
+                 'Component 3 (longest)'});
+
+    h = figure('Name', 'immune_cell_MIET: component lifetimes', ...
+        'Color', 'w', 'Visible', visibility, 'Position', [80 80 1500 700]);
+    layout = tiledlayout(h, 1, 3, 'Padding', 'compact', ...
+        'TileSpacing', 'compact');
+
+    for index = 1:numel(panels)
+        data = double(panels(index).data);
+        mask = logical(panels(index).mask) & isfinite(data);
+        ax = nexttile(layout);
+        object = imagesc(ax, data.');
+        axis(ax, 'image', 'off');
+        set(ax, 'YDir', 'normal', 'Color', [0.015 0.015 0.025]);
+        set(object, 'AlphaData', mask.');
+        colormap(ax, turbo(256));
+        clim(ax, limits);
+        colourBar = colorbar(ax);
+        colourBar.Label.String = 'Lifetime [ns]';
+        values = data(mask);
+        if isempty(values)
+            detail = 'no identified pixels';
+        elseif index == 1
+            detail = sprintf('%d px | fixed at %.3g ns', nnz(mask), tauSlbNs);
+        else
+            detail = sprintf('%d px | median %.3g ns', nnz(mask), ...
+                median(values));
+        end
+        title(ax, {panels(index).name, detail}, 'FontSize', 9);
+    end
+
+    headline = 'Lifetime per component';
+    if ~isempty(analysisLabel)
+        headline = sprintf('%s | %s', headline, analysisLabel);
+    end
+    title(layout, headline, 'FontWeight', 'bold');
+    subtitle(layout, ['same gating as the component photon figure; ' ...
+        'shared colour scale across panels'], 'FontSize', 8);
 end
 
 function h = showOrderedLifetimeMap(layers, ~, component, limits, ...
