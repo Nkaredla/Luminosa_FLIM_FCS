@@ -22,7 +22,11 @@ pipelineCfg.tcspcBinNs = 0.16;    % Exact multiple of both 40-ps and 20-ps data.
 pipelineCfg.minPhotonsPerPixel = 3;
 pipelineCfg.lifetimeRangeNs = [0.5 1.8];
 pipelineCfg.showWaitbar = false;
-pipelineCfg.useGPU = true;        % Quadro T1000 4 GB; Bayesian path falls back to CPU on failure.
+% Measured on this machine (T1000 Max-Q): the GPU path is ~2x SLOWER than the
+% CPU for these matrix shapes, and its single precision flips the selected
+% model in ~4.7% of pixels. Keep it off. See
+% test_flim_bayes_fixed_slb_gpu_grouping.
+pipelineCfg.useGPU = false;
 pipelineCfg.bayesMinPhotons = 10;
 pipelineCfg.fixSlbAmplitude = true;
 pipelineCfg.slbAmplitudeScale = 1;
@@ -34,10 +38,13 @@ pipelineCfg.componentMaps = struct( ...
     'minExpectedPhotons', [10 10], ...
     'probabilityContourLevels', [0.5 0.7 0.9]);
 % mergeStruct is shallow, so the whole bayes struct must be restated here.
+% slbCountRelTol groups photon totals so neighbouring totals share one grid.
+% 0.0025 is the largest tolerance that leaves model selection identical
+% (100% agreement, max |dP| 0.0035). 0.005 shifts it, 0.02 moves dP by 0.07.
 pipelineCfg.bayes = struct('batchSize', 2048, 'includeBackground', true, ...
     'signalGrid', [0.25 0.5 0.75 1], 'membraneTauCount', 10, ...
     'fractionStep', 0.2, 'minimumMembraneFraction', 0.1, ...
-    'slbCountRelTol', 0.02);
+    'slbCountRelTol', 0.0025);
 pipelineCfg.spatialBinning = struct('enabled', true, ...
     'binSize', [2 2], 'step', [1 1]);
 pipelineCfg.spatialBinning4x4 = struct('enabled', true, ...
