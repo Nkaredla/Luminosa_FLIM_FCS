@@ -795,8 +795,17 @@ function [summary, batchInfo] = checkpoint(rows, cfg, dataRoot, outputDir, ...
     % few times, then warn and carry on - the summary can be rebuilt by
     % rerunning with cfg.resume = true.
     writeWithRetry(@() writetable(summary, csvFile), csvFile, 'summary CSV');
-    writeWithRetry(@() save(matFile, 'summary', 'batchInfo', 'cfg', ...
-        '-v7.3'), matFile, 'summary MAT');
+    % save() names its variables as strings, so it must run in a scope that
+    % actually holds them. An anonymous function only captures what it
+    % lexically references, so wrapping save() directly would look for
+    % summary, batchInfo and cfg in an empty workspace and silently write an
+    % empty file. saveSummary takes them as arguments instead.
+    writeWithRetry(@() saveSummary(matFile, summary, batchInfo, cfg), ...
+        matFile, 'summary MAT');
+end
+
+function saveSummary(matFile, summary, batchInfo, cfg)
+    save(matFile, 'summary', 'batchInfo', 'cfg', '-v7.3');
 end
 
 function writeWithRetry(writeFcn, targetFile, label)
@@ -809,8 +818,7 @@ function writeWithRetry(writeFcn, targetFile, label)
             if attempt == attempts
                 warning('batch_immune_cell_MIET:CheckpointWriteFailed', ...
                     ['Could not update the %s at %s after %d attempts: ' ...
-                     '%s
-Per-acquisition results are unaffected. Close ' ...
+                     '%s. Per-acquisition results are unaffected. Close ' ...
                      'any program holding the file, then rerun with ' ...
                      'cfg.resume = true to rebuild the summary.'], ...
                     label, targetFile, attempts, writeError.message);
