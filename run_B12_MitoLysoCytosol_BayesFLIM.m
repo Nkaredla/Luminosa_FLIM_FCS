@@ -12,10 +12,10 @@ cfg.b12DetectorIndex = 1;     % Det1
 % Higher threshold scale gives a smaller/stricter boundary; lower includes
 % dimmer cell edges. The final boundary is filled without internal holes.
 cfg.cellThresholdScale = 0.85;
-cfg.cellSmoothSigma = 1.5;
+cfg.cellSmoothSigma = 2;
 cfg.cellCloseRadius = 2;
-cfg.cellDilateRadius = 2;
-cfg.minCellArea = 150;
+cfg.cellDilateRadius = 5;
+cfg.minCellArea = 650;
 
 % Mitochondrial segmentation from 640 nm / Det2.
 cfg.mitoThresholdScale = 0.85;

@@ -99,8 +99,10 @@ function out = PTU_FLIM_GPU(name, opts)
     anzch = 32;
 
     rawRes_s = head.MeasDesc_Resolution;
-    Resolution = max(1e9 * rawRes_s, opts.minLifetimeBin_ns); % ns per coarse bin
-    chDiv = max(1, round((Resolution * 1e-9) / rawRes_s));
+    requestedResolution = max(1e9 * rawRes_s, opts.minLifetimeBin_ns);
+    chDiv = max(1, round((requestedResolution * 1e-9) / rawRes_s));
+    % The stored bin width must match the integer native-bin divisor.
+    Resolution = chDiv * rawRes_s * 1e9; % ns per coarse bin
     Ngate = min(opts.maxNgate, ceil(1e9 * head.MeasDesc_GlobalResolution / Resolution) + 1);
 
     % Preserve native timing metadata for downstream TCSPC/IRF reconstruction.
@@ -154,9 +156,15 @@ function out = PTU_FLIM_GPU(name, opts)
         tau = [];
     end
 
-    globalCnt  = zeros(nPix, nCh, 'double');
-    globalSum1 = zeros(nPix, nCh, 'double');
-    globalSum2 = zeros(nPix, nCh, 'double');
+    if opts.computeGlobalMaps
+        globalCnt  = zeros(nPix, nCh, 'double');
+        globalSum1 = zeros(nPix, nCh, 'double');
+        globalSum2 = zeros(nPix, nCh, 'double');
+    else
+        globalCnt = [];
+        globalSum1 = [];
+        globalSum2 = [];
+    end
 
     if opts.storeTcspcPix
         estBytes = double(nPix) * double(Ngate) * double(nCh) * 2;
@@ -167,12 +175,17 @@ function out = PTU_FLIM_GPU(name, opts)
     end
 
     if opts.storePhotonLists
-        syncCell  = cell(nzAlloc, 1);
-        tcspcCell = cell(nzAlloc, 1);
-        chanCell  = cell(nzAlloc, 1);
-        lineCell  = cell(nzAlloc, 1);
-        colCell   = cell(nzAlloc, 1);
-        frameCell = cell(nzAlloc, 1);
+        if opts.lowMemoryPhotonLists
+            initialCellCount = 0;
+        else
+            initialCellCount = nzAlloc;
+        end
+        syncCell  = cell(initialCellCount, 1);
+        tcspcCell = cell(initialCellCount, 1);
+        chanCell  = cell(initialCellCount, 1);
+        lineCell  = cell(initialCellCount, 1);
+        colCell   = cell(initialCellCount, 1);
+        frameCell = cell(initialCellCount, 1);
     else
         syncCell  = [];
         tcspcCell = [];
@@ -193,6 +206,41 @@ function out = PTU_FLIM_GPU(name, opts)
     dtSum = 0;
     dtNum = 0;
 
+    usePhotonGate = ~isempty(opts.photonGateStartNative) || ...
+        ~isempty(opts.photonGateLengthNative);
+    nativePeriodBins = max(1, round( ...
+        double(head.MeasDesc_GlobalResolution) / double(rawRes_s)));
+    if usePhotonGate
+        if isempty(opts.photonGateStartNative) || ...
+                isempty(opts.photonGateLengthNative)
+            error(['photonGateStartNative and photonGateLengthNative must ' ...
+                'be supplied together.']);
+        end
+        photonGateStartNative = mod(round(double( ...
+            opts.photonGateStartNative)), nativePeriodBins);
+        photonGateLengthNative = round(double(opts.photonGateLengthNative));
+        if ~(isscalar(photonGateLengthNative) && ...
+                photonGateLengthNative >= 1 && ...
+                photonGateLengthNative <= nativePeriodBins)
+            error('photonGateLengthNative must be within one sync period.');
+        end
+    else
+        photonGateStartNative = 0;
+        photonGateLengthNative = nativePeriodBins;
+    end
+
+    if opts.lowMemoryPhotonLists && (opts.computePerFrame || ...
+            opts.computeGlobalMaps || opts.storeTimeCell || ...
+            opts.storeTcspcPix)
+        error(['lowMemoryPhotonLists requires computePerFrame=false, ' ...
+            'computeGlobalMaps=false, storeTimeCell=false, and ' ...
+            'storeTcspcPix=false.']);
+    end
+    if opts.lowMemoryPhotonLists && nzAlloc ~= 1
+        error(['lowMemoryPhotonLists currently supports one acquired frame. ' ...
+            'Use the standard reader path for multiframe data.']);
+    end
+
     % -------------------------------------------------------------
     % Carry buffers between chunks
     % -------------------------------------------------------------
@@ -208,6 +256,10 @@ function out = PTU_FLIM_GPU(name, opts)
     tend = 0;
     num = 1;
     frameIdx = 1;
+    listChunkCount = 0;
+    observedFrameCount = 0;
+    hasPreviousChunk = false;
+    processedLineCount = 0;
 
     if opts.showWaitbar
         h = waitbar(0, sprintf('Frame %d / %d', frameIdx, nzAlloc));
@@ -236,12 +288,23 @@ function out = PTU_FLIM_GPU(name, opts)
         tmpchan = tmpchan(1:nProc);
         tmpmarkers = tmpmarkers(1:nProc);
 
-        if ~isempty(yCarry)
+        if hasPreviousChunk
             tmpy = tmpy + tend;
         end
+        % Advance from the unfiltered stream.  The optional PIE filter may
+        % discard the final records in a chunk (for example blue photons),
+        % but that must not shorten the macrotime offset of the next chunk.
+        chunkEnd = tmpy(end) + loc;
 
         % Keep markers + valid photons
-        indValid = (tmpmarkers > 0) | ((tmpchan < anzch) & (tmptcspc < Ngate * chDiv));
+        photonValid = (tmpchan < anzch) & (tmptcspc < Ngate * chDiv);
+        if usePhotonGate
+            relativeNative = mod(double(tmptcspc) - ...
+                photonGateStartNative, nativePeriodBins);
+            photonValid = photonValid & ...
+                (relativeNative < photonGateLengthNative);
+        end
+        indValid = (tmpmarkers > 0) | photonValid;
 
         yNew      = tmpy(indValid);
         tcspcNew  = floor(double(tmptcspc(indValid)) ./ chDiv) + 1;
@@ -263,7 +326,9 @@ function out = PTU_FLIM_GPU(name, opts)
 
         % Update line markers
         if LineStart == LineStop
-            tmpturns = yCarry(markerCarry == LineStart);
+            lineStartMask = uint8(LineStart);
+            tmpturns = yCarry(bitand(markerCarry, lineStartMask) == ...
+                lineStartMask);
             if numel(turnsStart) > numel(turnsStop)
                 turnsStart = [turnsStart; tmpturns(2:2:end)]; %#ok<AGROW>
                 turnsStop  = [turnsStop;  tmpturns(1:2:end)]; %#ok<AGROW>
@@ -272,12 +337,17 @@ function out = PTU_FLIM_GPU(name, opts)
                 turnsStop  = [turnsStop;  tmpturns(2:2:end)]; %#ok<AGROW>
             end
         else
-            turnsStart = [turnsStart; yCarry(markerCarry == LineStart)]; %#ok<AGROW>
-            turnsStop  = [turnsStop;  yCarry(markerCarry == LineStop)]; %#ok<AGROW>
+            lineStartMask = uint8(LineStart);
+            lineStopMask = uint8(LineStop);
+            turnsStart = [turnsStart; yCarry(bitand(markerCarry, ...
+                lineStartMask) == lineStartMask)]; %#ok<AGROW>
+            turnsStop = [turnsStop; yCarry(bitand(markerCarry, ...
+                lineStopMask) == lineStopMask)]; %#ok<AGROW>
         end
 
         % Frame boundaries available in current carry
-        frameChange = yCarry(markerCarry == Frame);
+        frameMask = uint8(Frame);
+        frameChange = yCarry(bitand(markerCarry, frameMask) == frameMask);
 
         % Remove markers from photon carry
         indMarker = markerCarry ~= 0;
@@ -286,10 +356,56 @@ function out = PTU_FLIM_GPU(name, opts)
         chanCarry(indMarker)   = [];
         markerCarry(indMarker) = [];
 
-        if ~isempty(yCarry)
-            tend = yCarry(end) + loc;
-        else
-            tend = loc;
+        tend = chunkEnd;
+        hasPreviousChunk = true;
+
+        if opts.lowMemoryPhotonLists
+            [startsUse, stopsUse] = pairStartStop(turnsStart, turnsStop);
+            nCompleteLines = min(numel(startsUse), numel(stopsUse));
+            if nCompleteLines > 0
+                startsUse = startsUse(1:nCompleteLines);
+                stopsUse = stopsUse(1:nCompleteLines);
+                cutoff = stopsUse(end);
+                lastPhoton = find(yCarry <= cutoff, 1, 'last');
+                if ~isempty(lastPhoton)
+                    yf = yCarry(1:lastPhoton);
+                    tf = tcspcCarry(1:lastPhoton);
+                    chf = chanCarry(1:lastPhoton);
+                    yCarry(1:lastPhoton) = [];
+                    tcspcCarry(1:lastPhoton) = [];
+                    chanCarry(1:lastPhoton) = [];
+                    markerCarry(1:lastPhoton) = [];
+                    [syncStored, tcspcStored, chanStored, ...
+                        lineStored, colStored] = ...
+                        mapFramePhotonListsBlockwise(yf, tf, chf, ...
+                        startsUse, stopsUse, nx, ny, ...
+                        opts.photonBlockSize, opts.storePhotonSync, ...
+                        processedLineCount);
+                    if opts.storePhotonLists && ~isempty(tcspcStored)
+                        listChunkCount = listChunkCount + 1;
+                        syncCell{listChunkCount, 1} = syncStored;
+                        tcspcCell{listChunkCount, 1} = tcspcStored;
+                        chanCell{listChunkCount, 1} = chanStored;
+                        lineCell{listChunkCount, 1} = lineStored;
+                        colCell{listChunkCount, 1} = colStored;
+                        if opts.storePhotonFrame
+                            frameCell{listChunkCount, 1} = repmat( ...
+                                uint16(max(1, observedFrameCount + 1)), ...
+                                numel(tcspcStored), 1);
+                        else
+                            frameCell{listChunkCount, 1} = uint16([]);
+                        end
+                    end
+                end
+                turnsStart(1:nCompleteLines) = [];
+                turnsStop(1:nCompleteLines) = [];
+                dtThis = double(stopsUse(:) - startsUse(:));
+                dtSum = dtSum + sum(dtThis);
+                dtNum = dtNum + numel(dtThis);
+                processedLineCount = processedLineCount + nCompleteLines;
+            end
+            observedFrameCount = observedFrameCount + numel(frameChange);
+            continue;
         end
 
         % ---------------------------------------------------------
@@ -379,12 +495,20 @@ function out = PTU_FLIM_GPU(name, opts)
 
             % Store photons only if explicitly requested
             if opts.storePhotonLists
-                syncCell{frameIdx}  = yf(:);
+                if opts.storePhotonSync
+                    syncCell{frameIdx} = yf(:);
+                else
+                    syncCell{frameIdx} = zeros(0, 1);
+                end
                 tcspcCell{frameIdx} = uint16(tf(:));
                 chanCell{frameIdx}  = uint8(chf(:));
                 lineCell{frameIdx}  = uint16(lineIdx(:));
                 colCell{frameIdx}   = uint16(col(:));
-                frameCell{frameIdx} = uint16(frameIdx * ones(numel(yf),1));
+                if opts.storePhotonFrame
+                    frameCell{frameIdx} = repmat(uint16(frameIdx), numel(yf), 1);
+                else
+                    frameCell{frameIdx} = uint16([]);
+                end
             end
 
             % Pixel time estimate
@@ -393,19 +517,23 @@ function out = PTU_FLIM_GPU(name, opts)
             dtNum = dtNum + numel(dtThis);
 
             % Per-frame reduction
-            [frameCnt, frameSum1, frameSum2] = reduceMomentsAllChannels( ...
-                uint16(col(:)), uint16(lineIdx(:)), uint8(chf(:)), uint16(tf(:)), ...
-                nx, ny, nPix, nCh, chMapLUT);
+            if opts.computePerFrame || opts.computeGlobalMaps
+                [frameCnt, frameSum1, frameSum2] = reduceMomentsAllChannels( ...
+                    uint16(col(:)), uint16(lineIdx(:)), uint8(chf(:)), ...
+                    uint16(tf(:)), nx, ny, nPix, nCh, chMapLUT);
 
-            if opts.computePerFrame
-                tag(:,:,:,frameIdx) = reshape(single(frameCnt), [nx, ny, nCh]);
-                tau(:,:,:,frameIdx) = momentsToTau(frameCnt, frameSum1, frameSum2, Resolution, nx, ny, nCh);
+                if opts.computePerFrame
+                    tag(:,:,:,frameIdx) = reshape(single(frameCnt), [nx, ny, nCh]);
+                    tau(:,:,:,frameIdx) = momentsToTau(frameCnt, frameSum1, ...
+                        frameSum2, Resolution, nx, ny, nCh);
+                end
+
+                if opts.computeGlobalMaps
+                    globalCnt  = globalCnt  + frameCnt;
+                    globalSum1 = globalSum1 + frameSum1;
+                    globalSum2 = globalSum2 + frameSum2;
+                end
             end
-
-            % Online global accumulation
-            globalCnt  = globalCnt  + frameCnt;
-            globalSum1 = globalSum1 + frameSum1;
-            globalSum2 = globalSum2 + frameSum2;
 
             % Optional per-channel time vectors
             if opts.storeTimeCell
@@ -414,7 +542,7 @@ function out = PTU_FLIM_GPU(name, opts)
                 for kc = 1:nCh
                     indc = (localCh == kc);
                     if any(indc)
-                        timeCell{kc} = [timeCell{kc}; tAbs(indc)]; %#ok<AGROW>
+                        timeCell{kc} = [timeCell{kc}; tAbs(indc)];
                     end
                 end
             end
@@ -438,7 +566,11 @@ function out = PTU_FLIM_GPU(name, opts)
         close(h);
     end
 
-    nFrames = frameIdx - 1;
+    if opts.lowMemoryPhotonLists
+        nFrames = max(observedFrameCount, double(listChunkCount > 0));
+    else
+        nFrames = frameIdx - 1;
+    end
 
     if opts.computePerFrame && nFrames < nzAlloc
         tag(:,:,:,nFrames+1:end) = [];
@@ -448,8 +580,14 @@ function out = PTU_FLIM_GPU(name, opts)
     % -------------------------------------------------------------
     % Final/global maps from online accumulators
     % -------------------------------------------------------------
-    tags = reshape(single(globalCnt), [nx, ny, nCh]);
-    taus = momentsToTau(globalCnt, globalSum1, globalSum2, Resolution, nx, ny, nCh);
+    if opts.computeGlobalMaps
+        tags = reshape(single(globalCnt), [nx, ny, nCh]);
+        taus = momentsToTau(globalCnt, globalSum1, globalSum2, ...
+            Resolution, nx, ny, nCh);
+    else
+        tags = [];
+        taus = [];
+    end
 
     if dtNum > 0
         head.ImgHdr_PixelTime = 1e9 .* (dtSum / dtNum) ./ nx ./ head.TTResult_SyncRate;
@@ -463,13 +601,29 @@ function out = PTU_FLIM_GPU(name, opts)
     % Optional photon list concatenation
     % -------------------------------------------------------------
     if opts.storePhotonLists && nFrames > 0
-        usedFrames = 1:nFrames;
-        im_sync  = vertcat(syncCell{usedFrames});
+        if opts.lowMemoryPhotonLists
+            usedFrames = 1:listChunkCount;
+        else
+            usedFrames = 1:nFrames;
+        end
+        if opts.storePhotonSync
+            im_sync = vertcat(syncCell{usedFrames});
+        else
+            im_sync = zeros(0, 1);
+        end
         im_tcspc = vertcat(tcspcCell{usedFrames});
+        clear tcspcCell
         im_chan  = vertcat(chanCell{usedFrames});
+        clear chanCell
         im_line  = vertcat(lineCell{usedFrames});
+        clear lineCell
         im_col   = vertcat(colCell{usedFrames});
-        im_frame = vertcat(frameCell{usedFrames});
+        clear colCell
+        if opts.storePhotonFrame
+            im_frame = vertcat(frameCell{usedFrames});
+        else
+            im_frame = uint16([]);
+        end
     else
         im_sync  = zeros(0,1);
         im_tcspc = uint16([]);
@@ -515,7 +669,14 @@ function opts = setDefaultOpts(opts)
     defaults.photonsPerChunk  = 5e6;
     defaults.storeTcspcPix    = false;
     defaults.computePerFrame  = true;
+    defaults.computeGlobalMaps = true;
     defaults.storePhotonLists = false;
+    defaults.storePhotonSync  = true;
+    defaults.storePhotonFrame = true;
+    defaults.lowMemoryPhotonLists = false;
+    defaults.photonBlockSize = 1e6;
+    defaults.photonGateStartNative = [];
+    defaults.photonGateLengthNative = [];
     defaults.storeTimeCell    = false;
     defaults.showWaitbar      = false;
     defaults.maxFrames        = inf;
@@ -565,6 +726,71 @@ function updateWaitbar(h, frameIdx, nzAlloc)
                 sprintf('Frame %d / %d', min(frameIdx, nzAlloc), nzAlloc));
             drawnow limitrate
         end
+    end
+end
+
+function [syncOut, tcspcOut, chanOut, lineOut, colOut] = ...
+        mapFramePhotonListsBlockwise(syncIn, tcspcIn, chanIn, ...
+        lineStarts, lineStops, nx, ny, blockSize, keepSync, lineOffset)
+    nInput = min([numel(syncIn), numel(tcspcIn), numel(chanIn)]);
+    blockSize = max(1, floor(double(blockSize)));
+    tcspcOut = zeros(nInput, 1, 'uint16');
+    chanOut = zeros(nInput, 1, 'uint8');
+    lineOut = zeros(nInput, 1, 'uint16');
+    colOut = zeros(nInput, 1, 'uint16');
+    if keepSync
+        syncOut = zeros(nInput, 1, 'like', syncIn);
+    else
+        syncOut = zeros(0, 1, 'like', syncIn);
+    end
+    edges = [double(lineStarts(:)); inf];
+    lineStops = double(lineStops(:));
+    writePosition = 0;
+
+    for first = 1:blockSize:nInput
+        last = min(first + blockSize - 1, nInput);
+        sourceIndex = first:last;
+        syncBlock = double(syncIn(sourceIndex));
+        lineIndex = discretize(syncBlock, edges);
+        valid = ~isnan(lineIndex) & lineIndex >= 1 & ...
+            lineIndex <= numel(lineStops) & ...
+            (lineIndex + lineOffset) <= ny;
+        validSource = find(valid);
+        if isempty(validSource)
+            continue;
+        end
+        validLines = lineIndex(validSource);
+        validSource = validSource(syncBlock(validSource) <= ...
+            lineStops(validLines));
+        if isempty(validSource)
+            continue;
+        end
+        validLines = lineIndex(validSource);
+        startAtLine = double(lineStarts(validLines));
+        stopAtLine = lineStops(validLines);
+        fraction = (syncBlock(validSource) - startAtLine) ./ ...
+            max(stopAtLine - startAtLine, 1);
+        column = 1 + floor(nx .* fraction);
+        column = min(nx, max(1, column));
+
+        destination = writePosition + (1:numel(validSource));
+        absoluteSource = sourceIndex(validSource);
+        tcspcOut(destination) = uint16(tcspcIn(absoluteSource));
+        chanOut(destination) = uint8(chanIn(absoluteSource));
+        lineOut(destination) = uint16(validLines + lineOffset);
+        colOut(destination) = uint16(column);
+        if keepSync
+            syncOut(destination) = syncIn(absoluteSource);
+        end
+        writePosition = destination(end);
+    end
+
+    tcspcOut = tcspcOut(1:writePosition);
+    chanOut = chanOut(1:writePosition);
+    lineOut = lineOut(1:writePosition);
+    colOut = colOut(1:writePosition);
+    if keepSync
+        syncOut = syncOut(1:writePosition);
     end
 end
 

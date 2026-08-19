@@ -210,13 +210,14 @@ function Luminosa_GUI
         app.btnShowTau = uibutton(rowRunSecondary, 'Text', 'Sum FLIM', 'ButtonPushedFcn', @onShowTauMean, 'FontSize', 11);
 
         % Row 8
-        rowROI = uigridlayout(ctlGrid, [1 3]);
-        rowROI.ColumnWidth = {70, 90, '1x'};
+        rowROI = uigridlayout(ctlGrid, [1 4]);
+        rowROI.ColumnWidth = {55, 78, '1x', '1x'};
         rowROI.Padding = [0 0 0 0];
         app.btnSelectROI = uibutton(rowROI, 'Text', 'ROI', 'ButtonPushedFcn', @onSelectROI, 'FontSize', 11);
         app.dropROIShape = uidropdown(rowROI, 'Items', {'Rectangle','Ellipse','Lasso'}, 'Value', 'Rectangle');
         app.dropROIShape.Tooltip = 'ROI shape';
-        app.btnShowTCSPC = uibutton(rowROI, 'Text', 'Show Full TCSPC', 'ButtonPushedFcn', @onShowFullTCSPC, 'FontSize', 11);
+        app.btnShowTCSPC = uibutton(rowROI, 'Text', 'Show ROI', 'ButtonPushedFcn', @onShowTCSPC, 'FontSize', 11);
+        app.btnShowFullTCSPC = uibutton(rowROI, 'Text', 'Show Full', 'ButtonPushedFcn', @onShowFullTCSPC, 'FontSize', 11);
 
         % Row 9
         rowNsub = uigridlayout(ctlGrid, [1 2]);
@@ -1751,25 +1752,75 @@ function Luminosa_GUI
             addStatus('Display an image first.');
             return;
         end
+        addStatus(sprintf('Draw a %s ROI on the image.', lower(app.dropROIShape.Value)));
+        drawnow;
+
+        oldRoi = app.roi;
         clearRoiListeners();
-        if ~isempty(app.roi) && isvalid(app.roi)
-            delete(app.roi);
+        if ~isempty(oldRoi) && isvalid(oldRoi)
+            oldRoi.Visible = 'off';
         end
-        switch app.dropROIShape.Value
-            case 'Ellipse'
-                app.roi = drawellipse(app.axImage, 'Color', 'y');
-            case 'Lasso'
-                if exist('drawfreehand', 'file') == 2
-                    app.roi = drawfreehand(app.axImage, 'Color', 'y');
-                else
-                    app.roi = drawpolygon(app.axImage, 'Color', 'y');
-                end
-            otherwise
-                app.roi = drawrectangle(app.axImage, 'Color', 'y');
+        try
+            % Default pan/zoom interactions can consume the first drag on a UIAxes.
+            disableDefaultInteractivity(app.axImage);
+        catch
         end
-        addStatus(sprintf('ROI selected (%s).', app.dropROIShape.Value));
+        restoreInteractions = onCleanup(@restoreImageAxesInteractions); %#ok<NASGU>
+
+        try
+            switch app.dropROIShape.Value
+                case 'Ellipse'
+                    newRoi = drawellipse(app.axImage, 'Color', 'y');
+                case 'Lasso'
+                    if exist('drawfreehand', 'file') == 2
+                        newRoi = drawfreehand(app.axImage, 'Color', 'y');
+                    else
+                        newRoi = drawpolygon(app.axImage, 'Color', 'y');
+                    end
+                otherwise
+                    newRoi = drawrectangle(app.axImage, 'Color', 'y');
+            end
+        catch ME
+            if ~isempty(oldRoi) && isvalid(oldRoi)
+                oldRoi.Visible = 'on';
+                app.roi = oldRoi;
+                attachRoiListeners(app.roi);
+            else
+                app.roi = [];
+            end
+            addStatus(['ROI selection failed: ' ME.message]);
+            return;
+        end
+
+        if isempty(newRoi) || ~isvalid(newRoi)
+            app.roi = oldRoi;
+            if ~isempty(app.roi) && isvalid(app.roi)
+                app.roi.Visible = 'on';
+                attachRoiListeners(app.roi);
+            end
+            addStatus('ROI selection was cancelled.');
+            return;
+        end
+
+        if ~isempty(oldRoi) && isvalid(oldRoi)
+            delete(oldRoi);
+        end
+        app.roi = newRoi;
+        app.tcspc = [];
+        app.tcspcFit = [];
+        app.tcspcDisplayMode = 'none';
         attachRoiListeners(app.roi);
-        updateRoiTcspcLive(false);
+        addStatus(sprintf('ROI selected (%s). Press "Show ROI" to display its TCSPC.', app.dropROIShape.Value));
+    end
+
+    function restoreImageAxesInteractions()
+        if isempty(app.axImage) || ~isvalid(app.axImage)
+            return;
+        end
+        try
+            enableDefaultInteractivity(app.axImage);
+        catch
+        end
     end
 
 
@@ -1850,7 +1901,7 @@ function Luminosa_GUI
         setFitSummary({sprintf('ROI source: %s', srcInfo.mode), ...
                        sprintf('Native dt = %.3f ps', 1e3*dtNsNative), ...
                        sprintf('Display shift = %.3f ns (full measured curve shown)', shiftNs), ...
-                       'Reconvolution fit will run automatically when ROI changes.'});
+                       'Use "Fit TCSPC" for reconvolution fitting.'});
         app.tcspcDisplayMode = 'roi';
 
         addStatus(sprintf('ROI TCSPC built from %s. GUI Tau0 now applies only to ROI fitting.', srcInfo.mode));
@@ -4030,6 +4081,10 @@ function Luminosa_GUI
         if isempty(app.ptuOut)
             return;
         end
+        wasFitted = strcmp(app.tcspcDisplayMode, 'roi_fit') || ~isempty(app.tcspcFit);
+        if ~wasFitted && ~strcmp(app.tcspcDisplayMode, 'roi')
+            return;
+        end
         if app.roiUpdateBusy
             return;
         end
@@ -4044,11 +4099,17 @@ function Luminosa_GUI
         cleanupFlag = onCleanup(@() setfieldFlag(false)); %#ok<NASGU>
         try
             onShowTCSPC();
-        catch
+        catch ME
+            addStatus(['ROI TCSPC update failed: ' ME.message]);
+            return;
         end
-        try
-            onFitTCSPC();
-        catch
+        % Keep dragging responsive; reconvolution runs after the move completes.
+        if wasFitted && ~isMoving
+            try
+                onFitTCSPC();
+            catch ME
+                addStatus(['ROI TCSPC fit failed: ' ME.message]);
+            end
         end
     end
 
