@@ -788,8 +788,37 @@ function [summary, batchInfo] = checkpoint(rows, cfg, dataRoot, outputDir, ...
     summary = struct2table(rows);
     batchInfo = buildBatchInfo(rows, dataRoot, outputDir, csvFile, ...
         matFile, errorLogFile);
-    writetable(summary, csvFile);
-    save(matFile, 'summary', 'batchInfo', 'cfg', '-v7.3');
+    % Every per-acquisition MAT and PNG is already on disk by the time a
+    % checkpoint runs, so failing to refresh the batch summary must not throw
+    % away a completed run. Transient causes are common here: the data lives
+    % on an external drive, and the CSV is often open in a viewer. Retry a
+    % few times, then warn and carry on - the summary can be rebuilt by
+    % rerunning with cfg.resume = true.
+    writeWithRetry(@() writetable(summary, csvFile), csvFile, 'summary CSV');
+    writeWithRetry(@() save(matFile, 'summary', 'batchInfo', 'cfg', ...
+        '-v7.3'), matFile, 'summary MAT');
+end
+
+function writeWithRetry(writeFcn, targetFile, label)
+    attempts = 4;
+    for attempt = 1:attempts
+        try
+            writeFcn();
+            return;
+        catch writeError
+            if attempt == attempts
+                warning('batch_immune_cell_MIET:CheckpointWriteFailed', ...
+                    ['Could not update the %s at %s after %d attempts: ' ...
+                     '%s
+Per-acquisition results are unaffected. Close ' ...
+                     'any program holding the file, then rerun with ' ...
+                     'cfg.resume = true to rebuild the summary.'], ...
+                    label, targetFile, attempts, writeError.message);
+                return;
+            end
+            pause(2^(attempt - 1));
+        end
+    end
 end
 
 function info = buildBatchInfo(rows, dataRoot, outputDir, csvFile, matFile, errorLog)
