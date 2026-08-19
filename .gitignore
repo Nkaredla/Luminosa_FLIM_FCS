@@ -1,0 +1,4 @@
+# Platform-specific MEX build artefacts - rebuild with mex -O <name>.c
+*.mexw64
+*.mexa64
+*.mexmaci64
