@@ -21,6 +21,29 @@ cfg.componentMaps = struct( ...
     'posteriorThreshold', [0.8 0.95], ...
     'minExpectedPhotons', [10 10], ...
     'probabilityContourLevels', [0.5 0.7 0.9]);
+% Bayesian grid, sized from study_flim_grid_density_sweep.
+%
+% membraneTauCount was 10 (the immune_cell_MIET default). At the ~1e4 photons a
+% 4x4 window carries, that grid gave a 51% false three-component rate on
+% simulated BIexponential data: an off-grid single exponential is fit better by
+% two on-grid exponentials than by one, and enough photons make that decisive.
+% 48 points takes it to 0.2% for ~5 points of detection power. 32 points is
+% enough for a typical window but leaves ~18% at 3e4 photons, and since MIET
+% brightness tracks emitter height that residual would be height-dependent -
+% so the grid is sized for the brightest windows, not the median.
+%
+% The bounds are set explicitly too. The default lower bound is
+% max(1.15*tauSlb, tauSlb + 2*dt, 0.05), about 0.62 ns for a 0.3 ns SLB at
+% 0.16 ns bins, which cannot represent a membrane component below that at all.
+%
+% slbCountPriorNodes marginalises the fixed SLB count over its calibration
+% uncertainty rather than imposing it; on a fine grid that cut SLB-induced
+% lifetime bias by 56%, and on a coarse grid it does nothing.
+cfg.bayes = struct('batchSize', 2048, 'includeBackground', true, ...
+    'signalGrid', [0.25 0.5 0.75 1], 'membraneTauCount', 48, ...
+    'membraneTauBoundsNs', [0.4 5.5], ...
+    'fractionStep', 0.2, 'minimumMembraneFraction', 0.1, ...
+    'slbCountRelTol', 0.0025, 'slbCountPriorNodes', 5);
 cfg.spatialBinning = struct('enabled', true, ...
     'binSize', [2 2], 'step', [1 1]);
 cfg.spatialBinning4x4 = struct('enabled', true, ...
