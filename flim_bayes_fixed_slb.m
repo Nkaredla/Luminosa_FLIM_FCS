@@ -141,7 +141,8 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
             evaluations(modelIndex) = evaluate_fixed_count_grid(Y, ...
                 validFlat, grids(modelIndex), slbPattern, tauSlbNs, ...
                 opts.fixedSlbPhotonCount, opts.useGPU, opts.batchSize, ...
-                opts.slbCountRelTol);
+                opts.slbCountRelTol, opts.fixedSlbPhotonCountStd, ...
+                opts.slbCountPriorNodes);
         end
     else
         grids(1) = build_model_grid(0, slbPattern, membranePatterns, ...
@@ -250,6 +251,8 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
         'mode', constraintMode, ...
         'targetPhotonCount', opts.fixedSlbPhotonCount, ...
         'photonCountStd', opts.fixedSlbPhotonCountStd, ...
+        'priorNodes', opts.slbCountPriorNodes, ...
+        'countMarginalised', opts.slbCountPriorNodes > 0, ...
         'photonCountStdUsedForInference', false, ...
         'appliedExpectedPhotonCount', out.fixedSlbExpectedPhotonCount, ...
         'appliedDetectedPhotonFraction', out.fixedSlbPhotonFraction, ...
@@ -314,6 +317,9 @@ function opts = fill_options(opts, nx, ny, tauSlbNs, dtNs, modelPeriodNs)
     defaults.fixedSlbPhotonCount = [];
     defaults.fixedSlbPhotonCountStd = [];
     defaults.slbCountRelTol = 0.02;
+    % 0 keeps the historical behaviour: the SLB count is a hard constraint.
+    % A positive odd count marginalises over fixedSlbPhotonCountStd instead.
+    defaults.slbCountPriorNodes = 0;
     defaults.irfShiftBins = 0;
     defaults.convolutionMethod = 'auto';
 
@@ -335,6 +341,18 @@ function opts = fill_options(opts, nx, ny, tauSlbNs, dtNs, modelPeriodNs)
         {'real','finite','scalar','integer','positive'});
     validateattributes(opts.slbCountRelTol, {'numeric'}, ...
         {'real','finite','scalar','nonnegative','<',1});
+    validateattributes(opts.slbCountPriorNodes, {'numeric'}, ...
+        {'real','finite','scalar','integer','nonnegative','<=',15});
+    if opts.slbCountPriorNodes > 0 && mod(opts.slbCountPriorNodes, 2) == 0
+        error('flim_bayes_fixed_slb:SlbPriorNodes', ...
+            ['opts.slbCountPriorNodes must be odd so the prior mean is ' ...
+             'itself a node (got %d).'], opts.slbCountPriorNodes);
+    end
+    if opts.slbCountPriorNodes > 0 && isempty(opts.fixedSlbPhotonCountStd)
+        error('flim_bayes_fixed_slb:SlbPriorStd', ...
+            ['opts.slbCountPriorNodes > 0 requires ' ...
+             'opts.fixedSlbPhotonCountStd, which sets the prior width.']);
+    end
     validateattributes(opts.includeBackground, {'numeric','logical'}, {'scalar'});
     opts.includeBackground = logical(opts.includeBackground);
     validateattributes(opts.irfShiftBins, {'numeric'}, ...
@@ -791,9 +809,15 @@ end
 
 function evaluation = evaluate_fixed_count_grid(Y, validFlat, residualGrid, ...
         slbPattern, tauSlbNs, fixedSlbPhotonCount, useGPU, batchSize, ...
-        slbCountRelTol)
+        slbCountRelTol, slbCountStd, slbCountPriorNodes)
     if nargin < 9 || isempty(slbCountRelTol)
         slbCountRelTol = 0;
+    end
+    if nargin < 10
+        slbCountStd = [];
+    end
+    if nargin < 11 || isempty(slbCountPriorNodes)
+        slbCountPriorNodes = 0;
     end
     pixelCount = size(Y, 2);
     evaluation = empty_evaluation(pixelCount);
@@ -832,15 +856,49 @@ function evaluation = evaluate_fixed_count_grid(Y, validFlat, residualGrid, ...
         member = totalGroup == groupIndex;
         groupPixel = validIndex(member);
         total = representativeTotal(groupIndex);
-        if total <= 0
-            fixedFraction = 1;
-        else
-            fixedFraction = min(fixedSlbPhotonCount / total, 1);
+        % The SLB photon count is a calibration input, not a measurement, so
+        % treating it as exact forces every error in it into the free
+        % lifetimes or into a spurious extra component. With
+        % slbCountPriorNodes > 0 the count is marginalised over a Gaussian
+        % prior of width slbCountStd instead, which lets a mis-specified
+        % reference be absorbed in the SLB amplitude where it belongs.
+        [candidateCounts, candidateWeights] = slbCountCandidates( ...
+            fixedSlbPhotonCount, slbCountStd, slbCountPriorNodes);
+        candidateCount = numel(candidateCounts);
+        pixelCountInGroup = numel(groupPixel);
+        logEvidenceAll = nan(candidateCount, pixelCountInGroup);
+        meanAll = nan(11, pixelCountInGroup, candidateCount);
+        stdAll = nan(11, pixelCountInGroup, candidateCount);
+        mapAll = nan(11, pixelCountInGroup, candidateCount);
+        for candidateIndex = 1:candidateCount
+            if total <= 0
+                candidateFraction = 1;
+            else
+                candidateFraction = min( ...
+                    candidateCounts(candidateIndex) / total, 1);
+            end
+            groupGrid = instantiate_fixed_count_grid(residualGrid, ...
+                slbPattern, tauSlbNs, candidateFraction);
+            [logEvidenceOne, meanOne, stdOne, mapOne, groupUsedGPU] = ...
+                evaluate_grid_indices(Y, groupPixel, groupGrid, useGPU, ...
+                batchSize);
+            logEvidenceAll(candidateIndex, :) = logEvidenceOne;
+            meanAll(:, :, candidateIndex) = meanOne;
+            stdAll(:, :, candidateIndex) = stdOne;
+            mapAll(:, :, candidateIndex) = mapOne;
+            gpuUsed = gpuUsed || groupUsedGPU;
         end
-        groupGrid = instantiate_fixed_count_grid(residualGrid, ...
-            slbPattern, tauSlbNs, fixedFraction);
-        [logEvidence, meanValue, stdValue, mapValue, groupUsedGPU] = ...
-            evaluate_grid_indices(Y, groupPixel, groupGrid, useGPU, batchSize);
+
+        if candidateCount == 1
+            logEvidence = logEvidenceAll(1, :);
+            meanValue = meanAll(:, :, 1);
+            stdValue = stdAll(:, :, 1);
+            mapValue = mapAll(:, :, 1);
+        else
+            [logEvidence, meanValue, stdValue, mapValue] = ...
+                mixOverSlbCount(logEvidenceAll, meanAll, stdAll, mapAll, ...
+                candidateWeights);
+        end
         evaluation.logEvidence(groupPixel) = logEvidence;
         evaluation.mean(:, groupPixel) = meanValue;
         evaluation.std(:, groupPixel) = stdValue;
@@ -854,6 +912,78 @@ function evaluation = evaluate_fixed_count_grid(Y, validFlat, residualGrid, ...
         gpuUsed = gpuUsed || groupUsedGPU;
     end
     evaluation.usedGPU = gpuUsed;
+end
+
+function [counts, weights] = slbCountCandidates(centre, countStd, nodes)
+%SLBCOUNTCANDIDATES Gaussian prior nodes for the fixed SLB photon count.
+% nodes == 0 reproduces the hard constraint exactly: one node, unit weight.
+    if nodes <= 0 || isempty(countStd) || ~isfinite(countStd) || countStd <= 0
+        counts = centre;
+        weights = 1;
+        return;
+    end
+    half = (nodes - 1) / 2;
+    offsets = (-half:half);
+    % Nodes span +/-2 sigma, which covers the prior without wasting grid
+    % instantiations far out in the tails.
+    offsets = 2 * offsets / max(half, 1);
+    counts = centre + offsets * countStd;
+    counts = max(counts, 0);
+    weights = exp(-0.5 * offsets .^ 2);
+    weights = weights / sum(weights);
+end
+
+function [logEvidence, meanValue, stdValue, mapValue] = ...
+        mixOverSlbCount(logEvidenceAll, meanAll, stdAll, mapAll, priorWeights)
+%MIXOVERSLBCOUNT Prior-weighted mixture over the candidate SLB counts.
+% The marginal likelihood is the prior-weighted average of the per-candidate
+% evidences; the reported moments are those of the resulting mixture, so the
+% posterior width now includes uncertainty in the SLB calibration itself.
+    pixelCount = size(logEvidenceAll, 2);
+    candidateCount = size(logEvidenceAll, 1);
+    logEvidence = nan(1, pixelCount);
+    meanValue = nan(11, pixelCount, 'single');
+    stdValue = nan(11, pixelCount, 'single');
+    mapValue = nan(11, pixelCount, 'single');
+
+    usable = all(isfinite(logEvidenceAll), 1);
+    if ~any(usable)
+        return;
+    end
+
+    logPrior = reshape(log(priorWeights(:)), candidateCount, 1);
+    shifted = logEvidenceAll(:, usable) + logPrior;
+    maximum = max(shifted, [], 1);
+    weight = exp(shifted - maximum);
+    weightSum = sum(weight, 1);
+    logEvidence(usable) = maximum + log(weightSum);
+    weight = weight ./ weightSum;
+
+    firstMoment = zeros(11, nnz(usable));
+    secondMoment = zeros(11, nnz(usable));
+    for candidateIndex = 1:candidateCount
+        candidateWeight = weight(candidateIndex, :);
+        candidateMean = double(meanAll(:, usable, candidateIndex));
+        candidateStd = double(stdAll(:, usable, candidateIndex));
+        firstMoment = firstMoment + candidateMean .* candidateWeight;
+        secondMoment = secondMoment + ...
+            (candidateMean .^ 2 + candidateStd .^ 2) .* candidateWeight;
+    end
+    meanValue(:, usable) = single(firstMoment);
+    stdValue(:, usable) = single(sqrt(max(secondMoment - ...
+        firstMoment .^ 2, 0)));
+
+    % The MAP is a single parameter vector, so take it from the candidate
+    % carrying the most posterior weight rather than averaging.
+    [~, bestCandidate] = max(weight, [], 1);
+    usableIndex = find(usable);
+    for candidateIndex = 1:candidateCount
+        selected = usableIndex(bestCandidate == candidateIndex);
+        if isempty(selected)
+            continue;
+        end
+        mapValue(:, selected) = mapAll(:, selected, candidateIndex);
+    end
 end
 
 function [logEvidence, meanOutput, stdOutput, mapOutput, gpuUsed] = ...

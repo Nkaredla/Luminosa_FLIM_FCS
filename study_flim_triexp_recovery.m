@@ -77,6 +77,18 @@ function results = study_flim_triexp_recovery(opts)
     fitGrid = logspace(log10(opts.membraneTauBoundsNs(1)), ...
         log10(opts.membraneTauBoundsNs(2)), opts.membraneTauCount);
 
+    % Snapping the truth onto the fit grid removes discretisation as a source
+    % of model mis-specification. Comparing a snapped run against an unsnapped
+    % one separates "the grid cannot represent this lifetime" from "the method
+    % cannot resolve this lifetime" - identical in the error statistics
+    % otherwise.
+    if opts.placeTruthOnGrid
+        tau2True = snapToGrid(tau2True, fitGrid);
+        tau3True = snapToGrid(tau3True, fitGrid);
+        tau2Grid = snapToGrid(tau2Grid, fitGrid);
+        tau3Grid = snapToGrid(tau3Grid, fitGrid);
+    end
+
     fprintf('\nstudy_flim_triexp_recovery\n');
     fprintf(['  instrument : period %.3g ns, dt %.3g ns, %d bins, ' ...
         'IRF FWHM %.3g ns\n'], opts.pulsePeriodNs, opts.dtNs, nBins, ...
@@ -96,6 +108,10 @@ function results = study_flim_triexp_recovery(opts)
         opts.membraneTauBoundsNs(1), opts.membraneTauBoundsNs(2), ...
         localGridStep(fitGrid, 1), localGridStep(fitGrid, 4));
     fprintf('\n');
+
+    fprintf('  truth snapped onto fit grid: %d\n', opts.placeTruthOnGrid);
+    fprintf('  SLB count prior nodes: %d (0 = hard constraint)\n\n', ...
+        opts.slbCountPriorNodes);
 
     setCount = size(opts.amplitudeSets, 1);
     totalCount = numel(opts.photonTotals);
@@ -131,6 +147,7 @@ function results = study_flim_triexp_recovery(opts)
                 'fractionStep', 0.125, ...
                 'minimumMembraneFraction', 0.05, ...
                 'slbCountRelTol', 0, ...
+                'slbCountPriorNodes', opts.slbCountPriorNodes, ...
                 'fixedSlbPhotonCount', fractions(1) * photonTotal * ...
                     (1 + opts.slbCountBiasFraction), ...
                 'fixedSlbPhotonCountStd', 0.1 * fractions(1) * photonTotal);
@@ -232,6 +249,8 @@ function opts = fillStudyDefaults(opts)
         'pulsePeriodNs', 12.5, 'dtNs', 0.16, 'irfFwhmNs', 0.35, ...
         'membraneTauCount', 24, 'membraneTauBoundsNs', [0.4 5.5], ...
         'slbCountBiasFraction', 0, ...
+        'placeTruthOnGrid', false, ...
+        'slbCountPriorNodes', 0, ...
         'exampleTaus', [0.8 3.0; 1.5 4.5], ...
         'examplePhotonTotals', [500 8000 50000], ...
         'exampleAmplitudeSet', 2, ...
@@ -319,6 +338,16 @@ function step = localGridStep(fitGrid, tau)
     else
         step = (fitGrid(nearest+1) - fitGrid(nearest-1)) / 2;
     end
+end
+
+function value = snapToGrid(value, grid)
+    shape = size(value);
+    flat = value(:);
+    for k = 1:numel(flat)
+        [~, nearest] = min(abs(grid - flat(k)));
+        flat(k) = grid(nearest);
+    end
+    value = reshape(flat, shape);
 end
 
 function value = iqrOmitNan(x)
