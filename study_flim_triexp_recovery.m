@@ -43,6 +43,10 @@ function results = study_flim_triexp_recovery(opts)
 %   membraneTauCount          fit grid size, default 24
 %   membraneTauBoundsNs       fit grid span, default [0.4 5.5]
 %   slbCountBiasFraction      mis-specify the fixed SLB count, default 0
+%   exampleTaus               [tau2 tau3] rows to draw as example decays,
+%                             default [0.8 3.0; 1.5 4.5]
+%   examplePhotonTotals       which budgets to draw, default [500 8000 50000]
+%   exampleAmplitudeSet       which amplitude row to draw, default 2
 %   outputDir                 where PNG/CSV/MAT go, default pwd
 %   seed                      default 42
 
@@ -97,6 +101,7 @@ function results = study_flim_triexp_recovery(opts)
     totalCount = numel(opts.photonTotals);
     rows = struct([]);
     resultGrids = cell(setCount, totalCount);
+    exampleStore = cell(setCount, totalCount);
 
     for setIndex = 1:setCount
         fractions = opts.amplitudeSets(setIndex, :);
@@ -151,6 +156,12 @@ function results = study_flim_triexp_recovery(opts)
                 'modelMap', modelMap, 'fractions', fractions, ...
                 'photonTotal', photonTotal, 'seconds', elapsed);
 
+            % Keep the raw decay and the fitted parameters for a few
+            % representative pixels, so the example figure shows real
+            % simulated data against the model actually fitted to it.
+            exampleStore{setIndex, totalIndex} = captureExamples(opts, ...
+                tau2Grid, tau3Grid, Y, out, tau2Fit, tau3Fit, modelMap);
+
             entry = struct( ...
                 'amplitudeSet', setIndex, ...
                 'slbFraction', fractions(1), ...
@@ -188,6 +199,7 @@ function results = study_flim_triexp_recovery(opts)
 
     summary = struct2table(rows);
     results = struct('summary', summary, 'grids', {resultGrids}, ...
+        'examples', {exampleStore}, ...
         'opts', opts, 'irf', irf, 'timeNs', timeNs, 'fitGridNs', fitGrid);
 
     csvFile = fullfile(opts.outputDir, 'flim_triexp_recovery_summary.csv');
@@ -196,6 +208,7 @@ function results = study_flim_triexp_recovery(opts)
     save(matFile, 'results', '-v7.3');
 
     figureFiles = plotRecovery(results);
+    figureFiles = [figureFiles, plotExampleDecays(results)];
     fprintf('\n  wrote %s\n', csvFile);
     fprintf('  wrote %s\n', matFile);
     for k = 1:numel(figureFiles)
@@ -208,8 +221,8 @@ end
 
 function opts = fillStudyDefaults(opts)
     defaults = struct( ...
-        'tau2Range', [0.5 2.0], 'tau2Count', 12, ...
-        'tau3Range', [2.5 5.0], 'tau3Count', 12, ...
+        'tau2Range', [0.5 2.0], 'tau2Count', 20, ...
+        'tau3Range', [2.5 5.0], 'tau3Count', 20, ...
         'tauSlbNs', 0.3, ...
         'photonTotals', [500 2000 8000 20000 50000], ...
         'amplitudeSets', [0.50 0.30 0.20; ...
@@ -219,6 +232,9 @@ function opts = fillStudyDefaults(opts)
         'pulsePeriodNs', 12.5, 'dtNs', 0.16, 'irfFwhmNs', 0.35, ...
         'membraneTauCount', 24, 'membraneTauBoundsNs', [0.4 5.5], ...
         'slbCountBiasFraction', 0, ...
+        'exampleTaus', [0.8 3.0; 1.5 4.5], ...
+        'examplePhotonTotals', [500 8000 50000], ...
+        'exampleAmplitudeSet', 2, ...
         'outputDir', pwd, 'seed', 42);
     names = fieldnames(defaults);
     for k = 1:numel(names)
@@ -340,6 +356,172 @@ function text = limitedByText(errorValue, gridLimit)
     else
         text = 'noise-limited';
     end
+end
+
+% ----------------------------------------------------------- example decays
+
+function examples = captureExamples(opts, tau2Grid, tau3Grid, Y, out, ...
+        tau2Fit, tau3Fit, modelMap)
+    examples = struct([]);
+    for e = 1:size(opts.exampleTaus, 1)
+        [~, ix] = min(abs(tau2Grid - opts.exampleTaus(e, 1)));
+        [~, iy] = min(abs(tau3Grid - opts.exampleTaus(e, 2)));
+        entry = struct( ...
+            'tau2True', tau2Grid(ix), 'tau3True', tau3Grid(iy), ...
+            'counts', reshape(double(Y(ix, iy, :)), 1, []), ...
+            'tau2Fit', tau2Fit(ix, iy), 'tau3Fit', tau3Fit(ix, iy), ...
+            'slbFraction', ...
+                double(out.twoMembrane.fixedSlbPhotonFraction(ix, iy)), ...
+            'comp2Fraction', ...
+                double(out.twoMembrane.membrane1PhotonFraction(ix, iy)), ...
+            'comp3Fraction', ...
+                double(out.twoMembrane.membrane2PhotonFraction(ix, iy)), ...
+            'backgroundFraction', ...
+                double(out.twoMembrane.backgroundFraction(ix, iy)), ...
+            'selectedModel', modelMap(ix, iy));
+        if isempty(examples)
+            examples = entry;
+        else
+            examples(end+1) = entry; %#ok<AGROW>
+        end
+    end
+end
+
+function files = plotExampleDecays(results)
+%PLOTEXAMPLEDECAYS Presentation and paper figure: data, fit and components.
+%
+% One column per example (tau2, tau3) pair and one pair of rows per photon
+% budget: the decay on a log scale with the fitted total and the three fitted
+% components, and beneath it the Pearson residual. Saved as PNG for slides
+% and PDF for a paper, because the PDF stays vector.
+    opts = results.opts;
+    setIndex = min(max(1, round(opts.exampleAmplitudeSet)), ...
+        size(opts.amplitudeSets, 1));
+
+    [~, levelIndices] = ismember(opts.examplePhotonTotals, opts.photonTotals);
+    levelIndices = levelIndices(levelIndices > 0);
+    if isempty(levelIndices)
+        levelIndices = 1:numel(opts.photonTotals);
+    end
+    nLevels = numel(levelIndices);
+    nExamples = size(opts.exampleTaus, 1);
+
+    timeNs = results.timeNs;
+    irf = results.irf;
+    period = opts.pulsePeriodNs;
+
+    h = figure('Color', 'w', 'Visible', 'off', ...
+        'Position', [60 60 420 * nExamples, 360 * nLevels]);
+    % Three rows per photon level: the decay spans the first two so it gets
+    % twice the height of its residual strip, which a single-row decay panel
+    % is too short for - MATLAB drops all but one decade label.
+    layout = tiledlayout(h, 3 * nLevels, nExamples, ...
+        'Padding', 'compact', 'TileSpacing', 'tight');
+
+    for levelSlot = 1:nLevels
+        totalIndex = levelIndices(levelSlot);
+        photonTotal = opts.photonTotals(totalIndex);
+        examples = results.examples{setIndex, totalIndex};
+        for e = 1:nExamples
+            ex = examples(e);
+            counts = ex.counts;
+
+            % Rebuild the fitted decay from the recovered parameters, so the
+            % curve drawn is the model actually fitted rather than the truth.
+            fractions = [ex.slbFraction, ex.comp2Fraction, ex.comp3Fraction];
+            taus = [opts.tauSlbNs, ex.tau2Fit, ex.tau3Fit];
+            components = zeros(3, numel(timeNs));
+            for k = 1:3
+                if isfinite(taus(k)) && taus(k) > 0 && ...
+                        isfinite(fractions(k)) && fractions(k) > 0
+                    components(k, :) = fractions(k) * ...
+                        periodicDecay(irf, timeNs, period, taus(k));
+                end
+            end
+            background = zeros(1, numel(timeNs));
+            if isfinite(ex.backgroundFraction) && ex.backgroundFraction > 0
+                background(:) = ex.backgroundFraction / numel(timeNs);
+            end
+            model = sum(components, 1) + background;
+            scale = sum(model);
+            if scale > 0
+                components = components / scale;
+                model = model / scale;
+            end
+            expected = photonTotal * model;
+
+            % --- decay panel ---
+            ax = nexttile(layout, (3 * levelSlot - 3) * nExamples + e, ...
+                [2 1]);
+            hold(ax, 'on');
+            stairs(ax, timeNs, max(counts, 0.1), 'Color', [0.45 0.45 0.45], ...
+                'LineWidth', 0.6, 'DisplayName', 'simulated data');
+            plot(ax, timeNs, max(expected, 1e-3), 'k-', 'LineWidth', 1.6, ...
+                'DisplayName', 'fitted total');
+            colours = [0.00 0.45 0.74; 0.85 0.33 0.10; 0.47 0.67 0.19];
+            names = {sprintf('SLB %.2g ns', opts.tauSlbNs), ...
+                sprintf('c2 %.2f ns', ex.tau2Fit), ...
+                sprintf('c3 %.2f ns', ex.tau3Fit)};
+            for k = 1:3
+                plot(ax, timeNs, max(photonTotal * components(k, :), 1e-3), ...
+                    '-', 'Color', colours(k, :), 'LineWidth', 1.1, ...
+                    'DisplayName', names{k});
+            end
+            set(ax, 'YScale', 'log');
+            upperLimit = max(4, 2 * max(counts));
+            ylim(ax, [0.5 upperLimit]);
+            % Force one tick per decade; otherwise a short panel silently
+            % renders with a single label and the scale is unreadable.
+            set(ax, 'YTick', 10 .^ (0:ceil(log10(upperLimit))));
+            xlim(ax, [0 timeNs(end)]);
+            grid(ax, 'on');
+            ax.GridAlpha = 0.12;
+            ylabel(ax, 'photons / bin', 'FontSize', 8);
+            title(ax, sprintf(['N=%d | true %.2f / %.2f ns | fitted ' ...
+                '%.2f / %.2f ns | M%d'], photonTotal, ex.tau2True, ...
+                ex.tau3True, ex.tau2Fit, ex.tau3Fit, ex.selectedModel), ...
+                'FontSize', 8);
+            if levelSlot == 1 && e == 1
+                legend(ax, 'Location', 'northeast', 'FontSize', 6, ...
+                    'Box', 'off');
+            end
+            set(ax, 'XTickLabel', []);
+            hold(ax, 'off');
+
+            % --- residual panel ---
+            ax = nexttile(layout, (3 * levelSlot - 1) * nExamples + e);
+            residual = (counts - expected) ./ sqrt(max(expected, 1e-6));
+            stem(ax, timeNs, residual, 'Marker', 'none', ...
+                'Color', [0.2 0.2 0.2], 'LineWidth', 0.5);
+            yline(ax, 0, 'k-');
+            yline(ax, 2, 'r:');
+            yline(ax, -2, 'r:');
+            xlim(ax, [0 timeNs(end)]);
+            ylim(ax, [-4 4]);
+            set(ax, 'YTick', [-2 0 2]);
+            grid(ax, 'on');
+            ax.GridAlpha = 0.12;
+            ylabel(ax, 'Pearson res.', 'FontSize', 8);
+            if levelSlot == nLevels
+                xlabel(ax, 'time [ns]', 'FontSize', 8);
+            end
+        end
+    end
+
+    fractionsRow = opts.amplitudeSets(setIndex, :);
+    title(layout, sprintf(['Simulated triexponential decays and fixed-SLB ' ...
+        'fits | photon fractions %.2f / %.2f / %.2f'], fractionsRow(1), ...
+        fractionsRow(2), fractionsRow(3)), 'FontWeight', 'bold');
+    subtitle(layout, ['grey = simulated counts, black = fitted total, ' ...
+        'coloured = fitted components; dotted lines at +/- 2 sigma'], ...
+        'FontSize', 8);
+
+    pngFile = fullfile(opts.outputDir, 'flim_triexp_example_decays.png');
+    pdfFile = fullfile(opts.outputDir, 'flim_triexp_example_decays.pdf');
+    exportgraphics(h, pngFile, 'Resolution', 300);
+    exportgraphics(h, pdfFile, 'ContentType', 'vector');
+    close(h);
+    files = {pngFile, pdfFile};
 end
 
 % ------------------------------------------------------------------ figures
