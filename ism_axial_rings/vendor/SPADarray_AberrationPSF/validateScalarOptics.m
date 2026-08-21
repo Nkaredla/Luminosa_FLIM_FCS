@@ -1,0 +1,46 @@
+function validateScalarOptics(sim)
+%VALIDATESCALAROPTICS Reject invalid scalar Debye/Bessel configurations.
+
+    required = {'NA','lamExc','lamEm','lamRef'};
+    for k = 1:numel(required)
+        name = required{k};
+        if ~isfield(sim,name) || ~isnumeric(sim.(name)) || ...
+                ~isscalar(sim.(name)) || ~isfinite(sim.(name)) || sim.(name) <= 0
+            error('validateScalarOptics:InvalidParameter', ...
+                'sim.%s must be a finite positive scalar.', name);
+        end
+    end
+
+    isInterface = isfield(sim,'sampleGeometry') && ...
+        strcmpi(sim.sampleGeometry,'airOnGlass');
+    if isInterface
+        interfaceRequired = {'nImmersion','nGlass','nSample', ...
+            'nDesignGlass','coverslipThicknessUm', ...
+            'designCoverslipThicknessUm'};
+        for k = 1:numel(interfaceRequired)
+            name = interfaceRequired{k};
+            if ~isfield(sim,name) || ~isnumeric(sim.(name)) || ...
+                    ~isscalar(sim.(name)) || ~isfinite(sim.(name)) || ...
+                    sim.(name) <= 0
+                error('validateScalarOptics:InvalidInterfaceParameter', ...
+                    'sim.%s must be a finite positive scalar.',name);
+            end
+        end
+        propagationIndex = sim.nImmersion;
+    else
+        if ~isfield(sim,'nMedium') || ~isnumeric(sim.nMedium) || ...
+                ~isscalar(sim.nMedium) || ~isfinite(sim.nMedium) || ...
+                sim.nMedium <= 0
+            error('validateScalarOptics:InvalidParameter', ...
+                'sim.nMedium must be a finite positive scalar.');
+        end
+        propagationIndex = sim.nMedium;
+    end
+
+    if sim.NA >= propagationIndex
+        error('validateScalarOptics:NAExceedsMediumIndex', ...
+            ['The objective-side propagating-wave model requires NA below ' ...
+            'the immersion refractive index. Received NA = %.6g and ' ...
+            'objective-side index = %.6g.'],sim.NA,propagationIndex);
+    end
+end
