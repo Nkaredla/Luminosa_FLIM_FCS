@@ -72,8 +72,8 @@ function out = simulate_ring_weight_vs_height(opts)
     if isfolder(vendorDir) && ~contains([path pathsep], [vendorDir pathsep])
         addpath(vendorDir);
     end
-    for required = {'defaultParams', 'spadEffectivePSFArray', ...
-            'detectorLayout', 'coeffStruct'}
+    for required = {'defaultParams', 'psfBesselAirInterface', ...
+            'spadEffectivePSFArrayInterface', 'detectorLayout', 'coeffStruct'}
         if exist(required{1}, 'file') ~= 2
             error('simulate_ring_weight_vs_height:MissingDependency', ...
                 ['%s.m not found. It should be in ' ...
@@ -87,7 +87,7 @@ function out = simulate_ring_weight_vs_height(opts)
         'heightsUm', 0:0.05:1.0, ...
         'lamExcUm', 0.640, 'lamEmUm', 0.690, ...
         'NA', 1.45, 'nSample', 1.33, 'nImmersion', 1.52, ...
-        'maxSinTheta', 0.98, ...
+        'nGlass', 1.518, 'stageZUm', 0, ...
         'detPitchUm', 0.18, ...
         'fovUm', 3.0, 'nx', 61, ...
         'ringEdgesUm', [], ...
@@ -115,21 +115,23 @@ function out = simulate_ring_weight_vs_height(opts)
     sim.lamExc = opts.lamExcUm;
     sim.lamEm = opts.lamEmUm;
     sim.lamRef = opts.lamEmUm;
-    % An oil objective of nominal NA 1.45 imaging into water cannot deliver
-    % NA 1.45 IN the sample: vectorialPSFBessel forms
-    %   sinTheta = (NA / nMedium) * rho
-    % which requires NA <= nMedium, and physically everything above the
-    % critical angle is evanescent at the glass-water interface. Those
-    % supercritical rays only reach emitters within ~100 nm of the surface,
-    % so for the 0.2-1 um heights this study is about, the usable cone is
-    % capped just below n_sample. The nominal NA and immersion index are
-    % recorded for provenance but the propagating model is homogeneous water.
-    effectiveNA = min(opts.NA, opts.nSample * opts.maxSinTheta);
-    sim.NA = effectiveNA;
+    % Full aperture, stratified sample. The homogeneous model would need
+    % NA <= nMedium and so cannot express NA 1.45 in water, but the interface
+    % model parameterises the pupil as q = NA*rho with
+    % cosSample = sqrt(1-(q/nSample)^2), so supercritical components (q >
+    % nSample) are retained with complex cosSample. Those are the
+    % supercritical-angle fluorescence terms: near-field content of a dipole
+    % close to the interface couples into propagating glass-side waves, the
+    % reciprocal of TIRF. They are collected, and because they decay over
+    % ~100-200 nm they are the steepest axial reporter available in exactly
+    % the range the membrane occupies. Capping the NA would discard them.
+    sim.NA = opts.NA;
     sim.nMedium = opts.nSample;
     sim.nSample = opts.nSample;
+    sim.nGlass = opts.nGlass;
+    sim.nDesignGlass = opts.nGlass;
     sim.nImmersion = opts.nImmersion;
-    sim.sampleGeometry = 'homogeneous';
+    sim.sampleGeometry = 'airOnGlass';
     sim.detPitch = opts.detPitchUm;
     sim.detSize = opts.detPitchUm;
     sim.detectorLayout = 'honeycomb23';
@@ -144,9 +146,12 @@ function out = simulate_ring_weight_vs_height(opts)
     sim.x = linspace(-sim.fovXY / 2, sim.fovXY / 2, sim.nx);
     sim.y = sim.x;
     sim.dx = abs(sim.x(2) - sim.x(1));
-    sim.z = heights;
-    sim.nz = numel(heights);
-    sim.nzRange = max(heights) - min(heights);
+    % In the stratified model the axial variable is the emitterHeight
+    % ARGUMENT of psfBesselAirInterface, not sim.z. sim.z is left as a
+    % single plane so the lateral grids stay consistent.
+    sim.z = 0;
+    sim.nz = 1;
+    sim.nzRange = 0;
 
     nDet = sim.nDet;
     radius = sqrt(sum(sim.detXY .^ 2, 2));
@@ -154,15 +159,15 @@ function out = simulate_ring_weight_vs_height(opts)
     nRing = max(ringIndex);
 
     fprintf('\nsimulate_ring_weight_vs_height\n');
-    fprintf(['  optics: nominal NA %.3g in n_imm %.4g, EFFECTIVE in-sample ' ...
-        'NA %.4g in n %.4g\n'], opts.NA, opts.nImmersion, sim.NA, ...
-        sim.nMedium);
-    if effectiveNA < opts.NA - 1e-9
-        fprintf(['    (capped at %.2f x n_sample: the supercritical ' ...
-            'cone is evanescent and reaches\n'], opts.maxSinTheta);
-        fprintf(['     only ~100 nm from the surface, so it does not ' ...
-            'contribute at these heights)\n']);
-    end
+    fprintf(['  optics: NA %.3g (full aperture), n_imm %.4g, n_glass ' ...
+        '%.4g, n_sample %.4g\n'], sim.NA, sim.nImmersion, ...
+        sim.nGlass, sim.nSample);
+    criticalNA = sim.nSample;
+    fprintf(['    supercritical pupil fraction (q > n_sample): ' ...
+        '%.1f%% of the radius\n'], ...
+        100 * max(0, (sim.NA - criticalNA)) / sim.NA);
+    fprintf('  stage focus: %.3g um relative to the interface\n', ...
+        opts.stageZUm);
     fprintf('  wavelengths: exc %.3g um, em %.3g um; pitch %.3g um\n', ...
         sim.lamExc, sim.lamEm, sim.detPitch);
     fprintf('  field: %.3g um over %d samples; %d detectors\n', ...
@@ -175,7 +180,8 @@ function out = simulate_ring_weight_vs_height(opts)
     coeffs = coeffStruct(sim, zeros(numel(sim.modeOrder), 1));
 
     started = tic;
-    hEff = spadEffectivePSFArray(sim, coeffs, 'none');
+    hEff = spadEffectivePSFArrayInterface(sim, coeffs, ...
+        opts.stageZUm, heights);
     fprintf('    forward model done in %.0f s, hEff %s\n', ...
         toc(started), mat2str(size(hEff)));
     % hEff is [ny nx nz nDet]; the lateral sum is the total signal a
@@ -266,7 +272,7 @@ function out = simulate_ring_weight_vs_height(opts)
         'mixtureHeightUm', heights(mixtureIndex), ...
         'mixturePhiGrid', phiGrid, 'mixtureFisherRing', fisherRing, ...
         'mixtureFisherChannel', fisherChannel, 'sim', sim, 'opts', opts, ...
-        'effectiveNA', effectiveNA, 'seconds', toc(started));
+        'seconds', toc(started));
 
     if opts.makeFigure
         out.figure = plotRingWeights(out);

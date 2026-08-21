@@ -30,38 +30,60 @@ lateral sum.
 
 ## Optics as configured
 
-| quantity | value | note |
-|---|---|---|
-| nominal objective NA | 1.45 | oil immersion |
-| immersion index | 1.52 | recorded, not propagated |
-| sample index | 1.33 | water-like medium |
-| **effective in-sample NA** | **1.303** | `0.98 x n_sample` |
-| excitation / emission | 0.640 / 0.690 um | |
-| detector | honeycomb23, 0.18 um pitch | same array as Luminosa |
+| quantity | value |
+|---|---|
+| objective NA | 1.45, full aperture, NOT capped |
+| immersion / glass / sample index | 1.52 / 1.518 / 1.33 |
+| sample geometry | `airOnGlass` (the stratified model, general in `nSample`) |
+| excitation / emission | 0.640 / 0.690 um |
+| detector | honeycomb23, 0.18 um pitch |
 
-The NA cap is not a convenience. `vectorialPSFBessel` forms
-`sinTheta = (NA / nMedium) * rho`, which requires `NA <= nMedium`; NA 1.45 in
-water would give `sinTheta = 1.09`. Physically, everything above the critical
-angle at the glass-water interface is evanescent and only reaches emitters
-within about 100 nm of the surface, so it contributes nothing at the 0.2-1 um
-heights this study is about. Axial discrimination is therefore slightly weaker
-than a naive NA 1.45 calculation would suggest.
+An earlier version capped the in-sample NA at `0.98 * n_sample = 1.303`,
+justified by the claim that supercritical rays are evanescent and so do not
+contribute beyond ~100 nm. That was wrong, and the correction matters.
 
-## Three limitations to keep in view
+Supercritical-angle fluorescence (SAF) IS collected. A dipole close to the
+interface has near-field content with in-plane momentum above `n_sample*k0`,
+and at the water-glass boundary that couples into propagating waves in the
+higher-index glass - the reciprocal of TIRF. Because SAF decays over roughly
+100-200 nm from the surface, its share of the signal is the steepest axial
+reporter available in exactly the range the membrane occupies, and it is
+nearly absent for internalised dye several hundred nm up. That is closer to a
+binary membrane-versus-internalised discriminator than defocus is. Capping the
+aperture discarded the best channel.
 
-1. **The metal film is not modelled.** MIET works because the metal reshapes
-   the emission angular distribution, and none of `homogeneous` or
-   `airOnGlass` captures that. Near-surface (membrane) emitters are therefore
-   modelled less faithfully than out-of-focus (internalised) ones. Since the
-   quantity of interest is the contrast between the two, this biases the
-   comparison in a knowable direction rather than invalidating it - but the
-   membrane ring signature should not be treated as quantitative.
-2. **No water-on-glass stratified model exists** in the vendored code;
-   `sampleGeometry` accepts only `airOnGlass` and `homogeneous`. Homogeneous
-   water is used.
-3. **The PSF is symmetric about focus**, so this measures `|z|`, not signed
-   `z`. Acceptable when focus sits at the membrane and the dye of interest is
-   above it; it cannot separate above from below.
+The stratified model handles it correctly. Where the homogeneous model needs
+`sinTheta = (NA/nMedium)*rho` and therefore `NA <= nMedium`, the interface
+model uses `q = NA*rho` with `cosSample = sqrt(1-(q/nSample)^2)`, so the pupil
+spans the full aperture and components with `q > nSample` acquire a complex
+`cosSample`. Its own header states that this retains evanescent decay above
+the critical angle. `sampleGeometry` is named `airOnGlass` but the code is
+parameterised by `nSample`, `nGlass`, `nImmersion` and `nDesignGlass`, so it
+represents water-on-glass by setting `nSample = 1.33`.
+
+The excitation is put through the same stratified model, because a
+full-aperture NA 1.45 focus also produces an evanescent excitation
+contribution near the surface. That is a second distance-dependent term and it
+belongs in the product.
+
+`spadEffectivePSFArray` in the vendored code is hard-wired to the homogeneous
+`psfBessel`, so `spadEffectivePSFArrayInterface.m` (new, in this folder) is the
+interface counterpart.
+
+## Remaining limitation
+
+**The metal film is still not modelled.** MIET works because the metal
+reshapes the emission angular distribution, adding surface-plasmon-coupled
+emission into a narrow high-angle cone with its own distance dependence.
+Neither `homogeneous` nor `airOnGlass` captures a metal layer. Near-surface
+emitters are therefore represented less faithfully than out-of-focus ones, so
+the membrane ring signature is not quantitative even though the contrast
+between the two pools remains informative.
+
+The PSF is also symmetric about focus in the homogeneous limit, so far from
+the surface this measures `|z|` rather than signed `z`. Near the surface the
+interface breaks that symmetry, which is a further reason to keep the full
+aperture.
 
 ## Status
 
