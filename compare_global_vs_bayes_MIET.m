@@ -92,7 +92,9 @@ function out = compare_global_vs_bayes_MIET(analysisMatFile, opts)
 
     fprintf('\ncompare_global_vs_bayes_MIET\n  %s\n', analysisMatFile);
     store = matfile(analysisMatFile);
-    variables = who(store);
+    % who() does not accept a MatFile object; interrogate the file itself.
+    variableInfo = whos('-file', analysisMatFile);
+    variables = {variableInfo.name};
     if ~ismember('tcspc_pix', variables)
         error('compare_global_vs_bayes_MIET:NoCube', ...
             ['This MAT has no tcspc_pix. Re-run with cfg.saveTcspcPix = ' ...
@@ -102,7 +104,13 @@ function out = compare_global_vs_bayes_MIET(analysisMatFile, opts)
     cube = store.tcspc_pix;
 
     irf = double(result.irf.curve(:));
-    dtNs = double(result.reassigned.dtNs);
+    % result.reassigned carries no dtNs; the analysed bin width lives with the
+    % Bayesian compact result, with the requested value as a fallback.
+    dtNs = NaN;
+    if isfield(result.bayesian, 'compact') && ...
+            isfield(result.bayesian.compact, 'dtNs')
+        dtNs = double(result.bayesian.compact.dtNs);
+    end
     if ~isfinite(dtNs) || dtNs <= 0
         dtNs = double(result.config.tcspcBinNs);
     end
