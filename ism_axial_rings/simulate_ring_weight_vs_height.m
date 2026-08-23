@@ -289,7 +289,7 @@ end
 
 function [ringIndex, edges, ringRadius] = assignRings(radius, requestedEdges)
     if ~isempty(requestedEdges)
-        edges = sort(requestedEdges(:)');
+        edges = reshape(sort(requestedEdges(:)), 1, []);
     else
         % Group by distinct radii in the honeycomb layout, tolerating
         % floating-point spread within a shell.
