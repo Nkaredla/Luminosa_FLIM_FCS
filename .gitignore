@@ -2,3 +2,8 @@
 *.mexw64
 *.mexa64
 *.mexmaci64
+
+# transient smoke/lint output from -batch runs
+*_smoke.log
+lint_*.log
+test_*.log
