@@ -14,6 +14,23 @@ cfg.showFigures = false;          % PNG figures are still saved.
 cfg.saveTcspcPix = true;          % Detector-summed, reassigned uint16 cube.
 cfg.qc = struct('maxSlbClippedFraction', 0.10);
 
+% cfg.outputDir was silently ignored here - the batch driver derives each
+% acquisition's results folder from that acquisition's own location and never
+% read this field, which is why repeated runs overwrote one another. Use these
+% instead:
+cfg.resultsFolderName = 'immune_cell_MIET_grid48';  % folder beside each PTU
+cfg.versionResults = true;        % Results go in a per-configuration
+                                  % subfolder, so changing a setting can no
+                                  % longer overwrite an earlier analysis.
+cfg.runName = '';                 % '' derives the subfolder from a hash of the
+                                  % analysis settings: an UNCHANGED config
+                                  % resolves to the same folder and resumes, a
+                                  % CHANGED config gets a new folder and leaves
+                                  % the old results in place. Set a string here
+                                  % to name a run yourself.
+cfg.batchOutputDir = '';          % '' puts the batch summary under
+                                  % <dataRoot>\immune_cell_MIET_batch\<runName>
+
 pipelineCfg = struct();
 pipelineCfg.excitationPulseIndex = 2;
 pipelineCfg.excitationNm = 640;

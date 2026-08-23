@@ -16,15 +16,31 @@ function [summary, batchInfo] = batch_immune_cell_MIET(dataRoot, cfg)
 %   minRecords                 minimum TTTR records (default 1e6)
 %   resume                     reuse a valid existing result (default true)
 %   overwrite                  recompute existing results (default false)
+%   resultsFolderName          name of the per-acquisition results folder
+%                              created beside each PTU (default
+%                              'immune_cell_MIET')
+%   versionResults             put results in a per-configuration subfolder so
+%                              a run with different settings cannot overwrite
+%                              an earlier one (default true)
+%   runName                    name that subfolder explicitly. '' (default)
+%                              derives it from a hash of the analysis
+%                              configuration, which is the useful behaviour:
+%                              an unchanged configuration resolves to the same
+%                              folder and RESUMES, while any change to the
+%                              pipeline or QC settings resolves to a new folder
+%                              and leaves the old results untouched.
 %   dryRun                     header audit only (default false)
 %   saveTcspcPix               save detector-summed uint16 cube (default true)
 %   pipeline                   options passed to immune_cell_MIET
 %   qc                         image-derived good-cell QC overrides
 %
 % Folder-level outputs are checkpointed after every file in
-% <dataRoot>/immune_cell_MIET_batch. Per-acquisition images and MAT files
-% remain in <acquisition>/immune_cell_MIET. No photon stream is placed in a
-% batch output.
+% <dataRoot>/immune_cell_MIET_batch/<runName>. Per-acquisition images and MAT
+% files go to <acquisition>/<resultsFolderName>/<runName>, where runName
+% defaults to a hash of the analysis configuration - so re-running with changed
+% settings writes alongside the previous results instead of over them, while
+% re-running with the same settings still resumes. No photon stream is placed
+% in a batch output.
 
     if nargin < 1 || isempty(dataRoot)
         dataRoot = ...
@@ -45,13 +61,37 @@ function [summary, batchInfo] = batch_immune_cell_MIET(dataRoot, cfg)
         requireFunction('immune_cell_MIET');
     end
 
+    % A batch-level cfg.outputDir has never been read by this function: the
+    % per-acquisition folder is derived from each PTU's own location, and the
+    % batch summary uses cfg.batchOutputDir. Setting it was therefore silently
+    % ineffective, which is exactly how one run overwrote another.
+    if isfield(cfg, 'outputDir') && ~isempty(cfg.outputDir)
+        warning('batch_immune_cell_MIET:OutputDirIgnored', ...
+            ['cfg.outputDir is not used by the batch driver and has been ' ...
+             'ignored. Use cfg.resultsFolderName to rename the per-' ...
+             'acquisition folder, cfg.runName to name this run, or ' ...
+             'cfg.batchOutputDir for the batch summary. Ignored value: %s'], ...
+            cfg.outputDir);
+    end
+    cfg.runName = immune_cell_MIET_run_folder(cfg);
+    if isempty(cfg.runName)
+        fprintf(['batch_immune_cell_MIET: results go to <acquisition>\\%s ' ...
+            '(flat, unversioned - a rerun overwrites)\n'], ...
+            cfg.resultsFolderName);
+    else
+        fprintf('batch_immune_cell_MIET: results go to <acquisition>\\%s\\%s\n', ...
+            cfg.resultsFolderName, cfg.runName);
+    end
+    reportLegacyResults(cfg, dataRoot);
+
     outputDir = cfg.batchOutputDir;
     if isempty(outputDir)
-        outputDir = fullfile(dataRoot, 'immune_cell_MIET_batch');
+        outputDir = fullfile(dataRoot, 'immune_cell_MIET_batch', cfg.runName);
     end
     if ~isfolder(outputDir)
         mkdir(outputDir);
     end
+    writeRunManifest(outputDir, cfg, dataRoot);
     csvFile = fullfile(outputDir, 'immune_cell_MIET_batch_summary.csv');
     matFile = fullfile(outputDir, 'immune_cell_MIET_batch_summary.mat');
     errorLogFile = fullfile(outputDir, 'immune_cell_MIET_batch_errors.log');
@@ -92,7 +132,7 @@ function [summary, batchInfo] = batch_immune_cell_MIET(dataRoot, cfg)
         numel(files), dataRoot);
     for fileIndex = 1:numel(files)
         ptuFile = fullfile(files(fileIndex).folder, files(fileIndex).name);
-        rows(fileIndex) = initialiseRow(rows(fileIndex), fileIndex, ...
+        rows(fileIndex) = initialiseRow(rows(fileIndex), fileIndex, cfg, ...
             files(fileIndex), ptuFile);
         try
             % The repository contains both one- and two-argument copies of
@@ -223,6 +263,109 @@ function [summary, batchInfo] = batch_immune_cell_MIET(dataRoot, cfg)
     printSummary(batchInfo, csvFile);
 end
 
+function reportLegacyResults(cfg, dataRoot)
+%REPORTLEGACYRESULTS Say plainly when older flat-layout results exist.
+% Switching on versioning means results previously written directly into
+% resultsFolderName are no longer where the resume check looks. They are not
+% deleted or moved - this function makes sure that is stated rather than
+% discovered later as an unexplained full re-analysis.
+    if isempty(cfg.runName)
+        return;
+    end
+    legacy = dir(fullfile(dataRoot, '**', cfg.resultsFolderName, ...
+        'immune_cell_MIET_640nm_red_analysis.mat'));
+    if isempty(legacy)
+        return;
+    end
+    fprintf(['batch_immune_cell_MIET: %d result file(s) exist in the older ' ...
+        'flat layout\n'], numel(legacy));
+    fprintf(['  <acquisition>\\%s\\immune_cell_MIET_640nm_red_analysis.mat' ...
+        '\n'], cfg.resultsFolderName);
+    fprintf(['  They are left untouched and will NOT be resumed, so this run ' ...
+        'recomputes from\n  scratch. To resume them instead, either move ' ...
+        'each one into a subfolder and\n  pass its name as cfg.runName, or ' ...
+        'set cfg.versionResults = false to keep the\n  old flat layout.\n']);
+end
+
+function writeRunManifest(outputDir, cfg, dataRoot)
+%WRITERUNMANIFEST Record what produced the results in this folder.
+% Without this, two run folders are indistinguishable a month later, which
+% defeats the point of keeping both.
+    manifest = fullfile(outputDir, 'run_manifest.txt');
+    fid = fopen(manifest, 'w');
+    if fid < 0
+        warning('batch_immune_cell_MIET:Manifest', ...
+            'Could not write %s', manifest);
+        return;
+    end
+    closer = onCleanup(@() fclose(fid));
+    fprintf(fid, 'run name      : %s\n', cfg.runName);
+    fprintf(fid, 'written       : %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
+    fprintf(fid, 'data root     : %s\n', dataRoot);
+    fprintf(fid, 'results folder: %s\n', cfg.resultsFolderName);
+    fprintf(fid, 'resume        : %d, overwrite: %d, versioned: %d\n', ...
+        cfg.resume, cfg.overwrite, cfg.versionResults);
+    fprintf(fid, 'code revision : %s\n', codeRevision());
+    fprintf(fid, '\n--- pipeline configuration ---\n');
+    printStruct(fid, cfg.pipeline, '');
+    fprintf(fid, '\n--- QC thresholds ---\n');
+    printStruct(fid, cfg.qc, '');
+end
+
+function revision = codeRevision()
+    revision = 'unknown (not a git checkout or git unavailable)';
+    here = fileparts(mfilename('fullpath'));
+    [status, out] = system(sprintf('git -C "%s" rev-parse --short HEAD', here));
+    if status == 0 && ~isempty(strtrim(out))
+        revision = strtrim(out);
+        [dirtyStatus, dirty] = system(sprintf( ...
+            'git -C "%s" status --porcelain', here));
+        if dirtyStatus == 0 && ~isempty(strtrim(dirty))
+            revision = [revision ' (working tree modified)'];
+        end
+    end
+end
+
+function printStruct(fid, value, prefix)
+    if ~isstruct(value) || ~isscalar(value)
+        fprintf(fid, '%s = %s\n', prefix, compactValue(value));
+        return;
+    end
+    names = fieldnames(value);
+    for k = 1:numel(names)
+        if isempty(prefix)
+            label = names{k};
+        else
+            label = [prefix '.' names{k}];
+        end
+        item = value.(names{k});
+        if isstruct(item) && isscalar(item)
+            printStruct(fid, item, label);
+        else
+            fprintf(fid, '  %-34s %s\n', label, compactValue(item));
+        end
+    end
+end
+
+function text = compactValue(value)
+    if ischar(value)
+        text = value;
+    elseif isstring(value)
+        text = char(strjoin(value, ', '));
+    elseif iscell(value)
+        parts = cellfun(@compactValue, value, 'UniformOutput', false);
+        text = ['{' strjoin(parts, ', ') '}'];
+    elseif islogical(value) || isnumeric(value)
+        if isempty(value)
+            text = '[]';
+        else
+            text = mat2str(value, 6);
+        end
+    else
+        text = ['<' class(value) '>'];
+    end
+end
+
 function cfg = fillBatchDefaults(cfg)
     defaults = struct();
     defaults.scanPlanes = {'XY'};
@@ -242,6 +385,9 @@ function cfg = fillBatchDefaults(cfg)
     defaults.showFigures = false;
     defaults.saveTcspcPix = true;
     defaults.batchOutputDir = '';
+    defaults.resultsFolderName = 'immune_cell_MIET';
+    defaults.versionResults = true;
+    defaults.runName = '';
     defaults.pipeline = struct();
     defaults.qc = struct('acceptedSegmentationStatuses', {{'ok'}}, ...
         'minCellFraction', 0.01, 'maxCellFraction', 0.85, ...
@@ -317,12 +463,17 @@ function row = emptyRow()
         'processingSeconds', NaN, 'errorIdentifier', '', 'message', '');
 end
 
-function row = initialiseRow(row, fileIndex, fileInfo, ptuFile)
+function row = initialiseRow(row, fileIndex, cfg, fileInfo, ptuFile)
     row.index = fileIndex;
     row.ptuFile = ptuFile;
     row.fileBytes = double(fileInfo.bytes);
     row.acquisition = acquisitionName(fileInfo.folder);
-    row.analysisDir = fullfile(fileInfo.folder, 'immune_cell_MIET');
+    % The run subfolder is what keeps a new analysis from overwriting an older
+    % one. Every artefact path below is derived from analysisDir, so adding one
+    % level here is enough - including for the resume check, which looks for
+    % analysisMat inside this same folder.
+    row.analysisDir = fullfile(fileInfo.folder, cfg.resultsFolderName, ...
+        cfg.runName);
     row.analysisMat = fullfile(row.analysisDir, ...
         'immune_cell_MIET_640nm_red_analysis.mat');
     row.preliminaryPng = fullfile(row.analysisDir, ...
