@@ -111,6 +111,10 @@ it" - two aberration estimators, and the tracking detector response. Nothing
 requires new theory, only routing the existing stratified model into the
 places currently using a homogeneous or Gaussian stand-in.
 
-Not verified by execution: MATLAB will not start on this machine while an
-interactive session holds the display. Every statement above comes from
-reading the source.
+Provenance: every statement above comes from reading the source, not from
+running it. The PSF conclusions have since been corroborated by execution -
+`simulate_ring_weight_vs_height` and the studies built on it run, and the
+noiseless deviance profile in `diagnose_ring_height_identifiability` recovers
+the true emitter height exactly, which exercises the interface PSF, the Fresnel
+coefficients and the evanescent branch end to end. The aberration-estimator and
+tracking findings in sections 2 and 4 remain unverified by execution.
