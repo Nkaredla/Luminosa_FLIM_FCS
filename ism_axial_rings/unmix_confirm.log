@@ -289,3 +289,40 @@ study_ring_resolved_unmixing
   models: summed (rings collapsed) | ring-free (shared tau, free per-ring amps)
           | ring-w(z) (shared tau, ring pattern forced to w(:,z_j))
 
+  two-pool (null)  N=  1000  done in 680.1 s
+  two-pool (null)  N=  3000  done in 653.9 s
+  two-pool (null)  N= 10000  done in 1020.3 s
+  two-pool (null)  N= 30000  done in 1010.0 s
+  three-pool       N=  1000  done in 1259.8 s
+  three-pool       N=  3000  done in 1604.3 s
+  three-pool       N= 10000  done in 1269.0 s
+  three-pool       N= 30000  done in 1154.5 s
+
+  model         N   dD_thresh   power   median|dTau| ns     z3 (um, IQR)   evals
+  ---------------------------------------------------------------------------------
+  summed       1000       3.13    0.20           0.245                -     811
+  summed       3000       4.79    0.19           0.222                -     865
+  summed      10000       4.77    0.57           0.153                -     931
+  summed      30000       4.36    0.92           0.116                -     986
+  ring-free    1000      21.82    0.05           0.255                -     841
+  ring-free    3000      23.89    0.09           0.249                -     868
+  ring-free   10000      24.27    0.13           0.270                -     884
+  ring-free   30000      23.66    0.45           0.258                -     886
+  ring-w(z)    1000       3.05    0.24           0.205    0.482 (0.796)    4787
+  ring-w(z)    3000       3.60    0.34           0.155    0.490 (0.780)    4832
+  ring-w(z)   10000       4.50    0.77           0.064    0.489 (0.592)    4818
+  ring-w(z)   30000       3.98    0.98           0.038    0.489 (0.411)    4801
+
+  wrote D:\MATLAB\server\Luminosa\Luminosa_FLIM_FCS\ism_axial_rings\ring_resolved_unmixing.csv
+  wrote D:\MATLAB\server\Luminosa\Luminosa_FLIM_FCS\ism_axial_rings\ring_resolved_unmixing.png
+
+  Reading this: every model is held to a 5% false-positive rate by
+  construction, so the only figure of merit is POWER - the rate at which a
+  genuine third pool is detected. The ring models earn their keep only if
+  their power exceeds the summed model at the same photon count.
+  The z3 column is NOT a height measurement - its interquartile range is
+  comparable to its own value, because the normalised ring pattern saturates
+  above about 0.3 um. See diagnose_ring_height_identifiability, and use
+  study_ring_height_discrimination for the binary displaced-versus-coplanar
+  question the rings genuinely can answer. True third-pool height 0.40 um.
+CONFIRM_DONE

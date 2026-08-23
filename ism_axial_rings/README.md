@@ -124,11 +124,36 @@ absorb a third pool's signature without ever committing to a third lifetime, so
 its null deviance-gain distribution is inflated (median 4.8-6.2 against ~0 for
 the other two) and its threshold rises accordingly.
 
-The constrained model is the one that helps. Its clearest gain is on lifetime
-accuracy - roughly a factor of 2.6 to 3 better than the summed decay at the same
-photons - which is a real information gain even though the height itself is not
-identified: constraining the ring pattern to a one-parameter physical family
-reduces the effective parameter count and tightens the lifetimes.
+The constrained model is the one that helps. Confirmatory run, 300 repeats with
+3 restarts per fit, detection rate at matched false-positive rate:
+
+| N | summed | ring-free | ring-w(z) | median \|dTau\| summed -> ring-w(z) |
+|---|---|---|---|---|
+| 1e3 | 0.20 | 0.05 | 0.24 | 0.245 -> 0.205 ns |
+| 3e3 | 0.19 | 0.09 | **0.34** | 0.222 -> 0.155 ns |
+| 1e4 | 0.57 | 0.13 | **0.77** | 0.153 -> 0.064 ns |
+| 3e4 | 0.92 | 0.45 | **0.98** | 0.116 -> 0.038 ns |
+
+The power advantage over the summed decay is significant from 3e3 upwards
+(0.34 vs 0.19 is 4.2 sigma, 0.77 vs 0.57 is 5.3 sigma, 0.98 vs 0.92 is 3.4
+sigma at 300 repeats) and not significant at 1e3. The clearest gain is on
+lifetime accuracy: a factor of 2.4 at 1e4 and 3.1 at 3e4. That is a real
+information gain even though the height itself is not identified - constraining
+the ring pattern to a one-parameter physical family reduces the effective
+parameter count and tightens the lifetimes.
+
+On comparison fairness: the constrained model consumed about 4800 objective
+evaluations against about 900 for the other two, which looks like an unfair
+optimiser advantage until the caps are checked. The summed and ring-free fits
+had 1200 evaluations available per start and used roughly 330, so they converged
+well inside budget and were not starved. The larger count reflects the
+constrained model's higher parameter dimension, not a handicapped baseline.
+
+The fitted height is reported with its interquartile range, which is the point:
+0.482 (IQR 0.796), 0.490 (0.780), 0.489 (0.592), 0.489 (0.411) um from 1e3 to
+3e4. The spread does shrink with photon count but stays comparable to the value
+itself, which is what non-identifiability looks like when it is reported
+honestly rather than as a point estimate.
 
 Free amplitudes are the wrong choice, and the reason generalises: extra
 parameters that the artefact can also exploit do not discriminate. Only a
@@ -217,6 +242,63 @@ The excitation is put through the same stratified model, because a
 full-aperture NA 1.45 focus also produces an evanescent excitation contribution
 near the surface. That is a second distance-dependent term and it belongs in the
 product.
+
+## Combining with MIET: blocked by the calibration, not by the idea
+
+The natural next step is to couple the two channels, since both are functions of
+the same height: MIET fixes tau = tau_MIET(z) and the optics fix w(:, z), so each
+component would cost ONE parameter instead of two, and an artefact would have to
+satisfy both channels at the same z. The sensitivities are complementary, which
+is what makes it attractive - differentiating the measured pattern distances puts
+the ring channel's |dw/dz| at about 0.15 /um as z approaches 0, peaking near
+0.84 /um at 0.1-0.2 um, while MIET is steepest at the surface and flat beyond
+0.2 um.
+
+**The calibration on disk cannot support it.** `calibrationCurve.mat` in the
+parent folder is a 150x2 table spanning 0.1 to 30.0 nm of height and 0.865 to
+3.362 ns of lifetime, strictly monotonic, with dtau/dz still 40 ps/nm at the last
+point - so it is truncated, not saturated. Two separate problems:
+
+1. DOMAIN. tau_MIET(z) exists over 30 nm; w(:, z) is tabulated over 1000 nm and
+   the displacement of interest is 250 nm. The whole MIET table is shorter than
+   one step of the ring height grid.
+
+2. CONSISTENCY, which is the harder one. The measured pool lifetimes are
+   incompatible with this curve at BOTH ends. The 0.34 ns SLB component lies
+   BELOW the curve's most-quenched value of 0.865 ns at z = 0.1 nm, so no height
+   in this stack produces it. The 3.30 ns component maps to 28.5 nm - at the
+   surface, not the hundreds of nanometres the internalised-dye interpretation
+   implies.
+
+Extending Z_Stop does NOT fix the second problem, and it is worth being explicit
+about why, because it is the obvious move and it fails. The curve is monotonic,
+so appending heights above 30 nm appends lifetimes above 3.362 ns. The inverse
+map at tau = 3.30 ns is fixed by the part already tabulated and stays at 28.5 nm
+however far the range is extended. Only different stack parameters - metal
+thickness, spacer, indices, quantum yield, free-space lifetime - or different
+lifetime assignments can move it.
+
+So either the calibration's stack does not match this sample, or the shortest and
+longest components are not purely MIET-quenched dye. The pipeline itself does not
+use this calibration (it reports lifetimes and amplitudes, never heights), so no
+existing result is affected.
+
+**The useful consequence: use the two channels as a disagreement detector rather
+than as a joint constraint.** They give independent height statements, so their
+DISAGREEMENT is the informative quantity. Through this calibration MIET places the
+3.30 ns pool at ~28 nm, where the ring displacement test has power 0.35; the ring
+test reaches power 1.00 only at 0.25 um and above. If the ring test fires on real
+data, the two channels disagree by an order of magnitude, and the long lifetime is
+then chemical rather than geometric - a different dye environment in an endosome,
+not a different height. If it does not fire, the pool sits at the membrane and
+"internalised" is the wrong label for it. Either outcome is a result, and neither
+requires trusting the calibration.
+
+If the coupling is implemented later it should be a SOFT prior on
+|tau_j - tau_MIET(z_j)| with a width reflecting real calibration uncertainty, not
+a hard equality, with the discrepancy reported per component. A hard constraint
+converts calibration error into confident bias; a soft one turns it into a
+diagnostic.
 
 ## Limitations that affect the numbers above
 
