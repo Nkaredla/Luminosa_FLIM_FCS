@@ -12,24 +12,47 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 % pixels beyond it are selected by count rate, and the fit is of the pooled
 % decay - so nothing in the answer depends on the micron size of an axial pixel.
 %
-% HOW THE SURFACE IS FOUND
+% WHICH PIE WINDOW - TAKEN FROM THE HEADER, NOT GUESSED
 %
-% Quenching is strongest at the metal, so the surface is the narrow band of
-% LOWEST mean arrival time. It is located per lateral column rather than once
-% for the whole image, because the coverslip is never perfectly level across a
-% 600-pixel scan and a single global row would cut into the bilayer on one side
-% and leave a quenched margin on the other.
+% The file records LaserCount = 2, LaserWL = [485 640], PIENumPIEWindows = 2 and
+% PIETimeGate = [0 1250] native bins. At 20 ps native resolution that is windows
+% of 0-25 ns for the 485 nm laser and 25-50 ns for the 640 nm laser. The window
+% is therefore selected by matching the requested excitation wavelength against
+% LaserWL, and the choice is checked against where the photons actually are.
 %
-% Intensity is deliberately not used to find it. The bilayer is bright, but so
-% is a cell membrane, and dye density varies; the arrival-time minimum marks the
-% metal by physics rather than by brightness.
+% An earlier version detected peaks in the decay instead. It happened to land on
+% the right window, but it also mistook the 485 window's pulse for a "second
+% 640 pulse" and mistook the 25 ns window boundary for a hardware gate.
 %
-% WHICH SIDE IS "ABOVE"
+% One consequence is unavoidable and must be stated: the 640 pulse fires at
+% 44.0 ns, only 6.0 ns before its window closes at 50 ns. At a ~2.7 ns lifetime
+% that is 2.2 lifetimes of usable decay, so the tail is short whatever the fit
+% does. Photons arriving after 50 ns fall in the next period's 485 window and
+% are not recoverable for the 640 decay.
 %
-% Also taken from the data: the side of the band where the mean arrival time
-% RISES is the side away from the metal, because that is what unquenching does.
-% Photon counts on each side are printed as a cross-check, since below the metal
-% there should be little but reflection.
+% HOW THE SURFACE IS FOUND - ONE FLAT ROW
+%
+% The supported bilayer is FLAT and it is the brightest, most quenched feature
+% in the frame, so the surface is a single axial row: the minimum of the
+% marginal photon-weighted mean-arrival profile.
+%
+% A per-column minimum was tried first and it failed visibly. Where a cell sits
+% on the bilayer the per-column minimum climbs the cell, so the "surface" line
+% jumped ~130 pixels upward across the cell footprint and dragged the selection
+% with it. A flat plane must be fitted as a flat plane.
+%
+% Intensity alone is not used to find it. The bilayer is bright, but so is a
+% cell membrane; the arrival-time minimum marks the quenched layer by physics.
+%
+% WHICH SIDE IS "ABOVE", AND HOW FAR UP TO GO
+%
+% The side where mean arrival RISES is away from the metal. But taking
+% everything on that side is wrong: just above the bilayer the dye is still
+% partly quenched, and pooling that with free dye higher up gives a decay that
+% is a mixture of lifetimes, which showed as strongly curved residuals reaching
+% 20 sigma. The selection therefore starts only where the arrival time has
+% PLATEAUED - the top part of the section - and that distance is measured from
+% the arrival profile rather than assumed.
 %
 % THE RATE FILTER
 %
@@ -120,11 +143,11 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 %   <acq>/free_dye_above_surface/*.mat, *.csv
 %
 % opts
-%   piePulseIndex      PIE window (default 2, the 640 nm one)
+%   excitationNm       excitation wavelength whose PIE window to use
+%                      (default 640, matched against the header's LaserWL)
+%   minTopDistancePix  how far above the surface to start; [] (default) finds
+%                      the arrival-time plateau from the data
 %   maxNgate           TCSPC bins after rebinning (default 512)
-%   surfaceMarginPix   pixels to skip beyond the surface band (default 6)
-%   bandWidthPix       assumed half-width of the low-lifetime band, used only
-%                      as a floor for the margin (default 2)
 %   minPixelCounts     absolute floor on counts per pixel (default 5)
 %   backgroundSigmas   Poisson sigmas above background for the rate filter
 %                      (default 5)
@@ -134,8 +157,8 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 
     if nargin < 2 || isempty(opts); opts = struct(); end
     defaults = struct( ...
-        'piePulseIndex', 2, 'maxNgate', 512, 'tcspcBinNs', 0.05, ...
-        'surfaceMarginPix', 6, 'bandWidthPix', 2, ...
+        'excitationNm', 640, 'maxNgate', 512, 'tcspcBinNs', 0.05, ...
+        'minTopDistancePix', [], 'plateauFraction', 0.90, ...
         'minPixelCounts', 5, 'backgroundSigmas', 5, ...
         'minColumnCounts', 20, ...
         'tailStartNs', [0.4 0.8 1.2 1.8 2.5], ...
@@ -207,6 +230,12 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
     % "timeBin >= 1 & timeBin <= gateLength" and offsets with (timeBin - 1).
     % Adding one here pushed the maximum to Ngate+1 and accumarray refused it.
     rawBin = double(ptu.im_tcspc(:));
+    if isfield(ptu, 'im_chan')
+        detectorIds = unique(double(ptu.im_chan(:)));
+        fprintf(['  detectors: %d channel(s) present (ids %d-%d), ALL summed ' ...
+            '- no channel filter is applied\n'], numel(detectorIds), ...
+            min(detectorIds), max(detectorIds));
+    end
     binLow = min(rawBin); binHigh = max(rawBin);
     fprintf('  im_tcspc spans bins %g to %g against Ngate = %d\n', ...
         binLow, binHigh, nGate);
@@ -217,11 +246,17 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
             binLow, binHigh, nGate);
     end
     globalCurve = accumarray(rawBin, 1, [nGate, 1]);
-    gate = pickGate(globalCurve, dtNs);
+    gate = pieWindowFromHeader(head, globalCurve, nGate, periodNs, ...
+        opts.excitationNm);
     gateLength = gate.length;
-    fprintf(['  gate: peak at bin %d (%.2f ns); rise rolled to bin 1; ' ...
-        'period window %d bins = %.2f ns\n'], gate.peakBin, ...
-        (gate.peakBin - 1) * dtNs, gateLength, gateLength * dtNs);
+    fprintf(['  PIE: %d window(s) in the header at %s ns for lasers %s nm; ' ...
+        'using the %g nm window\n'], gate.windowCount, ...
+        mat2str(round(gate.windowStartNs, 2)), mat2str(gate.laserNm), ...
+        gate.selectedNm);
+    fprintf(['      window spans %.2f-%.2f ns; pulse peak at %.2f ns, so ' ...
+        '%.2f ns of decay remains\n      before the window closes\n'], ...
+        gate.windowStartNs(gate.index), gate.windowStopNs, ...
+        (gate.peakBin - 1) * dtNs, gate.usableNs);
     fprintf('      %s\n', gate.note);
 
     % The excitation pulse sits near the end of the period, so the decay wraps
@@ -262,9 +297,9 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
         countsAx = counts'; arrivalAx = meanArrivalNs';
     end
 
-    [surfaceIndex, direction] = locateSurface(countsAx, arrivalAx, opts);
-    fprintf(['  surface: median index %.1f of %d; "away from metal" is the ' ...
-        '%s direction\n'], median(surfaceIndex, 'omitnan'), ...
+    [surfaceIndex, direction] = locateFlatSurface(countsAx, arrivalAx);
+    fprintf(['  surface: FLAT at axial row %d of %d (the bilayer); "away ' ...
+        'from metal" is the %s direction\n'], surfaceIndex, ...
         size(countsAx, 1), direction.name);
     fprintf(['      mean arrival %.3f ns in the band, %.3f ns just beyond it ' ...
         'on the chosen side,\n      %.3f ns on the other side; photons ' ...
@@ -280,7 +315,29 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
     end
 
     % ---- rate filter -------------------------------------------------------
-    selection = selectAbovePixels(countsAx, surfaceIndex, direction, opts);
+    profile = arrivalVersusDistance(countsAx, arrivalAx, surfaceIndex, ...
+        direction);
+    top = choosePlateauDistance(profile, opts);
+    fprintf(['\n  arrival time versus distance above the bilayer (photon-' ...
+        'weighted):\n']);
+    for d = [0 20 40 60 80 100 150 200 250 300]
+        if d <= max(profile.distance)
+            fprintf('        +%3d px : %.3f ns  (%.4g photons)\n', d, ...
+                interp1(profile.distance, profile.arrivalNs, d), ...
+                interp1(profile.distance, profile.photons, d));
+        end
+    end
+    fprintf(['      rises from %.3f ns at the bilayer to %.3f ns; %.0f%% of ' ...
+        'that rise is reached\n      by +%d px, and the pool starts ' ...
+        'there\n'], profile.arrivalNs(1), top.plateauArrivalNs, ...
+        100 * opts.plateauFraction, top.distancePix);
+    if ~isempty(opts.minTopDistancePix)
+        fprintf('      (overridden by opts.minTopDistancePix = %d)\n', ...
+            top.distancePix);
+    end
+
+    selection = selectTopPixels(countsAx, surfaceIndex, direction, ...
+        top.distancePix, opts);
     fprintf(['\n  rate filter: background %.2f counts/pixel, cut at %.2f ' ...
         '(%g sigma), floor %d\n'], selection.backgroundCounts, ...
         selection.threshold, opts.backgroundSigmas, opts.minPixelCounts);
@@ -386,6 +443,7 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
         'counts', counts, 'meanArrivalNs', meanArrivalNs, ...
         'surfaceIndex', surfaceIndex, 'direction', direction, ...
         'selection', selection, 'selectedMask', selectedMaskImage, ...
+        'arrivalProfile', profile, 'topChoice', top, ...
         'pooledDecay', pooled, 'fit', fit, 'opts', opts);
 
     matFile = fullfile(opts.outputDir, 'free_dye_above_surface.mat');
@@ -433,7 +491,87 @@ function text = fmt(value)
     if isnan(value); text = '-'; else; text = sprintf('%.3f', value); end
 end
 
-function gate = pickGate(globalCurve, dtNs)
+function gate = pieWindowFromHeader(head, globalCurve, nGate, periodNs, wantedNm)
+%PIEWINDOWFROMHEADER Select the PIE window of the requested laser.
+%
+% PIETimeGate gives each window's start in native TCSPC bins and LaserWL gives
+% the wavelength per laser, index for index. The window is chosen by matching
+% the requested wavelength, then the choice is CHECKED against where the
+% photons actually are - if the global peak is not inside the chosen window,
+% something about the index correspondence is wrong and that is worth a warning
+% rather than a silent wrong answer.
+    curve = double(globalCurve(:));
+    dtNs = periodNs / nGate;
+    if ~isfield(head, 'PIETimeGate') || isempty(head.PIETimeGate)
+        error('fit_free_dye_lifetime_above_surface:NoPieHeader', ...
+            ['The PTU header has no PIETimeGate, so the excitation window ' ...
+             'cannot be identified. Detecting peaks instead was tried and ' ...
+             'misread the window boundary as a hardware gate.']);
+    end
+    gatesNative = double(head.PIETimeGate(:));
+    windowCount = numel(gatesNative);
+    if isfield(head, 'PIENumPIEWindows') && ~isempty(head.PIENumPIEWindows)
+        windowCount = min(windowCount, round(double(head.PIENumPIEWindows(1))));
+    end
+    gatesNative = gatesNative(1:windowCount);
+    nativeDtNs = 1e9 * double(head.MeasDesc_Resolution);
+
+    windowStartNs = gatesNative(:)' * nativeDtNs;
+    startBin = floor(windowStartNs / dtNs) + 1;
+    stopBin = [startBin(2:end) - 1, nGate];
+
+    laserNm = [];
+    if isfield(head, 'LaserWL') && ~isempty(head.LaserWL)
+        laserNm = double(head.LaserWL(:))';
+    end
+    if numel(laserNm) >= windowCount
+        [~, index] = min(abs(laserNm(1:windowCount) - wantedNm));
+    else
+        index = windowCount;      % last window by convention
+        laserNm = nan(1, windowCount);
+    end
+
+    [~, peakBin] = max(curve);
+    if peakBin < startBin(index) || peakBin > stopBin(index)
+        warning('fit_free_dye_lifetime_above_surface:PieWindowMismatch', ...
+            ['The brightest bin (%d) lies outside the %g nm window ' ...
+             '(bins %d-%d). The laser-to-window index correspondence may ' ...
+             'not hold for this file.'], peakBin, laserNm(index), ...
+            startBin(index), stopBin(index));
+    end
+
+    % Roll so the rise of THIS window's pulse sits at bin 1, and stop at the
+    % window's own end - photons past it belong to the other laser.
+    inWindow = false(nGate, 1);
+    inWindow(startBin(index):stopBin(index)) = true;
+    masked = curve; masked(~inWindow) = 0;
+    smooth = conv(masked, ones(5, 1) / 5, 'same');
+    [peakHeight, localPeak] = max(smooth);
+    baseline = median(curve(inWindow));
+    threshold = baseline + 0.05 * (peakHeight - baseline);
+    riseBin = localPeak;
+    while riseBin > startBin(index) && smooth(riseBin) > threshold
+        riseBin = riseBin - 1;
+    end
+    preBins = max(2, round(0.3 / dtNs));
+    riseBin = max(startBin(index), riseBin - preBins);
+
+    gate = struct('method', 'PIE window from the PTU header', ...
+        'windowCount', windowCount, 'index', index, ...
+        'laserNm', laserNm(1:windowCount), 'selectedNm', laserNm(index), ...
+        'windowStartNs', windowStartNs, ...
+        'windowStopNs', stopBin(index) * dtNs, ...
+        'startBin', startBin(index), 'stopBin', stopBin(index), ...
+        'riseBin', riseBin, 'peakBin', localPeak - riseBin + 1, ...
+        'length', stopBin(index) - riseBin + 1, ...
+        'usableNs', (stopBin(index) - localPeak) * dtNs, ...
+        'photons', sum(curve(startBin(index):stopBin(index))));
+    gate.note = sprintf(['%.2f ns of decay after the peak = %.1f lifetimes ' ...
+        'at 2.7 ns'], gate.usableNs, gate.usableNs / 2.7);
+end
+
+function gate = pickGate(globalCurve, dtNs) %#ok<DEFNU>
+% Retained for reference only; pieWindowFromHeader supersedes it.
 %PICKGATE Roll the period so the excitation rise sits at bin 1.
 %
 % The pulse in these acquisitions lands near the END of the 50 ns period, so a
@@ -558,69 +696,36 @@ end
 
 % =========================================================== surface finding
 
-function [surfaceIndex, direction] = locateSurface(countsAx, arrivalAx, opts)
-%LOCATESURFACE Per-column axial index of the low-arrival-time band.
-% Per column rather than one global row: over a 600-pixel scan the coverslip is
-% never perfectly level, and a single row would cut into the bilayer at one end
-% while leaving a quenched margin at the other.
-    [nAxial, nLateral] = size(countsAx);
-    surfaceIndex = nan(1, nLateral);
-    for c = 1:nLateral
-        column = countsAx(:, c);
-        if sum(column) < opts.minColumnCounts; continue; end
-        arrival = arrivalAx(:, c);
-        valid = isfinite(arrival) & column >= max(1, opts.minPixelCounts);
-        if nnz(valid) < 3; continue; end
-        % Weight by counts so a single dim pixel with a freak short arrival
-        % time cannot define the surface.
-        weighted = arrival;
-        weighted(~valid) = inf;
-        smooth = smoothIgnoringInf(weighted, 3);
-        [~, index] = min(smooth);
-        surfaceIndex(c) = index;
-    end
-    if all(isnan(surfaceIndex))
-        error('fit_free_dye_lifetime_above_surface:NoSurface', ...
-            'No lateral column had enough signal to locate the surface.');
-    end
-    % Fill gaps and de-noise: the surface is a physical plane, so it must be
-    % smooth across the field even where individual columns are dim.
-    lateral = 1:nLateral;
-    good = isfinite(surfaceIndex);
-    surfaceIndex = interp1(lateral(good), surfaceIndex(good), lateral, ...
-        'linear', 'extrap');
-    surfaceIndex = movmedian(surfaceIndex, max(3, round(0.05 * nLateral)));
-    % Extrapolation at the field edges can put the line outside the image, and
-    % every later step indexes with it. Clamp so a dim edge column cannot throw
-    % an out-of-bounds error deep inside the selection.
-    margin = max(opts.surfaceMarginPix, 3 * opts.bandWidthPix);
-    guard = margin + opts.bandWidthPix + 1;
-    surfaceIndex(~isfinite(surfaceIndex)) = round(nAxial / 2);
-    surfaceIndex = min(max(surfaceIndex, guard), nAxial - guard);
-    if nAxial < 4 * guard
-        error('fit_free_dye_lifetime_above_surface:AxisTooShort', ...
-            ['The axial axis is only %d pixels, too short for a %d-pixel ' ...
-             'margin on both sides.'], nAxial, guard);
-    end
-    lowSide = 0; highSide = 0; lowPhotons = 0; highPhotons = 0;
-    bandArrival = [];
-    for c = 1:nLateral
-        s = round(surfaceIndex(c));
-        band = max(1, s - opts.bandWidthPix):min(nAxial, s + opts.bandWidthPix);
-        bandArrival = [bandArrival; arrivalAx(band, c)]; %#ok<AGROW>
-        low = 1:max(1, s - margin);
-        high = min(nAxial, s + margin):nAxial;
-        lowSide = lowSide + sum(arrivalAx(low, c) .* countsAx(low, c), 'omitnan');
-        highSide = highSide + sum(arrivalAx(high, c) .* countsAx(high, c), 'omitnan');
-        lowPhotons = lowPhotons + sum(countsAx(low, c));
-        highPhotons = highPhotons + sum(countsAx(high, c));
-    end
-    lowMean = lowSide / max(lowPhotons, 1);
-    highMean = highSide / max(highPhotons, 1);
-    direction = struct('bandArrivalNs', mean(bandArrival, 'omitnan'), ...
-        'marginPix', margin);
-    % Unquenching raises the arrival time, so the side where it rises is away
-    % from the metal.
+function [surfaceIndex, direction] = locateFlatSurface(countsAx, arrivalAx)
+%LOCATEFLATSURFACE One axial row for the supported bilayer, plus the "up" side.
+%
+% The bilayer is a flat plane, so it is ONE row, taken as the minimum of the
+% marginal photon-weighted mean-arrival profile - the most quenched layer in the
+% frame.
+%
+% A per-column minimum was tried first and failed in a way the figures made
+% obvious: where a cell sits on the bilayer the per-column minimum climbs the
+% cell, so the surface line jumped about 130 pixels upward across the cell
+% footprint and took the selection with it. Fitting a flat plane as flat is not
+% a simplification here, it is the correction.
+    [nAxial, ~] = size(countsAx);
+    sliceCounts = sum(countsAx, 2);
+    sliceWeighted = sum(arrivalAx .* countsAx, 2, 'omitnan');
+    profile = inf(nAxial, 1);
+    enough = sliceCounts >= max(200, 0.02 * max(sliceCounts));
+    profile(enough) = sliceWeighted(enough) ./ sliceCounts(enough);
+    smooth = smoothIgnoringInf(profile, 5);
+    [~, surfaceIndex] = min(smooth);
+
+    % Which side is away from the metal: the side where arrival time rises.
+    span = max(20, round(0.05 * nAxial));
+    lowRange = max(1, surfaceIndex - span):max(1, surfaceIndex - 1);
+    highRange = min(nAxial, surfaceIndex + 1):min(nAxial, surfaceIndex + span);
+    lowMean = weightedArrival(arrivalAx, countsAx, lowRange);
+    highMean = weightedArrival(arrivalAx, countsAx, highRange);
+    lowPhotons = sum(sliceCounts(lowRange));
+    highPhotons = sum(sliceCounts(highRange));
+    direction = struct('bandArrivalNs', smooth(surfaceIndex));
     if highMean >= lowMean
         direction.sign = +1;
         direction.name = 'increasing index';
@@ -640,6 +745,57 @@ function [surfaceIndex, direction] = locateSurface(countsAx, arrivalAx, opts)
         direction.bandArrivalNs;
 end
 
+function value = weightedArrival(arrivalAx, countsAx, rows)
+    if isempty(rows); value = NaN; return; end
+    w = countsAx(rows, :);
+    a = arrivalAx(rows, :);
+    good = isfinite(a) & w > 0;
+    if ~any(good(:)); value = NaN; return; end
+    value = sum(a(good) .* w(good)) / sum(w(good));
+end
+
+function profile = arrivalVersusDistance(countsAx, arrivalAx, surfaceIndex, ...
+        direction)
+%ARRIVALVERSUSDISTANCE Photon-weighted mean arrival as a function of height.
+% This is the curve that decides where the quenched zone ends, so it is
+% returned and printed rather than being consumed silently inside a threshold.
+    nAxial = size(countsAx, 1);
+    axialIndex = (1:nAxial)';
+    offset = direction.sign * (axialIndex - surfaceIndex);
+    maxOffset = max(offset);
+    distance = (0:maxOffset)';
+    arrivalNs = nan(size(distance));
+    photons = zeros(size(distance));
+    for k = 1:numel(distance)
+        rows = axialIndex(offset == distance(k));
+        if isempty(rows); continue; end
+        photons(k) = sum(sum(countsAx(rows, :)));
+        arrivalNs(k) = weightedArrival(arrivalAx, countsAx, rows);
+    end
+    keep = isfinite(arrivalNs) & photons > 0;
+    profile = struct('distance', distance(keep), ...
+        'arrivalNs', arrivalNs(keep), 'photons', photons(keep));
+end
+
+function top = choosePlateauDistance(profile, opts)
+%CHOOSEPLATEAUDISTANCE Where the arrival time has stopped rising.
+% Pooling everything above the bilayer mixed partly-quenched dye with free dye
+% and produced residuals reaching 20 sigma. The pool therefore starts only
+% where the arrival time has reached the requested fraction of its total rise.
+    arrival = profile.arrivalNs;
+    smooth = conv(arrival, ones(9, 1) / 9, 'same');
+    base = smooth(1);
+    plateau = quantileLocal(smooth, 0.95);
+    target = base + opts.plateauFraction * (plateau - base);
+    index = find(smooth >= target, 1, 'first');
+    if isempty(index); index = numel(smooth); end
+    top = struct('distancePix', profile.distance(index), ...
+        'plateauArrivalNs', plateau, 'targetArrivalNs', target);
+    if ~isempty(opts.minTopDistancePix)
+        top.distancePix = opts.minTopDistancePix;
+    end
+end
+
 function smooth = smoothIgnoringInf(values, width)
     finiteMask = isfinite(values);
     filled = values;
@@ -654,22 +810,19 @@ end
 
 % ============================================================= rate filtering
 
-function selection = selectAbovePixels(countsAx, surfaceIndex, direction, opts)
-%SELECTABOVEPIXELS Pixels beyond the surface band whose count clears background.
+function selection = selectTopPixels(countsAx, surfaceIndex, direction, ...
+        topDistancePix, opts)
+%SELECTTOPPIXELS Pixels at least topDistancePix above the bilayer, with signal.
     [nAxial, nLateral] = size(countsAx);
-    candidate = false(nAxial, nLateral);
     axialIndex = (1:nAxial)';
-    for c = 1:nLateral
-        offset = direction.sign * (axialIndex - surfaceIndex(c));
-        candidate(:, c) = offset >= direction.marginPix;
-    end
+    offset = direction.sign * (axialIndex - surfaceIndex);
+    candidate = repmat(offset >= topDistancePix, 1, nLateral);
 
-    % Background: the emptiest tenth of the candidate region, so it is measured
-    % where there is no sample rather than assumed.
     candidateCounts = countsAx(candidate);
     if isempty(candidateCounts)
         error('fit_free_dye_lifetime_above_surface:NoCandidates', ...
-            'No pixels lie beyond the surface margin on the chosen side.');
+            ['No pixels lie %d or more pixels above the bilayer on the ' ...
+             'chosen side.'], topDistancePix);
     end
     sorted = sort(candidateCounts);
     background = mean(sorted(1:max(1, round(0.10 * numel(sorted)))));
@@ -681,7 +834,7 @@ function selection = selectAbovePixels(countsAx, surfaceIndex, direction, opts)
     selection = struct('mask', mask, 'candidate', candidate, ...
         'candidateCount', nnz(candidate), 'pixelCount', nnz(mask), ...
         'photons', photons, 'backgroundCounts', background, ...
-        'threshold', threshold, ...
+        'threshold', threshold, 'topDistancePix', topDistancePix, ...
         'backgroundFraction', background * nnz(mask) / max(photons, 1));
 end
 
@@ -980,10 +1133,13 @@ function name = plotMeanFlim(out)
     imagesc(ax, log10(double(counts) + 1));
     axis(ax, 'image'); colormap(ax, gray); colorbar(ax);
     hold(ax, 'on');
-    plot(ax, 1:numel(out.surfaceIndex), out.surfaceIndex, 'r-', 'LineWidth', 1);
+    yline(ax, out.surfaceIndex, 'r-', 'LineWidth', 1.2);
+    poolStartRow = out.surfaceIndex + out.direction.sign * ...
+        out.selection.topDistancePix;
+    yline(ax, poolStartRow, 'c--', 'LineWidth', 1);
     xlabel(ax, 'lateral (pixels)'); ylabel(ax, 'axial (pixels)');
-    title(ax, sprintf('%s intensity, log_{10} photons, surface in red', ...
-        out.plane));
+    title(ax, sprintf(['%s intensity, log_{10}; bilayer red, pool starts ' ...
+        'cyan'], out.plane));
 
     ax = nexttile(layout);
     handle = imagesc(ax, arrival);
@@ -1000,7 +1156,7 @@ function name = plotMeanFlim(out)
             quantileLocal(finiteValues, 0.98)]);
     end
     hold(ax, 'on');
-    plot(ax, 1:numel(out.surfaceIndex), out.surfaceIndex, 'r-', 'LineWidth', 1);
+    yline(ax, out.surfaceIndex, 'r-', 'LineWidth', 1.2);
     xlabel(ax, 'lateral (pixels)');
     title(ax, 'mean FLIM: arrival time in ns, not IRF-corrected');
 
