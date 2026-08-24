@@ -3,7 +3,9 @@
 *.mexa64
 *.mexmaci64
 
-# transient smoke/lint output from -batch runs
-*_smoke.log
-lint_*.log
-test_*.log
+# MATLAB -batch console output. These are run transcripts, not source: they are
+# regenerated on every run and were being committed by accident.
+# The vendored miet-gui tree keeps its own missfont.log, which predates this and
+# is left tracked.
+*.log
+!external/miet-gui/Documentation/missfont.log
