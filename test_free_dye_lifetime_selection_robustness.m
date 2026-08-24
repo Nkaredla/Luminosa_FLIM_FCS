@@ -14,8 +14,26 @@ function out = test_free_dye_lifetime_selection_robustness(ptuFile, cutsPix)
 % tau0 must RISE as they are excluded and then flatten. If tau0 is flat from the
 % start, they were not contributing.
 %
+% It also answers a second question: can cutting MORE pixels make the pooled
+% decay mono-exponential? The pooled decay departs from a single exponential -
+% reduced deviance 3.0-4.0, residuals to 9 sigma, and a log-linear fit whose
+% answer drifts with the range - and the obvious suspicion is that this is
+% spatial mixing, several depths with different degrees of quenching averaged
+% into one curve. If so, restricting the pool to a thinner slab further from the
+% metal should reduce it. The sweep therefore reports the mono-exponentiality
+% diagnostics alongside tau, so the two questions are answered by one pass:
+%
+%   reducedDev    Poisson deviance per degree of freedom for A*exp(-t/tau)+B
+%   maxResidual   largest |Poisson residual| of that fit
+%   logLinSpread  how far the log-linear lifetime moves across fit ranges
+%
+% If all three fall as the cut rises, the departure is spatial mixing and can be
+% cut away. If they stay flat while tau stays flat, the decay is intrinsically
+% multi-exponential at every height and no amount of cutting will fix it - which
+% is itself the answer.
+%
 % This is a falsification test, not a fit. It is deliberately blunt: the last
-% cut discards about 80% of the photons, so a real contamination of even a few
+% cut discards most of the photons, so a real contamination of even a few
 % percent in lifetime would show as a trend far larger than the 0.05 ns spread
 % between the estimators.
 %
@@ -35,7 +53,9 @@ function out = test_free_dye_lifetime_selection_robustness(ptuFile, cutsPix)
             '\_20260813-164757\RawImage.ptu'];
     end
     if nargin < 2 || isempty(cutsPix)
-        cutsPix = [0 50 100 150 200 250];
+        % Reaches well past the automatic plateau cut of about 70 px, so the
+        % pool ends up a thin slab far above the bilayer.
+        cutsPix = [0 70 100 150 200 250];
     end
     if exist('fit_free_dye_lifetime_above_surface', 'file') ~= 2
         error('test_free_dye_lifetime_selection_robustness:Missing', ...
@@ -46,14 +66,17 @@ function out = test_free_dye_lifetime_selection_robustness(ptuFile, cutsPix)
     fprintf('  %s\n', ptuFile);
     fprintf(['  If out-of-focus quenched photons biased tau0 down, it must ' ...
         'RISE with the cut.\n\n']);
-    fprintf('  cut(px)   pixels    photons    mono(ns)  loglin(ns)  moment(ns)\n');
-    fprintf('  ---------------------------------------------------------------\n');
+    fprintf(['  cut(px)   pixels    photons   tau(ns)  reducedDev  ' ...
+        'maxResid  logLinSpread\n']);
+    fprintf(['  --------------------------------------------------------' ...
+        '-------------------\n']);
 
     rows = struct([]);
     for k = 1:numel(cutsPix)
         entry = struct('cutPix', cutsPix(k), 'pixels', 0, 'photons', 0, ...
             'monoNs', NaN, 'logLinearNs', NaN, 'momentNs', NaN, ...
-            'status', 'ok');
+            'pirlsNs', NaN, 'reducedDev', NaN, 'maxResidual', NaN, ...
+            'logLinSpread', NaN, 'status', 'ok');
         try
             result = fit_free_dye_lifetime_above_surface(ptuFile, struct( ...
                 'minTopDistancePix', cutsPix(k), 'makeFigure', false, ...
@@ -63,9 +86,13 @@ function out = test_free_dye_lifetime_selection_robustness(ptuFile, cutsPix)
             entry.monoNs = result.fit.tau0Ns;
             entry.logLinearNs = result.fit.logLinearMedianNs;
             entry.momentNs = result.fit.correctedMeanNs;
-            fprintf('  %7d  %7d  %9.3g  %9.3f  %10.3f  %10.3f\n', ...
-                entry.cutPix, entry.pixels, entry.photons, entry.monoNs, ...
-                entry.logLinearNs, entry.momentNs);
+            entry.pirlsNs = result.fit.pirls.tauNs;
+            entry.reducedDev = result.fit.pirls.reducedDeviance;
+            entry.maxResidual = max(abs(result.fit.pirls.residual));
+            entry.logLinSpread = result.fit.logLinearSpreadNs;
+            fprintf('  %7d  %7d  %9.3g  %7.3f  %10.3f  %8.1f  %12.3f\n', ...
+                entry.cutPix, entry.pixels, entry.photons, entry.pirlsNs, ...
+                entry.reducedDev, entry.maxResidual, entry.logLinSpread);
         catch runError
             entry.status = runError.identifier;
             fprintf('  %7d  FAILED: %s\n', entry.cutPix, runError.message);
@@ -81,7 +108,7 @@ function out = test_free_dye_lifetime_selection_robustness(ptuFile, cutsPix)
             'Only %d cut(s) succeeded, too few to judge a trend.', nnz(good));
     end
 
-    monoRange = max(summary.monoNs(good)) - min(summary.monoNs(good));
+    monoRange = max(summary.pirlsNs(good)) - min(summary.pirlsNs(good));
     logRange = max(summary.logLinearNs(good)) - min(summary.logLinearNs(good));
     momentRange = max(summary.momentNs(good)) - min(summary.momentNs(good));
     photonFall = max(summary.photons(good)) / min(summary.photons(good));
@@ -90,9 +117,30 @@ function out = test_free_dye_lifetime_selection_robustness(ptuFile, cutsPix)
     out.momentRangeNs = momentRange;
     out.photonFall = photonFall;
 
-    fprintf(['\n  across a %.1fx fall in pooled photons: mono varies %.3f ns, ' ...
+    fprintf(['\n  across a %.1fx fall in pooled photons: tau varies %.3f ns, ' ...
         'log-linear %.3f ns,\n  first moment %.3f ns\n'], photonFall, ...
         monoRange, logRange, momentRange);
+
+    % Does cutting more make the decay mono-exponential?
+    devFirst = summary.reducedDev(find(good, 1, 'first'));
+    devLast = summary.reducedDev(find(good, 1, 'last'));
+    spreadFirst = summary.logLinSpread(find(good, 1, 'first'));
+    spreadLast = summary.logLinSpread(find(good, 1, 'last'));
+    out.reducedDevChange = devLast - devFirst;
+    out.logLinSpreadChange = spreadLast - spreadFirst;
+    fprintf(['\n  MONO-EXPONENTIALITY across the sweep: reduced deviance ' ...
+        '%.2f -> %.2f, log-linear\n  range spread %.3f -> %.3f ns\n'], ...
+        devFirst, devLast, spreadFirst, spreadLast);
+    if devLast < 0.7 * devFirst
+        fprintf(['  Cutting further DOES reduce the departure from a single ' ...
+            'exponential, so it was\n  substantially spatial mixing. Use ' ...
+            'the tighter cut.\n']);
+    else
+        fprintf(['  Cutting further does NOT reduce it. The departure is ' ...
+            'intrinsic to the dye at\n  every height sampled, not spatial ' ...
+            'mixing, so a thinner slab will not help -\n  the decay needs ' ...
+            'more than one exponential.\n']);
+    end
 
     % The estimator spread on the full pool is about 0.05 ns, so a trend has to
     % clear that to mean anything.

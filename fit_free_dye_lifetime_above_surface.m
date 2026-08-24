@@ -93,6 +93,37 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 % PLATEAUED - the top part of the section - and that distance is measured from
 % the arrival profile rather than assumed.
 %
+% HOW FAR ABOVE THE PLATEAU, AND WHY 110 PIXELS
+%
+% The arrival-time plateau alone puts the pool about 70 px above the bilayer, and
+% there the pooled decay still departs from a single exponential. Sweeping the
+% cut with test_free_dye_lifetime_selection_robustness shows the departure is
+% largely SPATIAL MIXING - partly-quenched dye nearer the bilayer - and that it
+% can be cut away:
+%
+%   cut(px)   photons   tau(ns)  reducedDev  maxResid  logLinSpread(ns)
+%       0     3.24e6     1.908      8.68      22.1        0.052
+%      70     2.71e6     1.934      3.40       8.5        0.031
+%     180     1.86e6     1.939      2.59       5.8        0.028
+%     300     2.57e5     1.935      1.24       4.2        0.031
+%
+% tau is flat at 1.934-1.939 for every cut past 70 px, so the lifetime does not
+% depend on this choice; only the goodness of fit does.
+%
+% The gain is real and not merely lost statistical power. A fixed RELATIVE model
+% error makes the reduced-deviance excess scale with photon count, and the
+% observed excess is only 35-40% of that prediction at every cut, so the relative
+% misfit itself falls by a factor of about 2.5 to 3. The log-linear range spread
+% - a lifetime drift, hence nearly photon-independent - halves, 0.052 to
+% 0.028 ns.
+%
+% But it SATURATES: the genuine fraction is 37% at 70 px, 36% at 180 and 40% at
+% 300, i.e. flat, and the log-linear spread reaches its floor of 0.028 ns by
+% 180 px. Cut 300's reduced deviance of 1.24 looks best only because it holds
+% 12.6 times fewer photons. The extra margin is therefore 110 px, putting the
+% pool about 180 px above the bilayer: misfit at its floor while keeping
+% 1.86e6 photons, only 1.7 times fewer than taking everything.
+%
 % THE RATE FILTER
 %
 % Beyond the surface band most pixels are empty medium, and including them would
@@ -203,6 +234,9 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 %                      (default 640, matched against the header's LaserWL)
 %   minTopDistancePix  how far above the surface to start; [] (default) finds
 %                      the arrival-time plateau from the data
+%   extraTopMarginPix  pixels added BEYOND the arrival-time plateau before
+%                      the pool starts (default 110). Measured, not guessed;
+%                      see the note on spatial mixing below.
 %   surfaceBrightFraction  only rows holding at least this fraction of the
 %                      brightest row's photons are considered for the bilayer
 %                      (default 0.25). This excludes the dark half of a
@@ -223,6 +257,7 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
     defaults = struct( ...
         'excitationNm', 640, 'maxNgate', 1024, 'tcspcBinNs', 0.05, ...
         'minTopDistancePix', [], 'plateauFraction', 0.90, ...
+        'extraTopMarginPix', 110, ...
         'surfaceBrightFraction', 0.25, 'minSurfaceRowCounts', 500, ...
         'minPixelCounts', 5, 'backgroundSigmas', 5, ...
         'minColumnCounts', 20, ...
@@ -406,6 +441,10 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
     profile = arrivalVersusDistance(countsAx, arrivalAx, surfaceIndex, ...
         direction);
     top = choosePlateauDistance(profile, opts);
+    top.plateauOnlyPix = top.distancePix;
+    if isempty(opts.minTopDistancePix)
+        top.distancePix = top.distancePix + opts.extraTopMarginPix;
+    end
     fprintf(['\n  arrival time versus distance above the bilayer (photon-' ...
         'weighted):\n']);
     for d = [0 20 40 60 80 100 150 200 250 300]
@@ -416,9 +455,13 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
         end
     end
     fprintf(['      rises from %.3f ns at the bilayer to %.3f ns; %.0f%% of ' ...
-        'that rise is reached\n      by +%d px, and the pool starts ' ...
-        'there\n'], profile.arrivalNs(1), top.plateauArrivalNs, ...
-        100 * opts.plateauFraction, top.distancePix);
+        'that rise is reached\n      by +%d px\n'], profile.arrivalNs(1), ...
+        top.plateauArrivalNs, 100 * opts.plateauFraction, ...
+        top.plateauOnlyPix);
+    fprintf(['      pool starts at +%d px = plateau + %d px extra margin, ' ...
+        'which is where the\n      departure from a single exponential ' ...
+        'stops improving (see the help)\n'], top.distancePix, ...
+        top.distancePix - top.plateauOnlyPix);
     if ~isempty(opts.minTopDistancePix)
         fprintf('      (overridden by opts.minTopDistancePix = %d)\n', ...
             top.distancePix);
