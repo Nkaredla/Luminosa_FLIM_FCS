@@ -145,9 +145,26 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 %      corrected value inverts that expression. An earlier version reported the
 %      RAW moment as the headline "model-free" number, which understated tau0
 %      by about 0.8 ns - a first moment is not model-free in a truncated window.
-%   2. MONO-EXPONENTIAL TAIL FIT, swept over tail starts. With the window
-%      correctly ended at the gate the sweep is stable to about 0.14 ns, so
-%      this is now a real estimate rather than only a diagnostic.
+%   2. MONO-EXPONENTIAL PLUS FITTED BACKGROUND, by variable projection. The
+%      model is
+%          y(t) = A * exp(-t/tau) + B
+%      with A and B BOTH non-negative and solved together by PIRLSnonneg -
+%      Poisson iteratively reweighted least squares - inside a one-dimensional
+%      search over tau that minimises the Poisson deviance. This is the primary
+%      estimator.
+%
+%      An earlier version instead fitted tau with Tailfit and then, for display,
+%      scaled an exponential to the first few bins and added the MEDIAN pedestal
+%      on top. That is not a fit: the amplitude and the background were never
+%      solved against the data, and the residuals showed it, running +12 sigma
+%      at the start of the tail, down to -4 in the middle and back to +3 at the
+%      end. Fitting the background as a free non-negative parameter removes
+%      that structure, and because the offset now absorbs the flat part the fit
+%      can use every bin out to the end of the PIE window instead of stopping
+%      where signal meets background.
+%
+%      The swept Tailfit is retained as a diagnostic only, since its drift
+%      across tail starts still reports departures from a single exponential.
 %   3. LIFETIME DISTRIBUTION (DistTailfit), which infers the components without
 %      being told how many there are, and accepts the pulse period so
 %      incomplete decay from the previous pulse is modelled rather than
@@ -472,7 +489,15 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
     fprintf(['      [1] first moment %.3f ns raw -> %.3f ns corrected for ' ...
         'the %.2f ns window\n'], fit.meanLifetimeNs, fit.correctedMeanNs, ...
         fit.momentWindowNs);
-    fprintf('      [2] mono-exponential tail fit      = %.3f ns   (spread %.3f ns)\n', ...
+    fprintf(['      [2] A*exp(-t/tau)+B, PIRLSnonneg   = %.3f ns   ' ...
+        '<- PRIMARY\n'], fit.pirls.tauNs);
+    fprintf(['              amplitude %.4g, fitted background %.2f ' ...
+        'counts/bin (pedestal said %.0f)\n'], fit.pirls.amplitude, ...
+        fit.pirls.offset, fit.pedestal.level);
+    fprintf(['              %d bins fitted, reduced deviance %.3f, ' ...
+        'max |residual| %.1f sigma\n'], fit.pirls.nBin, ...
+        fit.pirls.reducedDeviance, max(abs(fit.pirls.residual)));
+    fprintf('      [2b] Tailfit sweep (diagnostic)    = %.3f ns   (spread %.3f ns)\n', ...
         fit.tau0Ns, fit.tailSpreadNs);
     fprintf(['      [4] log-linear regression          = %.3f ns   ' ...
         '(range spread %.3f ns: %s)\n'], fit.logLinearMedianNs, ...
@@ -1037,6 +1062,59 @@ function pedestal = measurePedestal(pooled)
         'fraction', level * nBin / max(sum(pooled), 1));
 end
 
+function fit = fitMonoPlusOffset(decay, dtNs, firstBin, lastBin, periodNs)
+%FITMONOPLUSOFFSET  y = A*exp(-t/tau) + B, with A,B >= 0 and tau searched.
+%
+% Variable projection: A and B enter linearly, so only tau is searched and the
+% two amplitudes come from PIRLSnonneg at each trial tau. PIRLSnonneg is the
+% right inner solver here rather than plain least squares because the data are
+% photon counts spanning four decades - unweighted least squares would let the
+% bright early bins dominate completely and leave the background essentially
+% unconstrained, which is how the previous version ended up with a background
+% taken from a median instead of from the fit.
+%
+% The background is a FITTED parameter, not a pre-subtracted constant. That lets
+% the fit run to the end of the PIE window, using the flat region to pin B
+% rather than discarding it.
+    decay = double(decay(:));
+    lastBin = min(lastBin, numel(decay));
+    y = decay(firstBin:lastBin);
+    t = (0:numel(y) - 1)' * dtNs;
+
+    objective = @(logTau) monoDeviance(exp(logTau), t, y, periodNs);
+    logTauHat = fminbnd(objective, log(0.05), log(20), ...
+        optimset('TolX', 1e-5, 'Display', 'off'));
+    tau = exp(logTauHat);
+    [deviance, beta, model] = monoDeviance(tau, t, y, periodNs);
+
+    % Two free amplitudes plus one lifetime.
+    dof = max(1, numel(y) - 3);
+    fit = struct('tauNs', tau, 'amplitude', beta(2), 'offset', beta(1), ...
+        'deviance', deviance, 'reducedDeviance', deviance / dof, ...
+        'firstBin', firstBin, 'lastBin', lastBin, 'nBin', numel(y), ...
+        'timeNs', t, 'data', y, 'model', model, ...
+        'residual', (y - model) ./ sqrt(max(model, 1)));
+end
+
+function [deviance, beta, model] = monoDeviance(tau, t, y, periodNs)
+    if ~isfinite(tau) || tau <= 0
+        deviance = 1e12; beta = [0; 0]; model = ones(size(y)); return;
+    end
+    column = exp(-t / tau);
+    if isfinite(periodNs) && periodNs > 0
+        % Incomplete decay from previous pulses. Negligible at tau << period,
+        % but it costs nothing and keeps the model honest for longer lifetimes.
+        column = column / max(1 - exp(-periodNs / tau), eps);
+    end
+    design = [ones(numel(t), 1), column];
+    beta = PIRLSnonneg(design, y);
+    model = max(design * beta, 1e-12);
+    good = y > 0;
+    deviance = 2 * (sum(model - y) + ...
+        sum(y(good) .* log(y(good) ./ model(good))));
+    if ~isfinite(deviance); deviance = 1e12; end
+end
+
 function fit = fitPooledDecay(pooled, dtNs, periodNs, opts, ptuFile, pedestal)
 %FITPOOLEDDECAY Swept-tail-start MLE tail fit, plus an IRF-deconvolved check.
     pooled = double(pooled(:));
@@ -1082,7 +1160,21 @@ function fit = fitPooledDecay(pooled, dtNs, periodNs, opts, ptuFile, pedestal)
     windowNs = numel(fromPeak) * dtNs;
     correctedMeanNs = correctTruncatedMoment(meanLifetimeNs, windowNs);
 
-    fit = struct('peakBin', peakBin, 'tauPerTailStart', tauPerStart, ...
+    % [2] The primary estimator: A*exp(-t/tau) + B with both amplitudes from
+    % PIRLSnonneg. Runs to the end of the window because the fitted offset
+    % absorbs the background instead of the window having to avoid it.
+    pirlsFirst = peakBin + max(1, round(0.4 / dtNs));
+    if pirlsFirst < numel(pooled) - 8
+        pirls = fitMonoPlusOffset(pooled, dtNs, pirlsFirst, ...
+            numel(pooled), periodNs);
+    else
+        pirls = struct('tauNs', NaN, 'amplitude', NaN, 'offset', NaN, ...
+            'reducedDeviance', NaN, 'firstBin', NaN, 'lastBin', NaN, ...
+            'nBin', 0, 'timeNs', [], 'data', [], 'model', [], 'residual', []);
+    end
+
+    fit = struct('pirls', pirls, ...
+        'peakBin', peakBin, 'tauPerTailStart', tauPerStart, ...
         'tailBins', tailBins, 'tailPhotons', tailPhotons, ...
         'meanLifetimeNs', meanLifetimeNs, ...
         'correctedMeanNs', correctedMeanNs, ...
@@ -1337,54 +1429,41 @@ function name = plotFittedDecay(out)
     % The pedestal and the fit boundary are drawn, because the fit deliberately
     % stops where the decay stops beating the background and a figure spanning
     % the whole period would imply otherwise.
-    modelCurve = [];
-    fitLast = numel(decay);
-    if isfield(fit, 'pedestal') && ~isempty(fit.pedestal)
-        fitLast = min(numel(decay), fit.pedestal.signalEnd);
-        yline(ax, max(fit.pedestal.level, 0.5), '--', 'Color', [0.4 0.4 0.4], ...
-            'DisplayName', sprintf('pedestal %.0f counts/bin', ...
-            fit.pedestal.level));
-        if fitLast < numel(decay)
-            xline(ax, timeNs(fitLast), '-.', 'Color', [0.2 0.5 0.2], ...
-                'DisplayName', 'fit window ends');
-        end
-    end
-    if isfinite(fit.tau0Ns)
-        first = fit.peakBin + max(1, round(min(out.opts.tailStartNs) / out.dtNs));
-        first = min(first, fitLast - 2);
-        span = first:fitLast;
-        tailTime = timeNs(span) - timeNs(first);
-        headBins = first:min(first + 3, fitLast);
-        scale = sum(decay(headBins)) / max(numel(headBins), 1);
-        modelCurve = scale * exp(-tailTime / fit.tau0Ns) + ...
-            max(fit.pedestal.level, 0);
-        semilogy(ax, timeNs(span), max(modelCurve, 0.5), 'r-', ...
-            'LineWidth', 1.6, 'DisplayName', ...
-            sprintf('tail fit \\tau = %.3f ns + pedestal', fit.tau0Ns));
-        xline(ax, timeNs(first), ':k', 'tail start');
+    % The curve drawn IS the fitted model - amplitude, background and lifetime
+    % all from PIRLSnonneg. The previous version drew an exponential scaled to
+    % the first few bins with a median pedestal added, which is why the plotted
+    % curve and the residuals disagreed with each other.
+    pirls = fit.pirls;
+    haveFit = isstruct(pirls) && isfinite(pirls.tauNs) && ~isempty(pirls.model);
+    if haveFit
+        yline(ax, max(pirls.offset, 0.5), '--', 'Color', [0.4 0.4 0.4], ...
+            'DisplayName', sprintf('fitted background %.1f counts/bin', ...
+            pirls.offset));
+        span = pirls.firstBin:pirls.lastBin;
+        semilogy(ax, timeNs(span), max(pirls.model, 0.5), 'r-', ...
+            'LineWidth', 1.6, 'DisplayName', sprintf( ...
+            'A e^{-t/\\tau}+B, \\tau = %.3f ns', pirls.tauNs));
+        xline(ax, timeNs(pirls.firstBin), ':k', 'fit start');
     end
     grid(ax, 'on');
     ylabel(ax, 'photons per bin');
     legend(ax, 'Location', 'northeast');
-    titleText = sprintf('%s (%s): pooled decay above the surface', ...
-        out.acquisition, out.plane);
-    if fit.irfOk
-        titleText = sprintf('%s   |   IRF check %.3f ns', titleText, ...
-            fit.irfTauNs(1));
-    end
-    title(ax, titleText);
+    % The borrowed-IRF cross-check is deliberately NOT in the title: it uses an
+    % IRF from another acquisition resampled onto this binning and scatters
+    % threefold between scans, so putting it beside the fitted lifetime invites
+    % it to be read as a second measurement.
+    title(ax, sprintf(['%s (%s): pooled decay above the surface, ' ...
+        '\\tau = %.3f ns'], out.acquisition, out.plane, fit.pirls.tauNs));
 
     ax = nexttile(layout, 4, [1 1]);
-    if ~isempty(modelCurve)
-        first = fit.peakBin + max(1, round(min(out.opts.tailStartNs) / out.dtNs));
-        first = min(first, fitLast - 2);
-        span = first:fitLast;
-        observed = decay(span);
-        expected = max(modelCurve, 1e-9);
-        residual = (observed - expected) ./ sqrt(max(expected, 1));
-        plot(ax, timeNs(span), residual, 'b-', 'LineWidth', 1);
+    if haveFit
+        span = pirls.firstBin:pirls.lastBin;
+        plot(ax, timeNs(span), pirls.residual, 'b-', 'LineWidth', 1);
         yline(ax, 0, 'k-');
+        yline(ax, 3, ':', 'Color', [0.6 0.6 0.6]);
+        yline(ax, -3, ':', 'Color', [0.6 0.6 0.6]);
         ylabel(ax, 'Poisson residual');
+        ylim(ax, [-6 6]);
     end
     xlabel(ax, 'time (ns)');
     grid(ax, 'on');
