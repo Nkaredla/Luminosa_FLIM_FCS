@@ -494,9 +494,13 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
     fprintf(['              amplitude %.4g, fitted background %.2f ' ...
         'counts/bin (pedestal said %.0f)\n'], fit.pirls.amplitude, ...
         fit.pirls.offset, fit.pedestal.level);
-    fprintf(['              %d bins fitted, reduced deviance %.3f, ' ...
-        'max |residual| %.1f sigma\n'], fit.pirls.nBin, ...
-        fit.pirls.reducedDeviance, max(abs(fit.pirls.residual)));
+    backgroundBins = fit.pirls.lastBin - fit.pedestal.signalEnd;
+    fprintf(['              %d bins fitted to %.2f ns, of which %d are past ' ...
+        'the decay and pin B\n'], fit.pirls.nBin, ...
+        fit.pirls.lastBin * dtNs, max(backgroundBins, 0));
+    fprintf(['              reduced deviance %.3f, max |residual| %.1f ' ...
+        'sigma\n'], fit.pirls.reducedDeviance, ...
+        max(abs(fit.pirls.residual)));
     fprintf('      [2b] Tailfit sweep (diagnostic)    = %.3f ns   (spread %.3f ns)\n', ...
         fit.tau0Ns, fit.tailSpreadNs);
     fprintf(['      [4] log-linear regression          = %.3f ns   ' ...
@@ -1117,10 +1121,21 @@ end
 
 function fit = fitPooledDecay(pooled, dtNs, periodNs, opts, ptuFile, pedestal)
 %FITPOOLEDDECAY Swept-tail-start MLE tail fit, plus an IRF-deconvolved check.
-    pooled = double(pooled(:));
-    % Everything beyond signalEnd is pedestal; including it drags a
-    % mono-exponential fit downwards and eventually fits pure noise.
-    pooled = pooled(1:pedestal.signalEnd);
+    fullDecay = double(pooled(:));
+    % Two windows, deliberately different, because the two fits need different
+    % things from the late bins.
+    %
+    % The PIRLS fit gets the WHOLE window to the end of the PIE gate. Its
+    % background B is a fitted non-negative parameter, and the flat bins beyond
+    % the decay are precisely what pins it - discarding them leaves B
+    % constrained only by the bins where signal and background overlap, which is
+    % the weakest possible place to determine it.
+    %
+    % The swept Tailfit gets the truncated window. It has no proper background
+    % model, so trailing pedestal bins drag a mono-exponential downwards and
+    % eventually it fits pure noise. That was measured: the sweep fell
+    % 2.23 -> 1.99 -> 1.55 ns as the window filled with pedestal.
+    pooled = fullDecay(1:pedestal.signalEnd);
     gateLength = numel(pooled);
     [~, peakBin] = max(pooled);
     starts = opts.tailStartNs(:)';
@@ -1164,9 +1179,9 @@ function fit = fitPooledDecay(pooled, dtNs, periodNs, opts, ptuFile, pedestal)
     % PIRLSnonneg. Runs to the end of the window because the fitted offset
     % absorbs the background instead of the window having to avoid it.
     pirlsFirst = peakBin + max(1, round(0.4 / dtNs));
-    if pirlsFirst < numel(pooled) - 8
-        pirls = fitMonoPlusOffset(pooled, dtNs, pirlsFirst, ...
-            numel(pooled), periodNs);
+    if pirlsFirst < numel(fullDecay) - 8
+        pirls = fitMonoPlusOffset(fullDecay, dtNs, pirlsFirst, ...
+            numel(fullDecay), periodNs);
     else
         pirls = struct('tauNs', NaN, 'amplitude', NaN, 'offset', NaN, ...
             'reducedDeviance', NaN, 'firstBin', NaN, 'lastBin', NaN, ...
