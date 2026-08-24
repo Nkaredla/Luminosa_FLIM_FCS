@@ -12,6 +12,34 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 % pixels beyond it are selected by count rate, and the fit is of the pooled
 % decay - so nothing in the answer depends on the micron size of an axial pixel.
 %
+% THE BIN WIDTH COMES FROM THE READER, NEVER FROM period/nGate
+%
+% PTU_FLIM_GPU rebins the native 20 ps channels by an integer divisor and then
+% CAPS the bin count: chDiv = round(minLifetimeBin_ns / nativeRes) = 3, so the
+% stored bin width is 0.060 ns, and Ngate = min(maxNgate, ceil(period/0.060)+1)
+% = min(512, 835) = 512. The 512 stored bins therefore tile only 30.72 ns of the
+% 50 ns period, and PTU_FLIM_GPU discards every photon after 30.72 ns
+% (photonValid = ... & tmptcspc < Ngate*chDiv).
+%
+% Deriving dtNs as periodNs/nGate assumed the bins tile the period. They do not,
+% and that made every nanosecond in this program 1.6276 times too large. The
+% reader exports the truth as ptu.Resolution_ns and also overwrites
+% head.MeasDesc_Resolution with it; this code now reads that and refuses to run
+% if the stored array does not cover the period.
+%
+% The error was self-concealing in two ways worth recording. A range check on
+% im_tcspc can never fire, because the reader already clamps indices into
+% [1, Ngate] - so it gave false reassurance. And the wrong width made the two
+% PIE peaks appear 41 ns apart instead of 25 ns, which is what led to
+% "a hardware gate at 7.2 ns" and "a second 640 pulse at 2% of the peak". Both
+% were artefacts: the first is the end of the stored array, the second is the
+% 485 nm peak reached by wrapping past it.
+%
+% The check that settles the bin width is the PIE geometry itself. The two peaks
+% sit 421 stored bins apart; at 0.060 ns that is 25.3 ns, exactly half the
+% period and exactly the header's PIETimeGate of 1250 native bins. No other bin
+% width makes the interleaving physical.
+%
 % WHICH PIE WINDOW - TAKEN FROM THE HEADER, NOT GUESSED
 %
 % The file records LaserCount = 2, LaserWL = [485 640], PIENumPIEWindows = 2 and
@@ -41,12 +69,23 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 % jumped ~130 pixels upward across the cell footprint and dragged the selection
 % with it. A flat plane must be fitted as a flat plane.
 %
-% Intensity alone is not used to find it. The bilayer is bright, but so is a
-% cell membrane; the arrival-time minimum marks the quenched layer by physics.
+% Intensity does not CHOOSE the row - the arrival-time minimum does, because a
+% cell membrane is bright too. But intensity does restrict WHERE to look, and
+% that turned out to be essential. A cross-section is half sample and half
+% opaque substrate, and in the dark half the few hundred photons per row give
+% arbitrary arrival times; the unrestricted minimum landed there on four of five
+% scans, putting the "surface" 100-150 rows into empty space. The search is
+% therefore confined to rows carrying a stated fraction of the brightest row's
+% signal, which excludes the empty half without deciding anything about which
+% bright row is the bilayer.
 %
 % WHICH SIDE IS "ABOVE", AND HOW FAR UP TO GO
 %
-% The side where mean arrival RISES is away from the metal. But taking
+% Primarily the side holding MORE PHOTONS. Above the metal is sample; below it
+% is substrate, so the asymmetry is large and unambiguous. The arrival-time
+% gradient is kept as a cross-check and a disagreement between the two is
+% warned about rather than silently resolved - relying on the gradient alone put
+% the sample below the surface on two scans once the dark half was in play. But taking
 % everything on that side is wrong: just above the bilayer the dye is still
 % partly quenched, and pooling that with free dye higher up gives a decay that
 % is a mixture of lifetimes, which showed as strongly curved residuals reaching
@@ -147,7 +186,15 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 %                      (default 640, matched against the header's LaserWL)
 %   minTopDistancePix  how far above the surface to start; [] (default) finds
 %                      the arrival-time plateau from the data
-%   maxNgate           TCSPC bins after rebinning (default 512)
+%   surfaceBrightFraction  only rows holding at least this fraction of the
+%                      brightest row's photons are considered for the bilayer
+%                      (default 0.25). This excludes the dark half of a
+%                      cross-section, where arrival times are pure noise.
+%   maxNgate           cap on stored TCSPC bins (default 1024). It MUST be
+%                      large enough for the stored bins to span the whole laser
+%                      period, or the reader silently discards the late part of
+%                      the period; at 0.060 ns bins and a 50 ns period that
+%                      needs 835, and the previous default of 512 did not.
 %   minPixelCounts     absolute floor on counts per pixel (default 5)
 %   backgroundSigmas   Poisson sigmas above background for the rate filter
 %                      (default 5)
@@ -157,8 +204,9 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 
     if nargin < 2 || isempty(opts); opts = struct(); end
     defaults = struct( ...
-        'excitationNm', 640, 'maxNgate', 512, 'tcspcBinNs', 0.05, ...
+        'excitationNm', 640, 'maxNgate', 1024, 'tcspcBinNs', 0.05, ...
         'minTopDistancePix', [], 'plateauFraction', 0.90, ...
+        'surfaceBrightFraction', 0.25, 'minSurfaceRowCounts', 500, ...
         'minPixelCounts', 5, 'backgroundSigmas', 5, ...
         'minColumnCounts', 20, ...
         'tailStartNs', [0.4 0.8 1.2 1.8 2.5], ...
@@ -220,9 +268,20 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
         'storePhotonFrame', false, 'lowMemoryPhotonLists', true, ...
         'photonBlockSize', opts.photonBlockSize));
     nGate = double(ptu.Ngate);
-    dtNs = periodNs / nGate;
-    fprintf('  %d photons, %d TCSPC bins of %.4f ns\n', ...
-        numel(ptu.im_tcspc), nGate, dtNs);
+    dtNs = readerBinWidthNs(ptu);
+    storedSpanNs = nGate * dtNs;
+    fprintf('  %d photons, %d TCSPC bins of %.4f ns = %.2f ns stored\n', ...
+        numel(ptu.im_tcspc), nGate, dtNs, storedSpanNs);
+    if storedSpanNs < 0.99 * periodNs
+        error('fit_free_dye_lifetime_above_surface:TruncatedPeriod', ...
+            ['The reader stored only %.2f ns of the %.2f ns period ' ...
+             '(Ngate = %d, capped by maxNgate = %d; dt = %.4f ns). Photons ' ...
+             'from %.2f to %.2f ns were DISCARDED, the histogram cannot be ' ...
+             'wrapped, and the two PIE windows cannot be separated. Raise ' ...
+             'maxNgate to at least %d.'], storedSpanNs, periodNs, nGate, ...
+            opts.maxNgate, dtNs, storedSpanNs, periodNs, ...
+            ceil(periodNs / dtNs) + 1);
+    end
 
     % ---- PIE gate ----------------------------------------------------------
     % im_tcspc is ALREADY a 1-based bin index in this reader - see
@@ -297,10 +356,22 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
         countsAx = counts'; arrivalAx = meanArrivalNs';
     end
 
-    [surfaceIndex, direction] = locateFlatSurface(countsAx, arrivalAx);
-    fprintf(['  surface: FLAT at axial row %d of %d (the bilayer); "away ' ...
-        'from metal" is the %s direction\n'], surfaceIndex, ...
-        size(countsAx, 1), direction.name);
+    [surfaceIndex, direction] = locateFlatSurface(countsAx, arrivalAx, opts);
+    fprintf(['  surface: FLAT at axial row %d of %d (the bilayer), chosen ' ...
+        'among %d rows holding\n      at least %.0f%% of the brightest ' ...
+        'row; "away from metal" is the %s direction\n'], surfaceIndex, ...
+        size(countsAx, 1), direction.candidateRows, ...
+        100 * opts.surfaceBrightFraction, direction.name);
+    fprintf(['      photons %.3g on the chosen side vs %.3g on the other; ' ...
+        'arrival %.3f -> %.3f ns\n'], direction.chosenPhotons, ...
+        direction.otherPhotons, direction.bandArrivalNs, ...
+        direction.chosenArrivalNs);
+    if direction.disagree
+        warning('fit_free_dye_lifetime_above_surface:DirectionDisagreement', ...
+            ['Photon count and arrival-time gradient disagree about which ' ...
+             'side is away from the metal. Photon count was used. Inspect ' ...
+             'mean_flim.png.']);
+    end
     fprintf(['      mean arrival %.3f ns in the band, %.3f ns just beyond it ' ...
         'on the chosen side,\n      %.3f ns on the other side; photons ' ...
         '%.3g beyond vs %.3g on the other side\n'], ...
@@ -418,8 +489,9 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
                 'photons %5.1f%%\n'], fit.distTauNs(k), ...
                 100 * fit.distAmpShare(k), 100 * fit.distPhotonShare(k));
         end
-        fprintf('              intensity-weighted mean of those: %.3f ns\n', ...
-            fit.distMeanNs);
+        fprintf(['              photon-weighted mean %.3f ns is THE ' ...
+            'estimate; the components\n              above are rate-grid ' ...
+            'points, not separate populations\n'], fit.distMeanNs);
     else
         fprintf('      [3] lifetime distribution unavailable: %s\n', ...
             fit.distReason);
@@ -475,6 +547,35 @@ function ptuFile = resolvePtu(source)
     else
         error('fit_free_dye_lifetime_above_surface:NoSource', ...
             'Not a file or folder: %s', source);
+    end
+end
+
+function dtNs = readerBinWidthNs(ptu)
+%READERBINWIDTHNS The width of one STORED TCSPC bin, from the reader itself.
+%
+% Never period/nGate: the reader caps the bin count, so the stored bins need not
+% tile the period, and assuming they do scaled every lifetime in this program by
+% 1.6276. PTU_FLIM_GPU exports the true value as Resolution_ns and also
+% overwrites head.MeasDesc_Resolution with the coarse width, so either is
+% authoritative and both are preferred to any arithmetic on the period.
+    dtNs = [];
+    if isfield(ptu, 'Resolution_ns') && isscalar(ptu.Resolution_ns) && ...
+            isfinite(ptu.Resolution_ns) && ptu.Resolution_ns > 0
+        dtNs = double(ptu.Resolution_ns);
+        return;
+    end
+    if isfield(ptu, 'head') && isfield(ptu.head, 'MeasDesc_Resolution')
+        candidate = 1e9 * double(ptu.head.MeasDesc_Resolution);
+        if isfinite(candidate) && candidate > 0
+            dtNs = candidate;
+            return;
+        end
+    end
+    if isempty(dtNs)
+        error('fit_free_dye_lifetime_above_surface:NoBinWidth', ...
+            ['The reader returned neither Resolution_ns nor a usable ' ...
+             'head.MeasDesc_Resolution, so the stored bin width is unknown. ' ...
+             'It must not be inferred from the period.']);
     end
 end
 
@@ -696,48 +797,68 @@ end
 
 % =========================================================== surface finding
 
-function [surfaceIndex, direction] = locateFlatSurface(countsAx, arrivalAx)
+function [surfaceIndex, direction] = locateFlatSurface(countsAx, arrivalAx, opts)
 %LOCATEFLATSURFACE One axial row for the supported bilayer, plus the "up" side.
 %
-% The bilayer is a flat plane, so it is ONE row, taken as the minimum of the
-% marginal photon-weighted mean-arrival profile - the most quenched layer in the
-% frame.
+% The bilayer is a flat plane, so it is ONE row: the minimum of the marginal
+% photon-weighted mean-arrival profile, searched only among rows that carry real
+% signal.
 %
-% A per-column minimum was tried first and failed in a way the figures made
-% obvious: where a cell sits on the bilayer the per-column minimum climbs the
-% cell, so the surface line jumped about 130 pixels upward across the cell
-% footprint and took the selection with it. Fitting a flat plane as flat is not
-% a simplification here, it is the correction.
+% Two failures shaped this. A per-column minimum climbed the cell where a cell
+% sat on the bilayer, moving the "surface" ~130 rows and dragging the selection
+% with it - a flat plane must be fitted as flat. Then an unrestricted flat
+% search put the row in the DARK half of the section, where a few hundred
+% photons per row give meaningless arrival times. Intensity does not pick the
+% row, but it must bound the search.
     [nAxial, ~] = size(countsAx);
     sliceCounts = sum(countsAx, 2);
     sliceWeighted = sum(arrivalAx .* countsAx, 2, 'omitnan');
+
+    bright = sliceCounts >= opts.surfaceBrightFraction * max(sliceCounts) & ...
+        sliceCounts >= opts.minSurfaceRowCounts;
+    if nnz(bright) < 3
+        error('fit_free_dye_lifetime_above_surface:NoBrightRows', ...
+            ['Only %d axial row(s) hold %.0f%% of the brightest row and at ' ...
+             'least %d photons, which is too few to locate the bilayer.'], ...
+            nnz(bright), 100 * opts.surfaceBrightFraction, ...
+            opts.minSurfaceRowCounts);
+    end
     profile = inf(nAxial, 1);
-    enough = sliceCounts >= max(200, 0.02 * max(sliceCounts));
-    profile(enough) = sliceWeighted(enough) ./ sliceCounts(enough);
+    profile(bright) = sliceWeighted(bright) ./ sliceCounts(bright);
     smooth = smoothIgnoringInf(profile, 5);
+    smooth(~bright) = inf;
     [~, surfaceIndex] = min(smooth);
 
-    % Which side is away from the metal: the side where arrival time rises.
+    % Which side is away from the metal. Photon count decides: above the metal
+    % is sample, below is substrate. The arrival gradient only cross-checks.
+    lowRows = 1:max(1, surfaceIndex - 1);
+    highRows = min(nAxial, surfaceIndex + 1):nAxial;
+    lowPhotons = sum(sliceCounts(lowRows));
+    highPhotons = sum(sliceCounts(highRows));
     span = max(20, round(0.05 * nAxial));
-    lowRange = max(1, surfaceIndex - span):max(1, surfaceIndex - 1);
-    highRange = min(nAxial, surfaceIndex + 1):min(nAxial, surfaceIndex + span);
-    lowMean = weightedArrival(arrivalAx, countsAx, lowRange);
-    highMean = weightedArrival(arrivalAx, countsAx, highRange);
-    lowPhotons = sum(sliceCounts(lowRange));
-    highPhotons = sum(sliceCounts(highRange));
-    direction = struct('bandArrivalNs', smooth(surfaceIndex));
-    if highMean >= lowMean
-        direction.sign = +1;
+    lowNear = max(1, surfaceIndex - span):max(1, surfaceIndex - 1);
+    highNear = min(nAxial, surfaceIndex + 1):min(nAxial, surfaceIndex + span);
+    lowArrival = weightedArrival(arrivalAx, countsAx, lowNear);
+    highArrival = weightedArrival(arrivalAx, countsAx, highNear);
+
+    byPhotons = sign(highPhotons - lowPhotons);
+    if byPhotons == 0; byPhotons = 1; end
+    byArrival = sign(highArrival - lowArrival);
+
+    direction = struct('sign', byPhotons, ...
+        'candidateRows', nnz(bright), ...
+        'bandArrivalNs', smooth(surfaceIndex), ...
+        'disagree', byArrival ~= 0 && byArrival ~= byPhotons);
+    if byPhotons > 0
         direction.name = 'increasing index';
-        direction.chosenArrivalNs = highMean;
-        direction.otherArrivalNs = lowMean;
+        direction.chosenArrivalNs = highArrival;
+        direction.otherArrivalNs = lowArrival;
         direction.chosenPhotons = highPhotons;
         direction.otherPhotons = lowPhotons;
     else
-        direction.sign = -1;
         direction.name = 'decreasing index';
-        direction.chosenArrivalNs = lowMean;
-        direction.otherArrivalNs = highMean;
+        direction.chosenArrivalNs = lowArrival;
+        direction.otherArrivalNs = highArrival;
         direction.chosenPhotons = lowPhotons;
         direction.otherPhotons = highPhotons;
     end
@@ -1023,8 +1144,17 @@ function fit = fitPooledDecay(pooled, dtNs, periodNs, opts, ptuFile, pedestal)
             % asking for 200 rates made the solve fail outright on one scan.
             tail = pooled(first:end);
             nRate = max(10, min(120, floor(numel(tail) / 2)));
-            [amplitude, rate] = DistTailfit(tail, dtNs, 1, false, nRate, ...
-                min(20, 4 * numel(tail) * dtNs), periodNs);
+            taumax = min(20, 4 * numel(tail) * dtNs);
+            try
+                [amplitude, rate] = DistTailfit(tail, dtNs, 1, false, ...
+                    nRate, taumax, periodNs);
+            catch
+                % The clustered branch is fragile on some window lengths;
+                % the unclustered distribution is still usable, so fall back
+                % to it rather than losing the estimate entirely.
+                [amplitude, rate] = DistTailfit(tail, dtNs, 0, false, ...
+                    nRate, taumax, periodNs);
+            end
             amplitude = double(amplitude(:)');
             rate = double(rate(:)');
             keep = isfinite(rate) & rate > 0 & isfinite(amplitude) & ...
