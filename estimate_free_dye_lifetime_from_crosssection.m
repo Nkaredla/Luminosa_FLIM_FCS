@@ -145,8 +145,15 @@ function out = estimate_free_dye_lifetime_from_crosssection(source, opts)
         numel(ptu.im_tcspc), nGate, dtNs);
 
     % ---- PIE gate ----------------------------------------------------------
-    globalCurve = accumarray(double(ptu.im_tcspc(:)) + 1, 1, [nGate + 1, 1]);
-    globalCurve = globalCurve(2:end);
+    % im_tcspc is already a 1-based bin index in this reader; the previous
+    % "+1 then drop the first bin" shifted every arrival time by one bin.
+    rawBin = double(ptu.im_tcspc(:));
+    if max(rawBin) > nGate || min(rawBin) < 1
+        error('estimate_free_dye_lifetime_from_crosssection:BinRange', ...
+            'im_tcspc spans %g to %g, outside 1..%d.', ...
+            min(rawBin), max(rawBin), nGate);
+    end
+    globalCurve = accumarray(rawBin, 1, [nGate, 1]);
     gate = selectPieGate(globalCurve, opts.piePulseIndex, dtNs);
     fprintf('  gate detection: %s\n', gate.method);
     fprintf(['  PIE: %d window(s) detected; using window %d, bins %d-%d ' ...
@@ -155,11 +162,10 @@ function out = estimate_free_dye_lifetime_from_crosssection(source, opts)
         (gate.startBin - 1) * dtNs, (gate.stopBin - 1) * dtNs, ...
         gate.photons, 100 * gate.photons / max(sum(globalCurve), 1));
 
-    inGate = double(ptu.im_tcspc(:)) + 1 >= gate.startBin & ...
-        double(ptu.im_tcspc(:)) + 1 <= gate.stopBin;
+    inGate = rawBin >= gate.startBin & rawBin <= gate.stopBin;
     lineIndex = double(ptu.im_line(:));
     colIndex = double(ptu.im_col(:));
-    timeBin = double(ptu.im_tcspc(:)) + 1 - gate.startBin + 1;
+    timeBin = rawBin - gate.startBin + 1;
     gateLength = gate.stopBin - gate.startBin + 1;
     valid = inGate & lineIndex >= 1 & lineIndex <= geometry.pixY & ...
         colIndex >= 1 & colIndex <= geometry.pixX;
