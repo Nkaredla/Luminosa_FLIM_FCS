@@ -120,9 +120,21 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 % But it SATURATES: the genuine fraction is 37% at 70 px, 36% at 180 and 40% at
 % 300, i.e. flat, and the log-linear spread reaches its floor of 0.028 ns by
 % 180 px. Cut 300's reduced deviance of 1.24 looks best only because it holds
-% 12.6 times fewer photons. The extra margin is therefore 110 px, putting the
-% pool about 180 px above the bilayer: misfit at its floor while keeping
-% 1.86e6 photons, only 1.7 times fewer than taking everything.
+% 12.6 times fewer photons.
+%
+% extraTopMarginPix nevertheless DEFAULTS TO 0, i.e. the plateau alone. Running
+% with 110 px was tried on all five scans and does what the sweep promises -
+% reduced deviance 3.0-4.0 down to 1.9-3.1, max residual 8.5-9.2 down to
+% 6.0-7.0 sigma, and a fitted background within about 2 counts/bin of the
+% measured pedestal instead of roughly twice it - but it shrinks the pool from
+% 20-36% of the frame to 11-18%, discarding 30-45% of the photons. That was
+% judged too expensive for the gain.
+%
+% The decisive point is that it does not matter for the answer: tau0 is
+% 1.89-1.99 ns at the plateau cut and 1.90-2.01 ns with the extra margin, and
+% the per-scan lifetime moves by less than 0.03 ns. Only the goodness of fit
+% changes. Set extraTopMarginPix = 110 when the fit quality matters more than
+% the photon budget.
 %
 % THE RATE FILTER
 %
@@ -234,9 +246,12 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
 %                      (default 640, matched against the header's LaserWL)
 %   minTopDistancePix  how far above the surface to start; [] (default) finds
 %                      the arrival-time plateau from the data
-%   extraTopMarginPix  pixels added BEYOND the arrival-time plateau before
-%                      the pool starts (default 110). Measured, not guessed;
-%                      see the note on spatial mixing below.
+%   extraTopMarginPix  pixels added BEYOND the arrival-time plateau before the
+%                      pool starts. DEFAULT 0: the plateau alone. Setting it to
+%                      110 measurably improves the fit but costs 30-45% of the
+%                      photons, which was judged too expensive - see the note
+%                      on spatial mixing below, which records both sides so the
+%                      trade is one number away.
 %   surfaceBrightFraction  only rows holding at least this fraction of the
 %                      brightest row's photons are considered for the bilayer
 %                      (default 0.25). This excludes the dark half of a
@@ -257,7 +272,7 @@ function out = fit_free_dye_lifetime_above_surface(source, opts)
     defaults = struct( ...
         'excitationNm', 640, 'maxNgate', 1024, 'tcspcBinNs', 0.05, ...
         'minTopDistancePix', [], 'plateauFraction', 0.90, ...
-        'extraTopMarginPix', 110, ...
+        'extraTopMarginPix', 0, ...
         'surfaceBrightFraction', 0.25, 'minSurfaceRowCounts', 500, ...
         'minPixelCounts', 5, 'backgroundSigmas', 5, ...
         'minColumnCounts', 20, ...
