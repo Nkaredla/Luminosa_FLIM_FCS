@@ -228,6 +228,17 @@ function out = immune_cell_MIET_biexp_slb(source, opts)
             % deliberate exception and says so in the path.
             name = sprintf('%s_grid', name);
         end
+        % A fit over something other than the cell footprint gets its own
+        % folder, so whole-file and footprint-only results never overwrite one
+        % another and the path says which is which.
+        if ~(ischar(opts.pixelMask) || isstring(opts.pixelMask)) || ...
+                ~strcmpi(char(opts.pixelMask), 'cellFootprint')
+            if ischar(opts.pixelMask) || isstring(opts.pixelMask)
+                name = sprintf('%s_%s', name, char(opts.pixelMask));
+            else
+                name = sprintf('%s_mask', name);
+            end
+        end
         if priorWasPinned
             % e.g. biexp_slb_tau0p350 - the choice is visible in the path.
             name = sprintf('%s_tau%s', name, strrep(sprintf('%.3f', ...
@@ -241,15 +252,26 @@ function out = immune_cell_MIET_biexp_slb(source, opts)
     save(matFile, 'out', '-v7.3');
     fprintf('\n  wrote %s\n', matFile);
     immune_cell_MIET_biexp_report(out, opts.outputDir);
+    % Figures are NOT allowed to fail the run. The fit is already saved by this
+    % point, and a plotting error used to propagate out of here and discard
+    % minutes of completed fitting - which is how a MATLAB colorbar listener bug
+    % came to throw away a whole acquisition. Report and carry on instead; the
+    % figures can always be regenerated from the saved MAT.
     if opts.makeFigure
-        out.figure = immune_cell_MIET_biexp_figure(out, opts.outputDir);
-        fprintf('  wrote %s\n', out.figure);
-        % The component figure is the physical picture - tau1 and tau2 as
-        % FLIM images. It exists separately because the overview figure is
-        % given over to fit-quality diagnostics, and tau1 was previously
-        % never plotted at all despite being saved in every result.
-        out.componentFigure = ...
-            immune_cell_MIET_biexp_component_figure(out, opts.outputDir);
-        fprintf('  wrote %s\n', out.componentFigure);
+        try
+            out.figure = immune_cell_MIET_biexp_figure(out, opts.outputDir);
+            fprintf('  wrote %s\n', out.figure);
+        catch figError
+            fprintf('  WARNING: overview figure failed (%s); the fit is saved.\n', ...
+                figError.message);
+        end
+        try
+            out.componentFigure = ...
+                immune_cell_MIET_biexp_component_figure(out, opts.outputDir);
+            fprintf('  wrote %s\n', out.componentFigure);
+        catch figError
+            fprintf(['  WARNING: component figure failed (%s); the fit is ' ...
+                'saved.\n'], figError.message);
+        end
     end
 end

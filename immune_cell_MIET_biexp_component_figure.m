@@ -33,17 +33,20 @@ function name = immune_cell_MIET_biexp_component_figure(out, outputDir)
     % ---- tau1: the SLB component ---------------------------------------
     ax = nexttile(layout);
     drawMap(ax, maps.tau1Ns, 'parula');
+    % NOTE ON COLORBARS. Do not set Limits and do not read or write
+    % ColorBar.Label here. Writing Limits schedules a graphics update, and
+    % reading .Label during that traversal throws
+    %   "Attempt to modify the tree during an update traversal"
+    % out of ColorBar/attachAxesListeners - which previously killed the whole
+    % run AFTER the fit had already been computed. caxis already sets the
+    % range, and the units live in the panel titles, so neither property is
+    % needed. Ticks and TickLabels are safe, as row vectors.
     if numel(grid1) > 1 && grid1(end) > grid1(1)
         caxis(ax, [grid1(1) grid1(end)]);
         c = colorbar(ax);
-        % Row vectors, and set Limits before Ticks: setting column-shaped ticks
-        % on a colorbar whose limits have not settled is what raised
-        % ColorBar/MarkDirty out of exportgraphics.
-        c.Limits = [grid1(1) grid1(end)];
-        c.Ticks = reshape(grid1, 1, []);
-        c.TickLabels = reshape(arrayfun(@(v) sprintf('%.3f', v), ...
-            grid1, 'UniformOutput', false), 1, []);
-        c.Label.String = 'ns  (grid nodes)';
+        set(c, 'Ticks', reshape(grid1, 1, []), 'TickLabels', ...
+            reshape(arrayfun(@(v) sprintf('%.3f', v), grid1, ...
+            'UniformOutput', false), 1, []));
     else
         colorbar(ax);
     end
@@ -52,9 +55,9 @@ function name = immune_cell_MIET_biexp_component_figure(out, outputDir)
         valid = isfinite(maps.tau1Ns);
         atEdge = 100 * mean(double(maps.tau1AtGridEdge(valid)));
     end
-    title(ax, sprintf(['\\tau_1  SLB component  (prior %.4f \\pm %.3f ns, ' ...
-        '%.1f%% at grid edge)'], out.opts.slbTauNs, out.opts.slbSigmaNs, ...
-        atEdge));
+    title(ax, sprintf(['\\tau_1  SLB component, ns  (prior %.4f \\pm ' ...
+        '%.3f ns, %.1f%% at grid edge)'], out.opts.slbTauNs, ...
+        out.opts.slbSigmaNs, atEdge));
 
     % ---- tau2: the long component --------------------------------------
     ax = nexttile(layout);
@@ -64,20 +67,20 @@ function name = immune_cell_MIET_biexp_component_figure(out, outputDir)
         hi = quantileLocalBiexp(finite2, 0.98);
         if hi > lo; caxis(ax, [lo hi]); end
     end
-    c = colorbar(ax); c.Label.String = 'ns';
+    colorbar(ax);
     refinedPct = 100;
     if isfield(maps, 'tau2Refined')
         valid = isfinite(maps.tau2Ns);
         refinedPct = 100 * mean(double(maps.tau2Refined(valid)));
     end
-    title(ax, sprintf(['\\tau_2  long component  (median %.3f ns, ' ...
-        '%.0f%% refined off-grid)'], median(finite2), refinedPct));
+    title(ax, sprintf(['\\tau_2  long component, ns  (median %.3f, ' ...
+        '%.0f%% off-grid)'], median(finite2), refinedPct));
 
     % ---- photon share of tau2 ------------------------------------------
     ax = nexttile(layout);
     drawMap(ax, maps.photonFraction2, 'hot');
     caxis(ax, [0 1]);
-    c = colorbar(ax); c.Label.String = 'fraction';
+    colorbar(ax);
     share = maps.photonFraction2(isfinite(maps.photonFraction2));
     title(ax, sprintf('photon share of \\tau_2  (median %.3f)', ...
         median(share)));
@@ -91,7 +94,7 @@ function name = immune_cell_MIET_biexp_component_figure(out, outputDir)
         hi = quantileLocalBiexp(mean2, 0.98);
         if hi > lo; caxis(ax, [lo hi]); end
     end
-    c = colorbar(ax); c.Label.String = 'ns';
+    colorbar(ax);
     title(ax, sprintf(['photon-weighted \\langle\\tau\\rangle  ' ...
         '(median %.3f ns)'], median(mean2)));
 

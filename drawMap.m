@@ -9,7 +9,18 @@ function handle = drawMap(ax, data, mapName)
 
     handle = imagesc(ax, data);
     set(handle, 'AlphaData', isfinite(data));
-    axis(ax, 'image');
     colormap(ax, mapName);
+
+    % Square pixels AND a square-for-square-data axes box. axis('image') alone
+    % only fixes the DATA aspect ratio; inside a tiledlayout the axes BOX is
+    % still stretched to whatever the tile gives it, and adding a colorbar
+    % narrows it further, so the map ends up visibly distorted. Pinning
+    % PlotBoxAspectRatio to the data dimensions is what actually prevents that.
+    [nRow, nCol] = size(data);
+    axis(ax, 'image');
+    set(ax, 'PlotBoxAspectRatio', [nCol nRow 1]);
+    xlim(ax, [0.5, nCol + 0.5]);
+    ylim(ax, [0.5, nRow + 0.5]);
+
     set(ax, 'XTick', [], 'YTick', [], 'Color', [0.15 0.15 0.15]);
 end
