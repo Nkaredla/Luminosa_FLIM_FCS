@@ -56,8 +56,13 @@ function fit = fit_biexp_slb_soft(decay, irf, dtNs, periodNs, opts)
 % OUTPUT fit
 %   tau1Ns, tau2Ns      fitted lifetimes
 %   slbPullSigma        (tau1 - slbTauNs) / slbSigmaNs, signed
-%   amplitude           [a1 a2], species fractions summing to 1
-%   photonFraction      [f1 f2], the shares of the fitted photons
+%   photonFraction      [f1 f2], each component's share of the PHOTONS. The
+%                       patterns are unit-sum, so this is the amplitude
+%                       normalised - NOT amplitude*tau, which would double
+%                       count the lifetime.
+%   speciesFraction     [s1 s2], the molecular/amplitude shares, which for a
+%                       unit-sum basis need amplitude DIVIDED by tau.
+%   amplitude           [a1 a2] as fitted: each is a PHOTON COUNT
 %   background          B, counts per bin
 %   backgroundFraction  B * nBins / total photons
 %   model, residual     the fitted curve and its Poisson residual
@@ -94,6 +99,7 @@ function fit = fit_biexp_slb_soft(decay, irf, dtNs, periodNs, opts)
     photons = sum(y);
     fit = struct('tau1Ns', NaN, 'tau2Ns', NaN, 'slbPullSigma', NaN, ...
         'amplitude', [NaN NaN], 'photonFraction', [NaN NaN], ...
+        'speciesFraction', [NaN NaN], 'tauMeanNs', NaN, ...
         'background', NaN, 'backgroundFraction', NaN, ...
         'model', [], 'residual', [], 'deviance', NaN, ...
         'reducedDeviance', NaN, 'chiSquare', NaN, 'photons', photons, ...
@@ -128,18 +134,21 @@ function fit = fit_biexp_slb_soft(decay, irf, dtNs, periodNs, opts)
         first, nBin, opts);
 
     amplitude = beta(2:3)';
-    share = amplitude / max(sum(amplitude), eps);
-    % Photon share weights the amplitude by the lifetime, which is what the
-    % brightness of each population actually contributes to the decay.
-    weighted = amplitude .* [tau1 tau2];
+    % Unit-sum patterns mean these amplitudes ARE photon counts, so the photon
+    % share is just their normalisation and the species share needs a/tau.
+    photonShare = amplitude / max(sum(amplitude), eps);
+    speciesRaw = amplitude ./ max([tau1 tau2], eps);
+    speciesShare = speciesRaw / max(sum(speciesRaw), eps);
     positive = model > 0;
     dof = max(1, nnz(positive) - 5);   % 2 lifetimes + 2 amplitudes + background
 
     fit.tau1Ns = tau1;
     fit.tau2Ns = tau2;
     fit.slbPullSigma = (tau1 - opts.slbTauNs) / opts.slbSigmaNs;
-    fit.amplitude = share;
-    fit.photonFraction = weighted / max(sum(weighted), eps);
+    fit.amplitude = amplitude;
+    fit.photonFraction = photonShare;
+    fit.speciesFraction = speciesShare;
+    fit.tauMeanNs = sum(amplitude .* [tau1 tau2]) / max(sum(amplitude), eps);
     fit.background = beta(1);
     fit.backgroundFraction = beta(1) * numel(y) / max(photons, 1);
     fit.model = model;
