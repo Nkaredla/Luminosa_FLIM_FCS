@@ -108,6 +108,9 @@ function name = immune_cell_MIET_biexp_component_figure(out, outputDir)
         numel(out.pixelIndex), median(out.amplitude1 + out.amplitude2)));
 
     name = fullfile(outputDir, 'biexp_slb_component_lifetimes.png');
+    % Flush pending graphics updates before exporting - see the colorbar note
+    % above; this is the second half of the same guard.
+    drawnow;
     exportgraphics(h, name, 'Resolution', 160);
     close(h);
 end

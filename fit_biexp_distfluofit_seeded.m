@@ -16,26 +16,25 @@ function out = fit_biexp_distfluofit_seeded(decay, irf, dtNs, periodNs, opts)
 % distribution fit finds where the components are without being told how many
 % there are, so its modes are good starting values.
 %
-% DistFluofit IS TRIED FIRST BUT IS NOT TRUSTED BLINDLY. On this data it returns
-% a degenerate distribution: measured on the 155036 pooled bare-SLB decay it put
-% all 2.046e7 of the weight on a SINGLE node at 6.25 ns and exactly zero on the
-% other 99, with an offset of 3.46e6 against an actual background near 6e4. That
-% is the answer a non-negative solver gives when its basis cannot represent the
-% data - take the flattest component available and add a large pedestal. 6.25 ns
-% is 1/dt, the top of the grid its own formula produces, so the upper end of that
-% grid is set by the bin width rather than by physics. The likely cause is a
-% window/period mismatch: it is told the period is 50 ns but handed 156 bins =
-% 24.96 ns, and in this copy the periodic-axis line (tp = dt*(1:p/dt)) is
-% commented out while the tau grid is still built from p/dt.
+% WHAT DistFluofit ACTUALLY SAYS HERE, ONCE ITS UNITS ARE RIGHT
 %
-% So the returned distribution is CHECKED for degeneracy, and rejected if a
-% single node holds nearly all the weight or the modes lie outside a plausible
-% range. The fallback is a coarse two-dimensional scan of the pooled decay,
-% which is still data-driven and costs almost nothing for one decay.
+% Its tau output is a RATE unless it plots - the inversion sits inside the
+% "if bild" block - so distfluofit_peaks inverts it. Done correctly, the grid
+% spans dt to p (0.16 to 50 ns here) and the whole distribution piles onto the
+% SHORTEST node, 0.16 ns.
 %
-% This does not change the answer here - the fit reached 0.0773/1.3429 ns from
-% both sensible and nonsense seeds - but it stops a broken initialiser from
-% passing silently.
+% That is not a failure. It is the grid saying the lifetime is at or below one
+% bin width, which is right: the two-component fit puts the SLB at 0.077 ns, and
+% DistFluofit cannot represent anything below dt. Its own source carries the
+% remedy commented out one line above the live grid,
+% %tau = (1/dt/10)./exp((0:N)/N*log(p/dt/10)), which shifts the grid down a
+% decade for exactly this case.
+%
+% So a pile-up on the LOWEST node is treated as information - seed below it -
+% rather than as a degenerate result to discard. A pile-up on the highest node,
+% or modes outside a plausible range, still falls back to a coarse
+% two-dimensional scan of the pooled decay, which is data-driven and cheap for
+% one decay.
 %
 % This matters for the bare SLB specifically. On acquisition 155036 the pooled
 % bare-SLB decay is dominated by a ~0.08 ns component but carries a few percent
@@ -102,25 +101,24 @@ function out = fit_biexp_distfluofit_seeded(decay, irf, dtNs, periodNs, opts)
             good = isfinite(distTau) & distTau > 0;
             distTau = distTau(good);
             distWeights = distWeights(good);
-            % Reject a degenerate distribution rather than seed from it.
-            concentrated = false;
-            if ~isempty(distWeights)
-                concentrated = max(distWeights) / max(sum(distWeights), eps) ...
-                    > 0.95;
-            end
-            plausible = ~isempty(distTau) && all(distTau > 0.02) && ...
-                any(distTau < 2);
-            if concentrated || ~plausible
-                fprintf(['      DistFluofit distribution rejected as ' ...
-                    'degenerate (peaks %s ns,\n      max weight share ' ...
-                    '%.3f); using a coarse scan instead\n'], ...
-                    mat2str(round(distTau, 4)), ...
-                    max(distWeights) / max(sum(distWeights), eps));
-                distRejected = true;
-            elseif numel(distTau) >= 2
+            atShortEdge = ~isempty(distTau) && ...
+                abs(min(distTau) - dtNs) < 0.05 * dtNs;
+            if numel(distTau) >= 2
                 seeds = sort(distTau(1:2));
+                if atShortEdge
+                    % The short mode is at the grid floor, so the true value is
+                    % below it. Start half a bin down.
+                    seeds(1) = dtNs / 2;
+                end
+            elseif numel(distTau) == 1 && atShortEdge
+                fprintf(['      DistFluofit puts all weight on its LOWEST ' ...
+                    'node (%.4f ns = dt), i.e.\n      the lifetime is below ' ...
+                    'its grid; seeding below it\n'], distTau(1));
+                seeds = [dtNs / 2, 1.5];
             elseif numel(distTau) == 1
                 seeds = sort([distTau(1), distTau(1) * 6]);
+            else
+                distRejected = true;
             end
         catch distError
             fprintf(['      DistFluofit seeding failed (%s); using a coarse ' ...

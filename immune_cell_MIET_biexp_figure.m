@@ -32,7 +32,13 @@ function name = immune_cell_MIET_biexp_figure(out, outputDir)
         else
             colormap(ax, panels{k, 3});
         end
-        colorbar(ax);
+        % ORDER MATTERS. caxis FIRST, colorbar second. Creating the colorbar
+        % and then changing the axes colour limits leaves the colorbar's
+        % limit-update listener pending; it then fires inside exportgraphics,
+        % mid-traversal, and throws
+        %   "Attempt to modify the tree during an update traversal"
+        % out of ColorBar/attachAxesListeners. Setting the limits before the
+        % colorbar exists means there is nothing left to notify.
         limits = panels{k, 4};
         finite = data(isfinite(data));
         if ~isempty(limits)
@@ -42,6 +48,7 @@ function name = immune_cell_MIET_biexp_figure(out, outputDir)
             hi = quantileLocalBiexp(finite, 0.98);
             if hi > lo; caxis(ax, [lo hi]); end
         end
+        colorbar(ax);
         set(ax, 'XTick', [], 'YTick', []);
     end
 
@@ -51,6 +58,9 @@ function name = immune_cell_MIET_biexp_figure(out, outputDir)
         numel(out.pixelIndex)));
 
     name = fullfile(outputDir, 'biexp_slb_maps.png');
+    % Flush every pending graphics update before exporting, so exportgraphics
+    % never starts a traversal with work still queued.
+    drawnow;
     exportgraphics(h, name, 'Resolution', 160);
     close(h);
 end
