@@ -73,6 +73,13 @@ function out = immune_cell_MIET_biexp_slb(source, opts)
 %   innerSolver     'irls' (default) or 'em'. Whitened IRLS reaches the same
 %                   amplitudes as EM (median deviance difference 0 over 3000
 %                   real pixels, bound active on half of them) about 4x faster.
+%   displayMask     mask applied to the FIGURES only, not to the fit (default
+%                   'cellFootprint'). Everything is fitted so the bare SLB can
+%                   check the anchor; only the cell is drawn, so the colour
+%                   scales are set by the cell rather than flattened by a region
+%                   whose answer is already known.
+%   fixSlbTau       hold tau1 at slbTauNs and fit only its amplitude
+%                   (default false)
 %   makeFigure      default true
 
     if nargin < 2 || isempty(opts); opts = struct(); end
@@ -81,6 +88,7 @@ function out = immune_cell_MIET_biexp_slb(source, opts)
         'binSize', 1, 'pixelMask', 'cellFootprint', 'minPhotons', 200, ...
         'blockSize', 20000, 'shortlist', 8, 'refineTau2', true, ...
         'method', 'vp', 'gtol', 1e-3, 'tau2SeedNs', 2.0, ...
+        'displayMask', 'cellFootprint', 'fixSlbTau', false, ...
         'innerSolver', 'irls', ...
         'irls', struct('maxIter', 60, 'tol', 1e-12, 'maxHalvings', 12), ...
         'em', struct('maxIter', 2000, 'tol', 1e-12, 'checkEvery', 10), ...
@@ -169,6 +177,13 @@ function out = immune_cell_MIET_biexp_slb(source, opts)
     cube = cube.(cubeVariable);
     [nRow, nCol, nBin] = size(cube);
     mask = immune_cell_MIET_biexp_mask(result, opts.pixelMask, nRow, nCol);
+    % The display region is independent of what gets fitted.
+    if isempty(opts.displayMask)
+        displayMask = true(nRow, nCol);
+    else
+        displayMask = immune_cell_MIET_biexp_mask(result, opts.displayMask, ...
+            nRow, nCol);
+    end
     if opts.binSize > 1
         kernel = ones(opts.binSize);
         cube = convn(double(cube), kernel, 'same');
@@ -211,6 +226,14 @@ function out = immune_cell_MIET_biexp_slb(source, opts)
         out = immune_cell_MIET_biexp_run(cube, mask, pixelIndex, ...
             intensity, irf, dtNs, periodNs, nBin, tau1Grid, tau2Grid, opts);
     end
+    if opts.binSize > 1
+        % Match the erosion the binned fit applies, so the drawn region is one
+        % the fit actually covers.
+        kern = ones(opts.binSize);
+        displayMask = displayMask & (convn(double(displayMask), kern, ...
+            'same') >= opts.binSize ^ 2 - 0.5);
+    end
+    out.maps.displayMask = displayMask;
     out.analysisMat = analysisMat;
     out.imageSize = [nRow nCol];
     out.opts = opts;
@@ -252,6 +275,15 @@ function out = immune_cell_MIET_biexp_slb(source, opts)
     save(matFile, 'out', '-v7.3');
     fprintf('\n  wrote %s\n', matFile);
     immune_cell_MIET_biexp_report(out, opts.outputDir);
+    % Companion file in the shape the existing explorer GUI expects, so the
+    % biexp maps can be browsed with the same tool. The TCSPC cube is
+    % referenced, not copied.
+    try
+        out.explorerFile = export_biexp_for_explorer(matFile, analysisMat);
+    catch exportError
+        fprintf('  WARNING: explorer export failed (%s)
+', exportError.message);
+    end
     % Figures are NOT allowed to fail the run. The fit is already saved by this
     % point, and a plotting error used to propagate out of here and discard
     % minutes of completed fitting - which is how a MATLAB colorbar listener bug

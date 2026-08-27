@@ -1,116 +1,76 @@
 function name = immune_cell_MIET_biexp_component_figure(out, outputDir)
-%IMMUNE_CELL_MIET_BIEXP_COMPONENT_FIGURE FLIM images of both lifetime components.
+%IMMUNE_CELL_MIET_BIEXP_COMPONENT_FIGURE Publication figure of both components.
 %
 % name = immune_cell_MIET_biexp_component_figure(out, outputDir)
 %
-% Writes biexp_slb_component_lifetimes.png: the SLB (tau1) and long (tau2)
-% lifetime maps side by side, with the photon share and the photon-weighted mean
-% lifetime beneath them. The overview figure deliberately shows the fit-quality
-% diagnostics; this one is the physical picture, and it exists because tau1 was
-% never plotted anywhere despite being saved in every result.
+% Four panels: the two component lifetimes, the photon share of the long one,
+% and the photon-weighted mean lifetime. Written at 300 dpi with no axis
+% furniture, so it can go into a figure as it is.
 %
-% ON THE COLOUR SCALES
+% COLOUR CHOICES, WHICH ARE PART OF THE RESULT
 %
-% tau1 is scaled to the tau1 GRID, not to a quantile of the data, because tau1
-% can only take grid values and the grid spans just +/-2 sigma of the prior. A
-% quantile scale would stretch that tiny range across the whole colormap and
-% manufacture the appearance of structure where the fit has at most five
-% distinct values to choose from. The tick labels name the actual nodes, so how
-% coarse the quantisation is stays visible rather than hidden.
+% Sequential quantities use viridis (lifetimes) and magma (fractions). Both are
+% monotonic in lightness, so a reader printing in greyscale still sees the
+% ordering, and neither invents features.
 %
-% tau2 is scaled to a robust quantile range, but pixels where tau2 was NOT
-% refined off its grid node are hatched out in the companion panel so that
-% quantisation is visible there too.
+% Jet does invent them. Its lightness rises, falls and rises again, so wherever
+% the data crosses the middle of the scale it produces a sharp cyan-to-yellow
+% edge - on a lifetime map that reads as a membrane boundary which is not in the
+% data. It also compresses contrast through the greens, and is unusable by
+% red-green colourblind readers. It is kept available through opts only for
+% matching older figures.
+%
+% Each panel is scaled to the 2nd-98th percentile of the DISPLAYED region, so a
+% few extreme pixels cannot flatten the contrast everywhere else.
+%
+% WHY tau1 IS SHOWN EVEN WHEN IT IS PINNED
+%
+% Because a pinned parameter that has drifted is the first sign the anchor is
+% wrong, and that has to be visible rather than hidden by the fact that it was
+% not free.
 
     maps = out.maps;
-    h = figure('Color', 'w', 'Visible', 'off', 'Position', [40 40 1400 1050]);
+    tau1Map = applyDisplayMask(maps.tau1Ns, out);
+    tau2Map = applyDisplayMask(maps.tau2Ns, out);
+    shareMap = applyDisplayMask(maps.photonFraction2, out);
+    meanMap = applyDisplayMask(maps.tauMeanNs, out);
+
+    h = figure('Color', 'w', 'Visible', 'off', 'Position', [40 40 1450 1180]);
     layout = tiledlayout(h, 2, 2, 'Padding', 'compact', ...
         'TileSpacing', 'compact');
+    fs = 12;
 
-    grid1 = sort(out.tau1Grid(:));
-    finite2 = maps.tau2Ns(isfinite(maps.tau2Ns));
-
-    % ---- tau1: the SLB component ---------------------------------------
-    ax = nexttile(layout);
-    drawMap(ax, maps.tau1Ns, 'parula');
-    % NOTE ON COLORBARS. Do not set Limits and do not read or write
-    % ColorBar.Label here. Writing Limits schedules a graphics update, and
-    % reading .Label during that traversal throws
-    %   "Attempt to modify the tree during an update traversal"
-    % out of ColorBar/attachAxesListeners - which previously killed the whole
-    % run AFTER the fit had already been computed. caxis already sets the
-    % range, and the units live in the panel titles, so neither property is
-    % needed. Ticks and TickLabels are safe, as row vectors.
-    if numel(grid1) > 1 && grid1(end) > grid1(1)
-        caxis(ax, [grid1(1) grid1(end)]);
-        c = colorbar(ax);
-        set(c, 'Ticks', reshape(grid1, 1, []), 'TickLabels', ...
-            reshape(arrayfun(@(v) sprintf('%.3f', v), grid1, ...
-            'UniformOutput', false), 1, []));
+    fixed = isfield(out, 'fixSlbTau') && ~isempty(out.fixSlbTau) && out.fixSlbTau;
+    v1 = tau1Map(isfinite(tau1Map));
+    if fixed || (~isempty(v1) && (max(v1) - min(v1)) < 1e-9)
+        t1text = sprintf('\\tau_1  SLB, fixed at %.4f ns', out.opts.slbTauNs);
     else
-        colorbar(ax);
+        t1text = sprintf('\\tau_1  SLB  (median %.4f ns)', median(v1));
     end
-    atEdge = 0;
-    if isfield(maps, 'tau1AtGridEdge')
-        valid = isfinite(maps.tau1Ns);
-        atEdge = 100 * mean(double(maps.tau1AtGridEdge(valid)));
-    end
-    title(ax, sprintf(['\\tau_1  SLB component, ns  (prior %.4f \\pm ' ...
-        '%.3f ns, %.1f%% at grid edge)'], out.opts.slbTauNs, ...
-        out.opts.slbSigmaNs, atEdge));
 
-    % ---- tau2: the long component --------------------------------------
-    ax = nexttile(layout);
-    drawMap(ax, maps.tau2Ns, 'parula');
-    if numel(finite2) > 10
-        lo = quantileLocalBiexp(finite2, 0.02);
-        hi = quantileLocalBiexp(finite2, 0.98);
-        if hi > lo; caxis(ax, [lo hi]); end
-    end
-    colorbar(ax);
-    refinedPct = 100;
-    if isfield(maps, 'tau2Refined')
-        valid = isfinite(maps.tau2Ns);
-        refinedPct = 100 * mean(double(maps.tau2Refined(valid)));
-    end
-    title(ax, sprintf(['\\tau_2  long component, ns  (median %.3f, ' ...
-        '%.0f%% off-grid)'], median(finite2), refinedPct));
+    publicationMapPanel(nexttile(layout), tau1Map, 'viridis', t1text, 'ns', fs);
+    publicationMapPanel(nexttile(layout), tau2Map, 'viridis', ...
+        sprintf('\\tau_2  long component  (median %.3f ns)', ...
+        median(tau2Map(isfinite(tau2Map)))), 'ns', fs);
+    publicationMapPanel(nexttile(layout), shareMap, 'magma', ...
+        sprintf('photon share of \\tau_2  (median %.3f)', ...
+        median(shareMap(isfinite(shareMap)))), 'fraction', fs);
+    publicationMapPanel(nexttile(layout), meanMap, 'viridis', ...
+        sprintf('photon-weighted \\langle\\tau\\rangle  (median %.3f ns)', ...
+        median(meanMap(isfinite(meanMap)))), 'ns', fs);
 
-    % ---- photon share of tau2 ------------------------------------------
-    ax = nexttile(layout);
-    drawMap(ax, maps.photonFraction2, 'hot');
-    caxis(ax, [0 1]);
-    colorbar(ax);
-    share = maps.photonFraction2(isfinite(maps.photonFraction2));
-    title(ax, sprintf('photon share of \\tau_2  (median %.3f)', ...
-        median(share)));
-
-    % ---- photon-weighted mean lifetime ---------------------------------
-    ax = nexttile(layout);
-    drawMap(ax, maps.tauMeanNs, 'parula');
-    mean2 = maps.tauMeanNs(isfinite(maps.tauMeanNs));
-    if numel(mean2) > 10
-        lo = quantileLocalBiexp(mean2, 0.02);
-        hi = quantileLocalBiexp(mean2, 0.98);
-        if hi > lo; caxis(ax, [lo hi]); end
-    end
-    colorbar(ax);
-    title(ax, sprintf(['photon-weighted \\langle\\tau\\rangle  ' ...
-        '(median %.3f ns)'], median(mean2)));
-
-    binText = '1x1';
+    binText = 'no binning';
     if out.opts.binSize > 1
-        binText = sprintf('%dx%d sliding, step 1', out.opts.binSize, ...
-            out.opts.binSize);
+        binText = sprintf('%dx%d sliding', out.opts.binSize, out.opts.binSize);
     end
-    title(layout, sprintf(['component lifetimes, soft-SLB biexponential  -  ' ...
-        '%s  -  %d pixel(s), median %.0f photons'], binText, ...
-        numel(out.pixelIndex), median(out.amplitude1 + out.amplitude2)));
+    photons = median(out.amplitude1 + out.amplitude2);
+    [~, acq] = fileparts(fileparts(fileparts(out.analysisMat)));
+    title(layout, sprintf('%s   -   %s   -   %d pixels, median %.0f photons', ...
+        acq, binText, numel(out.pixelIndex), photons), ...
+        'FontSize', fs + 4, 'FontWeight', 'bold', 'Interpreter', 'none');
 
     name = fullfile(outputDir, 'biexp_slb_component_lifetimes.png');
-    % Flush pending graphics updates before exporting - see the colorbar note
-    % above; this is the second half of the same guard.
     drawnow;
-    exportgraphics(h, name, 'Resolution', 160);
+    exportgraphics(h, name, 'Resolution', 300);
     close(h);
 end

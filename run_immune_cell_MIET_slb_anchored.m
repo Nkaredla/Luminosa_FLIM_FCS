@@ -55,9 +55,19 @@ function out = run_immune_cell_MIET_slb_anchored(dataRoot, binSizes, opts)
 % there is one free nonlinear parameter instead of two, so tau2 - the quantity of
 % interest - is better determined.
 %
-% Results land in <acquisition>/biexp_slb_tau0pXXX (and _binK_tau0pXXX), so the
-% anchored fits sit beside the earlier unanchored ones rather than replacing
-% them, and the prior used is visible in the path.
+% TAU1 IS HELD FIXED, NOT MERELY CONSTRAINED
+%
+% The bare-SLB measurement uses ~10^7 photons; a single pixel has a few hundred.
+% Re-estimating a quantity already known that well, from three orders of
+% magnitude fewer photons, only adds noise - so tau1 is FIXED at the measured
+% value and its AMPLITUDE is the fit parameter. That also halves the nonlinear
+% problem, leaving tau2 better determined. Pass opts.fixSlbTau = false to go back
+% to a soft prior.
+%
+% Results are collected under ONE folder at the data root -
+% <dataRoot>/biexp_slb_anchored/<acquisition>_bin<K>/ - rather than being
+% scattered through the acquisition trees, so a whole session's output can be
+% copied, compared or deleted as a unit.
 %
 % RESUMABLE: completed steps are logged to slb_anchored_done.txt at the data
 % root, so a rerun after MATLAB's intermittent graphics-init abort continues
@@ -69,13 +79,20 @@ function out = run_immune_cell_MIET_slb_anchored(dataRoot, binSizes, opts)
     end
     if nargin < 2 || isempty(binSizes); binSizes = [1 2 4]; end
     if nargin < 3 || isempty(opts); opts = struct(); end
-    if ~isfield(opts, 'restart'); opts.restart = false; end
+    if ~isfield(opts, 'restart'); opts.restart = true; end
     if ~isfield(opts, 'includeDuplicates'); opts.includeDuplicates = false; end
     if ~isfield(opts, 'slbOpts'); opts.slbOpts = struct(); end
     % 'valid' is every pixel the detector actually covers. The minPhotons floor
     % inside the fitter then drops the empty corners, so nothing is wasted on
     % pixels with no signal.
     if ~isfield(opts, 'pixelMask'); opts.pixelMask = 'valid'; end
+    % Fit everything, draw the cell only.
+    if ~isfield(opts, 'displayMask'); opts.displayMask = 'cellFootprint'; end
+    if ~isfield(opts, 'fixSlbTau'); opts.fixSlbTau = true; end
+    if ~isfield(opts, 'outputRoot')
+        opts.outputRoot = fullfile(dataRoot, 'biexp_slb_anchored');
+    end
+    if ~isfolder(opts.outputRoot); mkdir(opts.outputRoot); end
 
     doneFile = fullfile(dataRoot, 'slb_anchored_done.txt');
     done = {};
@@ -103,16 +120,37 @@ function out = run_immune_cell_MIET_slb_anchored(dataRoot, binSizes, opts)
 
         % ---- stage 1: the SLB anchor ------------------------------------
         refFile = fullfile(folder, 'slb_reference', 'slb_reference_fit.mat');
+        ref = [];
         if isfile(refFile) && ~opts.restart
             L = load(refFile, 'out');
-            ref = L.out;
-            fprintf('\n### SLB anchor loaded: %.4f +/- %.4f ns  (%s)\n', ...
-                ref.suggestedPrior.slbTauNs, ...
-                ref.suggestedPrior.slbSigmaNs, folder);
-        else
-            fprintf('\n### measuring the SLB anchor: %s\n', folder);
+            cached = L.out;
+            % Only reuse a cached anchor if it was produced by the SAME model.
+            % A mono-fit anchor and a biexponential anchor are different
+            % numbers - 0.0914 against 0.0773 on 155036 - and silently mixing
+            % them across acquisitions would make the session incomparable,
+            % which is exactly what the anchoring exists to prevent.
+            wanted = 'biexp';
+            if isfield(opts.slbOpts, 'anchorModel')
+                wanted = opts.slbOpts.anchorModel;
+            end
+            haveModel = '';
+            if isfield(cached, 'anchorModel'); haveModel = cached.anchorModel; end
+            if strcmpi(haveModel, wanted)
+                ref = cached;
+                fprintf('\n### SLB anchor loaded: %.4f +/- %.4f ns  (%s)\n', ...
+                    ref.suggestedPrior.slbTauNs, ...
+                    ref.suggestedPrior.slbSigmaNs, folder);
+            else
+                fprintf(['\n### cached anchor was made with model ''%s'' but ' ...
+                    '''%s'' is wanted;\n    remeasuring: %s\n'], haveModel, ...
+                    wanted, folder);
+            end
+        end
+        if isempty(ref)
             try
-                ref = measure_slb_reference_lifetime(paths{k}, opts.slbOpts);
+                slbOpts = opts.slbOpts;
+                slbOpts.outputRoot = opts.outputRoot;
+                ref = measure_slb_reference_lifetime(paths{k}, slbOpts);
             catch refError
                 fprintf('  SLB MEASUREMENT FAILED: %s\n', refError.message);
                 continue;
@@ -138,17 +176,45 @@ function out = run_immune_cell_MIET_slb_anchored(dataRoot, binSizes, opts)
                 'tau1MedianNs', NaN, 'tau1IqrNs', NaN, ...
                 'tau2MedianNs', NaN, 'tau2Q1Ns', NaN, 'tau2Q3Ns', NaN, ...
                 'photonShare2Median', NaN, 'tauMeanMedianNs', NaN, ...
-                'reducedDevianceMedian', NaN, 'status', 'ok');
+                'reducedDevianceMedian', NaN, 'residualAcf1Median', NaN, ...
+                'slbPhotonsMedian', NaN, 'longPhotonsMedian', NaN, ...
+                'fitSeconds', NaN, 'totalSeconds', NaN, 'outputDir', "", ...
+                'status', 'ok');
             if ~isempty(ref.storedReferenceNs)
                 entry.storedReferenceNs = ref.storedReferenceNs(1);
             end
             try
+                [~, acqName] = fileparts(fileparts(fileparts(paths{k})));
                 o = opts;
                 o.binSize = b;
                 o.slbTauNs = centre;
                 o.slbSigmaNs = sigma;
                 o.pixelMask = opts.pixelMask;
+                o.displayMask = opts.displayMask;
+                o.fixSlbTau = opts.fixSlbTau;
+                o.outputDir = fullfile(opts.outputRoot, ...
+                    sprintf('%s_bin%d', acqName, b));
+                entry.outputDir = string(o.outputDir);
+                wallStart = tic;
                 r = immune_cell_MIET_biexp_slb(paths{k}, o);
+                entry.totalSeconds = toc(wallStart);
+                if isfield(r, 'elapsedSeconds')
+                    entry.fitSeconds = r.elapsedSeconds;
+                end
+                if isfield(r.maps, 'slbPhotons')
+                    sp = r.maps.slbPhotons(isfinite(r.maps.slbPhotons));
+                    lp = r.maps.longPhotons(isfinite(r.maps.longPhotons));
+                    if ~isempty(sp); entry.slbPhotonsMedian = median(sp); end
+                    if ~isempty(lp); entry.longPhotonsMedian = median(lp); end
+                end
+                if isfield(r.maps, 'residualAcf1')
+                    ac = r.maps.residualAcf1(isfinite(r.maps.residualAcf1));
+                    if ~isempty(ac)
+                        entry.residualAcf1Median = median(ac);
+                    end
+                end
+                fprintf('    TIME %.0f s total (%.0f s fitting) -> %s\n', ...
+                    entry.totalSeconds, entry.fitSeconds, o.outputDir);
                 v = isfinite(r.maps.tau1Ns);
                 entry.pixelsFitted = nnz(v);
                 entry.tau1MedianNs = median(r.maps.tau1Ns(v));
@@ -180,26 +246,32 @@ function out = run_immune_cell_MIET_slb_anchored(dataRoot, binSizes, opts)
     end
 
     summary = struct2table(rows);
-    csvFile = fullfile(dataRoot, 'slb_anchored_summary.csv');
+    csvFile = fullfile(opts.outputRoot, 'slb_anchored_summary.csv');
     writetable(summary, csvFile);
 
     fprintf('\n=============================================================\n');
     fprintf('SLB-ANCHORED SUMMARY\n\n');
-    fprintf(['  bin   pixels   SLBpool  prior+/-sig      tau1(IQR)        ' ...
-        'tau2(ns)  tau2 IQR        share2  meanTau  acquisition\n']);
-    fprintf('  %s\n', repmat('-', 1, 120));
+    fprintf(['  bin   pixels   SLBfix   tau2(ns)  tau2 IQR        share2  ' ...
+        'meanTau  resACF  fit(s)  tot(s)  acquisition\n']);
+    fprintf('  %s\n', repmat('-', 1, 108));
     for k = 1:height(summary)
         [~, acq] = fileparts(fileparts(fileparts(summary.analysisMat{k})));
-        fprintf(['  %3d %8d  %7.4f  %.4f+-%.4f  %.4f(%.4f)  %8.4f  ' ...
-            '[%.3f %.3f]  %6.3f  %7.4f  %s\n'], ...
+        fprintf(['  %3d %8d  %7.4f  %8.4f  [%.3f %.3f]  %6.3f  %7.4f  ' ...
+            '%+.3f  %6.0f  %6.0f  %s\n'], ...
             summary.binSize(k), summary.pixelsFitted(k), ...
-            summary.slbPooledNs(k), summary.slbPriorCentreNs(k), ...
-            summary.slbPriorSigmaNs(k), summary.tau1MedianNs(k), ...
-            summary.tau1IqrNs(k), summary.tau2MedianNs(k), ...
+            summary.slbPriorCentreNs(k), summary.tau2MedianNs(k), ...
             summary.tau2Q1Ns(k), summary.tau2Q3Ns(k), ...
-            summary.photonShare2Median(k), summary.tauMeanMedianNs(k), acq);
+            summary.photonShare2Median(k), summary.tauMeanMedianNs(k), ...
+            summary.residualAcf1Median(k), summary.fitSeconds(k), ...
+            summary.totalSeconds(k), acq);
     end
+    fprintf(['\n  TIMING: total %.0f s for %d fit(s), median %.0f s each ' ...
+        '(fitting only, median %.0f s)\n'], ...
+        sum(summary.totalSeconds, 'omitnan'), height(summary), ...
+        median(summary.totalSeconds, 'omitnan'), ...
+        median(summary.fitSeconds, 'omitnan'));
     fprintf('\n  wrote %s\n', csvFile);
     out = struct('summary', summary, 'dataRoot', dataRoot, ...
-        'csvFile', csvFile, 'doneFile', doneFile);
+        'outputRoot', opts.outputRoot, 'csvFile', csvFile, ...
+        'doneFile', doneFile);
 end

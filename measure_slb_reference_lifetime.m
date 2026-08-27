@@ -73,10 +73,11 @@ function out = measure_slb_reference_lifetime(source, opts)
 % opts.slbSigmaNs for the cell fit.
 
     if nargin < 2 || isempty(opts); opts = struct(); end
-    defaults = struct('maskName', 'slbReference', 'minPhotons', 200, ...
+    defaults = struct('maskName', 'slbReference', 'minPhotons', 0, ...
         'edgeMarginPix', 6, 'tauRangeNs', [0.05 2.0], 'tauNodes', 60, ...
         'binForVariation', 4, 'blockSize', 30000, 'makeFigure', true, ...
         'meanTauQuantile', 0.6, 'maxMeanTauNs', [], 'outputDir', '', ...
+        'outputRoot', '', ...
         'anchorModel', 'biexp', 'distOpts', struct());
     % 60 nodes over the range is ~2.5% spacing; parabolic refinement then takes
     % it well below the shot-noise width, so a finer scan only costs time.
@@ -247,10 +248,35 @@ function out = measure_slb_reference_lifetime(source, opts)
     end
 
     if isempty(opts.outputDir)
-        opts.outputDir = fullfile(fileparts(analysisMat), 'slb_reference');
+        if isempty(opts.outputRoot)
+            opts.outputDir = fullfile(fileparts(analysisMat), 'slb_reference');
+        else
+            % Keep every result for the session under one root, named by
+            % acquisition, rather than scattered through the data tree.
+            [~, acqName] = fileparts(fileparts(fileparts(analysisMat)));
+            opts.outputDir = fullfile(opts.outputRoot, ...
+                sprintf('%s_slb_reference', acqName));
+        end
     end
     if ~isfolder(opts.outputDir); mkdir(opts.outputDir); end
+    out.dtNs = dtNs;
+    out.periodNs = periodNs;
+    % Kept so the figure can redraw the rejected mono fit and show WHICH pixels
+    % were used against the real image, rather than as a bare 0/1 map.
+    out.pooledIrf = irf;
+    out.intensityMap = intensity;
+    out.outputDir = opts.outputDir;
     save(fullfile(opts.outputDir, 'slb_reference_fit.mat'), 'out', '-v7.3');
     fprintf('  wrote %s\n', fullfile(opts.outputDir, 'slb_reference_fit.mat'));
-    out.outputDir = opts.outputDir;
+    % makeFigure was previously declared and never acted on - the option existed
+    % and produced nothing. It now writes the figure it always promised.
+    if opts.makeFigure
+        try
+            out.figure = slb_reference_figure(out, opts.outputDir);
+            fprintf('  wrote %s\n', out.figure);
+        catch figError
+            fprintf(['  WARNING: SLB reference figure failed (%s); the fit ' ...
+                'is saved.\n'], figError.message);
+        end
+    end
 end
