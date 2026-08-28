@@ -72,9 +72,38 @@ function fig = immune_cell_MIET_explorer(analysisMat)
     fprintf('immune_cell_MIET_explorer: loading %s\n', analysisMat);
     stored = whos('-file', analysisMat);
     names = {stored.name};
+
+    % A biexponential result file holds "out", not "result", and cannot be
+    % browsed directly. Rather than error at the user for opening the
+    % obvious-looking file, accept it: use the companion written beside it, or
+    % create one. Two files sitting in a folder where only one of them opens is
+    % a design problem, not a user mistake.
+    if ~ismember('result', names) && ismember('out', names)
+        companion = strrep(analysisMat, '.mat', '_explorer.mat');
+        if isfile(companion)
+            fprintf(['  this is a biexp result; opening its explorer ' ...
+                'companion instead:\n  %s\n'], companion);
+        else
+            fprintf(['  this is a biexp result with no companion; building ' ...
+                'one now\n']);
+            if exist('export_biexp_for_explorer', 'file') ~= 2
+                error('immune_cell_MIET_explorer:NoExporter', ...
+                    ['%s holds a biexp result and needs ' ...
+                     'export_biexp_for_explorer on the path to be viewed.'], ...
+                    analysisMat);
+            end
+            companion = export_biexp_for_explorer(analysisMat);
+        end
+        analysisMat = companion;
+        stored = whos('-file', analysisMat);
+        names = {stored.name};
+    end
+
     if ~ismember('result', names)
         error('immune_cell_MIET_explorer:NoResult', ...
-            'This MAT has no "result" variable: %s', analysisMat);
+            ['This MAT has no "result" variable: %s\n' ...
+             'Expected an analysis MAT from immune_cell_MIET, or a biexp ' ...
+             'result (which holds "out").'], analysisMat);
     end
     loaded = load(analysisMat, 'result');
     result = loaded.result;
@@ -82,6 +111,36 @@ function fig = immune_cell_MIET_explorer(analysisMat)
     cubeVariable = '';
     for candidate = {'tcspc_pix', 'tcspcPix'}
         if ismember(candidate{1}, names); cubeVariable = candidate{1}; break; end
+    end
+    % A biexp explorer companion deliberately does NOT carry the cube - it is
+    % 113 MB per acquisition and this machine runs with C: chronically full, so
+    % copying it per binning would cost gigabytes. It records where the cube
+    % lives instead, and the decay panel reads it from there through matfile
+    % exactly as it would from an analysis MAT.
+    cubeFile = analysisMat;
+    if isempty(cubeVariable)
+        source = immune_cell_MIET_explorer_field(result, ...
+            'explorerSource.analysisMat');
+        if ~isempty(source)
+            source = char(source);
+            if isfile(source)
+                sourceVars = {whos('-file', source).name};
+                for candidate = {'tcspc_pix', 'tcspcPix'}
+                    if ismember(candidate{1}, sourceVars)
+                        cubeVariable = candidate{1};
+                        cubeFile = source;
+                        break;
+                    end
+                end
+                if ~isempty(cubeVariable)
+                    fprintf('  TCSPC cube read from the source analysis:\n    %s\n', ...
+                        cubeFile);
+                end
+            else
+                fprintf(['  NOTE: the recorded source analysis is missing, so ' ...
+                    'no decay can be shown:\n    %s\n'], source);
+            end
+        end
     end
     if isempty(cubeVariable)
         error('immune_cell_MIET_explorer:NoCube', ...
@@ -164,7 +223,7 @@ function fig = immune_cell_MIET_explorer(analysisMat)
     % ---- state ----------------------------------------------------------
     state = struct( ...
         'analysisMat', analysisMat, 'cubeVariable', cubeVariable, ...
-        'cube', matfile(analysisMat), 'catalogue', catalogue, ...
+        'cube', matfile(cubeFile), 'catalogue', catalogue, ...
         'imageSize', imageSize, 'dtNs', double(dtNs), ...
         'periodNs', double(periodNs), 'irf', double(irf), ...
         'mapMenu', mapMenu, 'mapAxes', mapAxes, 'decayAxes', decayAxes, ...

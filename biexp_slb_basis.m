@@ -1,4 +1,4 @@
-function basis = biexp_slb_basis(irf, dtNs, periodNs, nBin)
+function basis = biexp_slb_basis(irf, dtNs, periodNs, nBin, precision)
 %BIEXP_SLB_BASIS Precompute what every pattern build shares.
 %
 % basis = biexp_slb_basis(irf, dtNs, periodNs, nBin)
@@ -26,6 +26,20 @@ function basis = biexp_slb_basis(irf, dtNs, periodNs, nBin)
 % which is what converts an amplitude into a pre-exponential species weight - so
 % the factor is carried separately in periodFactor rather than dropped.
 %
+% PRECISION. The optional fifth argument ('double' by default, 'single'
+% accepted) sets the class of C and of the time axis, and everything downstream
+% inherits it because MATLAB promotes to the wider operand. Single is ample for
+% 156-bin photon counts and halves the memory traffic, which is where this fit
+% is actually bound: the same code measured 4.8 ms/pixel on 19000-pixel blocks
+% against 2.0 ms/pixel on 4000-pixel blocks, which is a bandwidth signature and
+% not an arithmetic one.
+%
+% It also decides whether a GPU is worth using at all here. This machine's
+% Quadro T1000 Max-Q runs FP64 at 1/32 of its FP32 rate, so in double it is
+% slower than the CPU - which is the likely explanation for an earlier GPU
+% attempt in this project measuring 0.41-0.64x. Single is the precondition, not
+% a refinement.
+%
 % FIELDS
 %   C            nBin-by-nBin circulant of the IRF
 %   timeNs       nBin-by-1 bin times
@@ -33,6 +47,7 @@ function basis = biexp_slb_basis(irf, dtNs, periodNs, nBin)
 %   periodFactor function handle tau -> sum_{r=0..3} exp(-r*periodNs/tau)
 
     irf = double(irf(:));
+    if nargin < 5 || isempty(precision); precision = 'double'; end
     irf = max(irf, 0);
     if sum(irf) > 0; irf = irf / sum(irf); end
     if numel(irf) ~= nBin
@@ -47,8 +62,9 @@ function basis = biexp_slb_basis(irf, dtNs, periodNs, nBin)
     end
 
     basis = struct();
-    basis.C = C;
-    basis.timeNs = (0:nBin - 1)' * dtNs;
+    basis.C = cast(C, precision);
+    basis.precision = precision;
+    basis.timeNs = cast((0:nBin - 1)' * dtNs, precision);
     basis.nBin = nBin;
     basis.dtNs = dtNs;
     basis.periodNs = periodNs;

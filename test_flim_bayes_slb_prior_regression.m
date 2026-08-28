@@ -135,5 +135,26 @@ function test_flim_bayes_slb_prior_regression()
         'marginalised %.4f ns (quantised, effect masked)\n'], ...
         coarseHardErr, coarseSoftErr);
 
+    % Spatial calibration: every fitted pixel may have its own prior mean and
+    % width. This is the path used for the surface extrapolated under a cell.
+    spatial = base;
+    spatial.slbCountPriorNodes = 5;
+    spatial.slbCountRelTol = 0.01;
+    spatial.fixedSlbPhotonCount = linspace(0.32, 0.48, nPix).' * photonTotal;
+    spatial.fixedSlbPhotonCountStd = ...
+        0.10 * spatial.fixedSlbPhotonCount;
+    spatialOut = flim_bayes_fixed_slb(Y, irf, periodNs, dtNs, tauSlbNs, ...
+        spatial);
+    assert(strcmp(spatialOut.fixedSlbPhotonConstraint.mode, ...
+        'spatial expected photon-count prior'), ...
+        'Spatial regularization mode was not recorded correctly.');
+    assert(spatialOut.fixedSlbPhotonConstraint.photonCountStdUsedForInference, ...
+        'The spatial prior width must be used during inference.');
+    applied = double(spatialOut.fixedSlbExpectedPhotonCount(:));
+    assert(all(isfinite(applied)) && ...
+        max(applied) - min(applied) > 0.05 * photonTotal, ...
+        'The per-pixel calibration collapsed to a global SLB amplitude.');
+    fprintf('  per-pixel spatial SLB prior: OK\n');
+
     fprintf('test_flim_bayes_slb_prior_regression: PASS\n');
 end

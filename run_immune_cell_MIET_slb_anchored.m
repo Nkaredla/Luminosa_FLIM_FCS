@@ -119,7 +119,18 @@ function out = run_immune_cell_MIET_slb_anchored(dataRoot, binSizes, opts)
         folder = fileparts(paths{k});
 
         % ---- stage 1: the SLB anchor ------------------------------------
-        refFile = fullfile(folder, 'slb_reference', 'slb_reference_fit.mat');
+        % Look for the cached anchor where measure_slb_reference_lifetime
+        % actually writes it now - under the collected output root, named by
+        % acquisition - and fall back to the older per-acquisition location
+        % so results produced before the move are still reused rather than
+        % silently recomputed.
+        [~, acqForRef] = fileparts(fileparts(folder));
+        refFile = fullfile(opts.outputRoot, ...
+            sprintf('%s_slb_reference', acqForRef), 'slb_reference_fit.mat');
+        if ~isfile(refFile)
+            refFile = fullfile(folder, 'slb_reference', ...
+                'slb_reference_fit.mat');
+        end
         ref = [];
         if isfile(refFile) && ~opts.restart
             L = load(refFile, 'out');

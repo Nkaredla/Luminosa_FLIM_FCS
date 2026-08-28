@@ -24,7 +24,9 @@ function [P, total, dP] = biexp_slb_pattern_batch(basis, tau)
 % The four-period factor cancels in P (it is a scalar multiple removed by the
 % unit-sum normalisation) but not in TOTAL, so it is applied only there.
 
-    tau = double(tau(:))';
+    % Match the basis's class rather than forcing double, so a single-precision
+    % or gpuArray basis stays that way instead of being silently promoted.
+    tau = cast(reshape(tau, 1, []), 'like', basis.C);
     if any(tau <= 0)
         error('biexp_slb_pattern_batch:NonPositiveTau', ...
             'All lifetimes must be positive; min is %.4g.', min(tau));

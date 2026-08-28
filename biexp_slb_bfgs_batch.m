@@ -50,13 +50,21 @@ function out = biexp_slb_bfgs_batch(Y, basis, opts)
 %   maxBacktrack line-search halvings (default 20)
 %   maxStep      cap on |d log tau| per step (default 0.5, i.e. at most a
 %                factor 1.65 change in either lifetime per iteration)
+%   fixSlbTau    hold tau1 EXACTLY at slbTauNs and fit only tau2 plus the three
+%                amplitudes (default false). With a measured bare-SLB anchor this
+%                is the honest model: the bilayer's lifetime is known from a
+%                region with 10^7 photons, so re-estimating it from 400 photons
+%                per pixel only adds noise. It also halves the nonlinear problem,
+%                leaving tau2 - the quantity of interest - better determined. The
+%                prior penalty is then identically zero, since tau1 never leaves
+%                its centre.
 %   innerSolver  'irls' (default) or 'em' for the amplitude solve
 %   irls, em     options forwarded to the chosen inner solver
 
     defaults = struct('slbTauNs', 0.3549, 'slbSigmaNs', 0.05, ...
         'tau2SeedNs', 2.0, 'gtol', 1e-3, 'maxIter', 60, ...
         'maxBacktrack', 20, 'maxStep', 0.5, 'innerSolver', 'irls', ...
-        'irls', [], 'em', []);
+        'fixSlbTau', false, 'irls', [], 'em', []);
     names = fieldnames(defaults);
     for k = 1:numel(names)
         if ~isfield(opts, names{k}) || isempty(opts.(names{k}))
@@ -86,11 +94,17 @@ function out = biexp_slb_bfgs_batch(Y, basis, opts)
         if isempty(live); break; end
 
         gl = g(:, live);
+        if opts.fixSlbTau
+            % tau1 is not a free parameter, so it must not enter either the
+            % convergence test or the search direction.
+            gl(1, :) = 0;
+        end
         done = max(abs(gl), [], 1) < opts.gtol;
         if any(done); live(done) = []; end
         if isempty(live); break; end
 
         gl = g(:, live);
+        if opts.fixSlbTau; gl(1, :) = 0; end
         Hl = H(:, live);
         xl = x(:, live);
         fl = f(live);
@@ -106,6 +120,12 @@ function out = biexp_slb_bfgs_batch(Y, basis, opts)
         % step in log-lifetime costs nothing (BFGS rebuilds scale within an
         % iteration or two) and removes most of the backtracking: a cap of 0.5
         % still allows a factor 1.65 change in either lifetime per step.
+        if opts.fixSlbTau
+            % A BFGS direction can pick up a tau1 component through an
+            % off-diagonal H even when the tau1 gradient is zero, so zero the
+            % step itself as well.
+            p(1, :) = 0;
+        end
         len = max(abs(p), [], 1);
         shrink = min(1, opts.maxStep ./ max(len, eps));
         p = p .* shrink;
@@ -197,7 +217,10 @@ function out = biexp_slb_bfgs_batch(Y, basis, opts)
     out.beta = beta;
     out.deviance = extra.deviance;
     out.objective = f;
-    out.gradInfNorm = max(abs(g), [], 1);
+    gReport = g;
+    if opts.fixSlbTau; gReport(1, :) = 0; end
+    out.gradInfNorm = max(abs(gReport), [], 1);
+    out.fixSlbTau = opts.fixSlbTau;
     out.patternSum1 = extra.patternSum1;
     out.patternSum2 = extra.patternSum2;
     out.evaluations = evals;

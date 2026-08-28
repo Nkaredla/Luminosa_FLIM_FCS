@@ -80,15 +80,34 @@ function out = immune_cell_MIET_biexp_slb(source, opts)
 %                   whose answer is already known.
 %   fixSlbTau       hold tau1 at slbTauNs and fit only its amplitude
 %                   (default false)
+%   precision       'double' (default) or 'single'. MEASURED on this machine,
+%                   single is 1.2-1.9x SLOWER than double at every block size
+%                   from 1000 to 8000 pixels - MATLAB's single-precision paths
+%                   are not faster for these array shapes. The option stays
+%                   because it is the precondition for a GPU, but it is not a
+%                   speed win on the CPU.
+%   useGpu          move the inner arrays to the GPU (default false). Not
+%                   recommended here and measured, not assumed: this machine's
+%                   Quadro T1000 Max-Q runs FP64 at 1/32 of FP32, so a GPU run
+%                   is only viable in single - and single is already slower on
+%                   the CPU, so the premise fails before the transfer cost is
+%                   even counted. An earlier attempt in this project measured
+%                   0.41-0.64x.
+%   slbSampleCount  when the fit covers more than the cell, fit only this many
+%                   pixels from OUTSIDE the display mask (default 20000). The
+%                   bare SLB is included to check the anchor, and a sample
+%                   checks it just as well as all 220000 of them while removing
+%                   about 2.4x of the total work.
 %   makeFigure      default true
 
     if nargin < 2 || isempty(opts); opts = struct(); end
     defaults = struct('slbTauNs', [], 'slbSigmaNs', 0.05, ...
         'tau2BoundsNs', [0.5 8], 'tau2GridCount', 40, 'tau1GridCount', 5, ...
         'binSize', 1, 'pixelMask', 'cellFootprint', 'minPhotons', 200, ...
-        'blockSize', 20000, 'shortlist', 8, 'refineTau2', true, ...
+        'blockSize', 4000, 'shortlist', 8, 'refineTau2', true, ...
         'method', 'vp', 'gtol', 1e-3, 'tau2SeedNs', 2.0, ...
         'displayMask', 'cellFootprint', 'fixSlbTau', false, ...
+        'precision', 'double', 'useGpu', false, 'slbSampleCount', 20000, ...
         'innerSolver', 'irls', ...
         'irls', struct('maxIter', 60, 'tol', 1e-12, 'maxHalvings', 12), ...
         'em', struct('maxIter', 2000, 'tol', 1e-12, 'checkEvery', 10), ...
@@ -185,15 +204,44 @@ function out = immune_cell_MIET_biexp_slb(source, opts)
             nRow, nCol);
     end
     if opts.binSize > 1
-        kernel = ones(opts.binSize);
-        cube = convn(double(cube), kernel, 'same');
-        mask = mask & (convn(double(mask), kernel, 'same') >= ...
+        % Bin SLICE BY SLICE in the working precision instead of
+        % convn(double(cube), ...), which materialises a 452 MB double copy of
+        % the input AND another of the output. This machine crashed during a
+        % full run with the page file at zero peak usage and C: 97% full, so
+        % peak allocation is a hard constraint, not a tidiness question.
+        kernel = ones(opts.binSize, opts.binSize, opts.precision);
+        binned = zeros(size(cube), opts.precision);
+        for slice = 1:nBin
+            binned(:, :, slice) = conv2( ...
+                cast(cube(:, :, slice), opts.precision), kernel, 'same');
+        end
+        clear cube;
+        cube = binned;
+        clear binned;
+        mask = mask & (conv2(double(mask), ones(opts.binSize), 'same') >= ...
             opts.binSize ^ 2 - 0.5);
         fprintf('  spatial binning %dx%d applied to the cube\n', ...
             opts.binSize, opts.binSize);
     end
     intensity = sum(double(cube), 3);
     mask = mask & intensity >= opts.minPhotons;
+    % Thin out the pixels outside the DISPLAY region. They are fitted so the
+    % bare SLB can verify the anchor, and a sample verifies it as well as the
+    % whole region does - while being most of the work: 362404 'valid' pixels
+    % against roughly 134000 in the cell.
+    if opts.slbSampleCount > 0 && any(~displayMask(:))
+        outside = mask & ~displayMask;
+        nOutside = nnz(outside);
+        if nOutside > opts.slbSampleCount
+            oIdx = find(outside);
+            keep = oIdx(round(linspace(1, nOutside, opts.slbSampleCount)));
+            thinned = mask & displayMask;
+            thinned(keep) = true;
+            fprintf(['  thinned the region outside the display mask from %d ' ...
+                'to %d pixel(s)\n'], nOutside, numel(keep));
+            mask = thinned;
+        end
+    end
     pixelIndex = find(mask);
     fprintf(['  %d pixel(s) selected (%s, >= %d photons), median %.0f ' ...
         'photons\n'], numel(pixelIndex), maskLabel(opts.pixelMask), ...
@@ -281,8 +329,8 @@ function out = immune_cell_MIET_biexp_slb(source, opts)
     try
         out.explorerFile = export_biexp_for_explorer(matFile, analysisMat);
     catch exportError
-        fprintf('  WARNING: explorer export failed (%s)
-', exportError.message);
+        fprintf('  WARNING: explorer export failed (%s)\n', ...
+            exportError.message);
     end
     % Figures are NOT allowed to fail the run. The fit is already saved by this
     % point, and a plotting error used to propagate out of here and discard

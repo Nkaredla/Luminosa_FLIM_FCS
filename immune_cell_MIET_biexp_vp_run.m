@@ -30,7 +30,40 @@ function out = immune_cell_MIET_biexp_vp_run(cube, mask, pixelIndex, ...
 % looked like noise.
 
     nPixel = numel(pixelIndex);
-    basis = biexp_slb_basis(irf, dtNs, periodNs, nBin);
+    if ~isfield(opts, 'precision') || isempty(opts.precision)
+        opts.precision = 'double';
+    end
+    if ~isfield(opts, 'useGpu') || isempty(opts.useGpu)
+        opts.useGpu = false;
+    end
+    basis = biexp_slb_basis(irf, dtNs, periodNs, nBin, opts.precision);
+
+    % GPU is opt-in and only sensible in single precision: this machine's
+    % Quadro T1000 Max-Q runs FP64 at 1/32 of its FP32 rate, so a double-
+    % precision GPU run is slower than the CPU - which is the likely reason an
+    % earlier attempt in this project measured 0.41-0.64x. Refuse the
+    % combination loudly rather than silently delivering a slowdown.
+    useGpu = false;
+    if opts.useGpu
+        if ~strcmpi(opts.precision, 'single')
+            fprintf(['  NOTE: useGpu ignored - precision is %s. FP64 on this ' ...
+                'card is 1/32 of FP32,\n        so a double GPU run is ' ...
+                'slower than the CPU. Set precision to single.\n'], ...
+                opts.precision);
+        else
+            try
+                g = gpuDevice;
+                basis.C = gpuArray(basis.C);
+                basis.timeNs = gpuArray(basis.timeNs);
+                useGpu = true;
+                fprintf('  GPU: %s, %.1f GB free, single precision\n', ...
+                    g.Name, g.AvailableMemory / 1e9);
+            catch gpuError
+                fprintf('  NOTE: GPU unavailable (%s); staying on the CPU\n', ...
+                    gpuError.message);
+            end
+        end
+    end
     cubeFlat = reshape(cube, [], nBin);
 
     tau1Hat = nan(nPixel, 1);
@@ -64,31 +97,51 @@ function out = immune_cell_MIET_biexp_vp_run(cube, mask, pixelIndex, ...
         lo = (blockIndex - 1) * opts.blockSize + 1;
         hi = min(nPixel, blockIndex * opts.blockSize);
         rows = lo:hi;
-        Y = double(cubeFlat(pixelIndex(rows), :))';
+        Y = cast(cubeFlat(pixelIndex(rows), :), opts.precision)';
+        if useGpu; Y = gpuArray(Y); end
 
         vp = biexp_slb_bfgs_batch(Y, basis, opts);
+        % Bring results back to double on the host: the maps are small, and
+        % everything downstream - medians, CSV, figures - expects double.
+        if useGpu
+            fn = fieldnames(vp);
+            for f = 1:numel(fn)
+                if isnumeric(vp.(fn{f})) || islogical(vp.(fn{f}))
+                    vp.(fn{f}) = gather(vp.(fn{f}));
+                end
+            end
+        end
 
-        tau1Hat(rows) = vp.tau1Ns(:);
-        tau2Hat(rows) = vp.tau2Ns(:);
-        background(rows) = vp.beta(1, :)';
-        amp1(rows) = vp.beta(2, :)';
-        amp2(rows) = vp.beta(3, :)';
-        deviance(rows) = vp.deviance(:);
+        tau1Hat(rows) = double(vp.tau1Ns(:));
+        tau2Hat(rows) = double(vp.tau2Ns(:));
+        background(rows) = double(vp.beta(1, :)');
+        amp1(rows) = double(vp.beta(2, :)');
+        amp2(rows) = double(vp.beta(3, :)');
+        deviance(rows) = double(vp.deviance(:));
         % Species (pre-exponential) weight is amplitude divided by the
         % PRE-normalisation pattern sum, not by tau: tau/dt is only the
         % asymptotic form and is 0.34x the true sum at tau = 0.058 ns.
-        speciesRaw1(rows) = vp.beta(2, :)' ./ max(vp.patternSum1(:), eps);
-        speciesRaw2(rows) = vp.beta(3, :)' ./ max(vp.patternSum2(:), eps);
-        converged(rows) = vp.converged(:);
-        gradNorm(rows) = vp.gradInfNorm(:);
-        evaluations(rows) = vp.evaluations(:);
+        speciesRaw1(rows) = double(vp.beta(2, :)') ./ ...
+            max(double(vp.patternSum1(:)), eps);
+        speciesRaw2(rows) = double(vp.beta(3, :)') ./ ...
+            max(double(vp.patternSum2(:)), eps);
+        converged(rows) = logical(vp.converged(:));
+        gradNorm(rows) = double(vp.gradInfNorm(:));
+        evaluations(rows) = double(vp.evaluations(:));
 
         % Rebuild the fitted model for this block and score the residuals.
-        P1 = biexp_slb_pattern_batch(basis, vp.tau1Ns);
-        P2 = biexp_slb_pattern_batch(basis, vp.tau2Ns);
-        model = max(vp.beta(1, :) + vp.beta(2, :) .* P1 + ...
-            vp.beta(3, :) .* P2, 1e-12);
-        R = (Y - model) ./ sqrt(model);
+        hostBasis = basis;
+        if useGpu
+            hostBasis.C = gather(basis.C);
+            hostBasis.timeNs = gather(basis.timeNs);
+        end
+        P1 = double(biexp_slb_pattern_batch(hostBasis, double(vp.tau1Ns)));
+        P2 = double(biexp_slb_pattern_batch(hostBasis, double(vp.tau2Ns)));
+        Yh = double(gather(Y));
+        b1 = double(vp.beta(1, :)); b2 = double(vp.beta(2, :));
+        b3 = double(vp.beta(3, :));
+        model = max(b1 + b2 .* P1 + b3 .* P2, 1e-12);
+        R = (Yh - model) ./ sqrt(model);
         R = R - mean(R, 1);
         num = sum(R(1:end - 1, :) .* R(2:end, :), 1);
         den = sum(R .^ 2, 1);
@@ -113,6 +166,19 @@ function out = immune_cell_MIET_biexp_vp_run(cube, mask, pixelIndex, ...
     maps.tau1AtGridEdge = false(imageSize);
     maps.converged = false(imageSize);
     maps.converged(pixelIndex) = converged;
+
+    % PHOTON COUNTS, not rates. biexp_slb_pattern normalises every column to
+    % unit sum, so the fitted amplitude is literally the number of photons that
+    % component contributed to this pixel - verified to 2e-16 by recovering 200
+    % and 400 from a decay synthesised with those counts. With tau1 held fixed,
+    % slbPhotons is therefore the SLB photon count per pixel and is the only
+    % thing being estimated for that component.
+    maps.slbPhotons = blank();
+    maps.slbPhotons(pixelIndex) = amp1;
+    maps.longPhotons = blank();
+    maps.longPhotons(pixelIndex) = amp2;
+    maps.backgroundPhotons = blank();
+    maps.backgroundPhotons(pixelIndex) = background * nBin;
 
     photonTotal = amp1 + amp2;
     maps.photonFraction1 = blank();

@@ -54,6 +54,21 @@ function catalogue = immune_cell_MIET_explorer_maps(result)
         '4x4 fit - tau mean',                       'spatialBinning4x4.bayesian.maps.tauMeanArithmetic',    'ns',              true
         '4x4 fit - P(triexponential)',              'spatialBinning4x4.bayesian.maps.probabilityTriexponential', 'probability', false
         'segmentation - label map',                 'segmentation.masks.labelMap',                          'label',           false
+        % ---- soft-SLB biexponential results -----------------------------
+        % Present only in the companion file an anchored biexp run writes
+        % (biexp_slb_maps_explorer.mat). Entries whose source is absent are
+        % skipped, so listing them here costs nothing on an ordinary
+        % analysis MAT and means the biexp maps are browsable with the same
+        % tool instead of only as PNGs.
+        'biexp - tau1 (SLB)',                       'biexp.tau1Ns',                                          'ns',              true
+        'biexp - tau2 (long component)',            'biexp.tau2Ns',                                          'ns',              true
+        'biexp - photon-weighted mean tau',         'biexp.tauMeanNs',                                       'ns',              true
+        'biexp - photon share of tau2',             'biexp.photonFraction2',                                 'fraction',        false
+        'biexp - species share of tau2',            'biexp.speciesFraction2',                                'fraction',        false
+        'biexp - SLB photons per pixel',            'biexp.slbPhotons',                                      'photons',         false
+        'biexp - long-component photons',           'biexp.longPhotons',                                     'photons',         false
+        'biexp - reduced deviance',                 'biexp.reducedDeviance',                                 'deviance',        false
+        'biexp - residual autocorrelation',         'biexp.residualAcf1',                                    'correlation',     false
         };
 
     catalogue = struct('label', {}, 'data', {}, 'units', {}, ...

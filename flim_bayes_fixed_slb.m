@@ -4,17 +4,26 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
 % out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, ...
 %     tauSlbNs, opts)
 %
-% The function compares three models independently in every analysed pixel:
+% The function compares up to three models independently in every analysed
+% pixel:
 %   1. fixed SLB only
 %   2. fixed SLB + one free membrane lifetime (biexponential)
 %   3. fixed SLB + two ordered free membrane lifetimes (triexponential)
+%
+% opts.maxMembraneStates truncates that list. With the default 2 all three
+% models are evaluated. With 1 the triexponential model is never built or
+% evaluated: its grid costs nothing, its posterior probability is exactly
+% zero, and it cannot contribute to any model-averaged map. Output arrays
+% keep their three-model shape so downstream code is unaffected.
 %
 % tcspcPix may be [nx ny time] or [nx ny time detector]. Detector data are
 % summed before inference. The fixed SLB lifetime must be estimated from an
 % outside-cell SLB reference decay before calling this function. Its
 % amplitude is normally inferred separately per pixel. When
-% opts.fixedSlbPhotonCount is supplied, the expected detected SLB count is
-% set directly to min(fixedSlbPhotonCount, observed pixel photons).
+% opts.fixedSlbPhotonCount is supplied, it may be a scalar or an [nx ny]
+% spatial calibration. With slbCountPriorNodes == 0 it is a hard expected
+% count; with positive prior nodes the count is marginalised over the
+% corresponding fixedSlbPhotonCountStd calibration uncertainty.
 %
 % The likelihood is the TCSPC-shape (multinomial) likelihood conditional on
 % the observed photon total. Discrete integration over lifetime, component
@@ -45,10 +54,15 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
 %   minimumTauSeparationNs       separation of the two membrane states
 %   minimumTauSeparationFraction relative separation of those states (0.10)
 %   modelPrior                   prior for the three models ([1 1 1]/3)
-%   fixedSlbPhotonCount          outside-calibrated expected SLB photons per
-%                                pixel; [] leaves the amplitude unconstrained
-%   fixedSlbPhotonCountStd       optional recorded calibration uncertainty;
-%                                it is not used by the direct constraint
+%   maxMembraneStates            highest free membrane-state count that is
+%                                evaluated: 2 compares all three models, 1
+%                                stops at fixed SLB + one membrane state,
+%                                0 leaves only the fixed-SLB model (2)
+%   fixedSlbPhotonCount          scalar or [nx ny] outside-calibrated expected
+%                                SLB photons; [] leaves amplitude unconstrained
+%   fixedSlbPhotonCountStd       scalar or [nx ny] calibration uncertainty
+%   slbCountPriorNodes           0 uses a hard count; positive odd values
+%                                marginalise over that uncertainty (0)
 %   irfShiftBins                 integer shift applied to the IRF (0)
 %   convolutionMethod            'auto', 'gui', or 'linear' ('auto')
 %
@@ -129,36 +143,47 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
     validFlat = validMask(:).';
 
     fixedCountEnabled = ~isempty(opts.fixedSlbPhotonCount);
+    activeModels = false(1, 3);
+    activeModels(1:(opts.maxMembraneStates + 1)) = true;
     evaluations = repmat(empty_evaluation(size(Y, 2)), 1, 3);
-    if fixedCountEnabled
-        grids(1) = build_residual_model_grid(0, membranePatterns, ...
-            tauGrid, opts);
-        grids(2) = build_residual_model_grid(1, membranePatterns, ...
-            tauGrid, opts);
-        grids(3) = build_residual_model_grid(2, membranePatterns, ...
-            tauGrid, opts);
-        for modelIndex = 1:3
+    modelStateCount = nan(1, 3);
+    fractionStepUsed = NaN;
+    for modelIndex = 1:3
+        if ~activeModels(modelIndex)
+            % A skipped model gets zero evidence, so it can never win the
+            % comparison and never enters a model average.
+            evaluations(modelIndex).logEvidence(:) = -Inf;
+            continue;
+        end
+        membraneCount = modelIndex - 1;
+        if fixedCountEnabled
+            grid = build_residual_model_grid(membraneCount, ...
+                membranePatterns, tauGrid, opts);
             evaluations(modelIndex) = evaluate_fixed_count_grid(Y, ...
-                validFlat, grids(modelIndex), slbPattern, tauSlbNs, ...
+                validFlat, grid, slbPattern, tauSlbNs, ...
                 opts.fixedSlbPhotonCount, opts.useGPU, opts.batchSize, ...
                 opts.slbCountRelTol, opts.fixedSlbPhotonCountStd, ...
                 opts.slbCountPriorNodes);
-        end
-    else
-        grids(1) = build_model_grid(0, slbPattern, membranePatterns, ...
-            tauGrid, tauSlbNs, opts);
-        grids(2) = build_model_grid(1, slbPattern, membranePatterns, ...
-            tauGrid, tauSlbNs, opts);
-        grids(3) = build_model_grid(2, slbPattern, membranePatterns, ...
-            tauGrid, tauSlbNs, opts);
-        for modelIndex = 1:3
+        else
+            grid = build_model_grid(membraneCount, slbPattern, ...
+                membranePatterns, tauGrid, tauSlbNs, opts);
             evaluations(modelIndex) = evaluate_grid(Y, validFlat, ...
-                grids(modelIndex), opts.useGPU, opts.batchSize);
+                grid, opts.useGPU, opts.batchSize);
         end
+        modelStateCount(modelIndex) = grid.stateCount;
+        if modelIndex == 2
+            fractionStepUsed = grid.fractionStepUsed;
+        end
+        % Only one model grid is resident at a time.
+        clear grid
     end
 
+    effectivePrior = double(opts.modelPrior(:)).';
+    effectivePrior(~activeModels) = 0;
+    effectivePrior = effectivePrior ./ sum(effectivePrior);
+
     [modelProbabilityFlat, modelMapFlat] = combine_models( ...
-        evaluations, opts.modelPrior, validFlat);
+        evaluations, effectivePrior, validFlat, activeModels);
     conditional = repmat(conditional_maps(evaluations(1), ...
         nx, ny, 0, tauSlbNs), 1, 3);
     for modelIndex = 2:3
@@ -166,15 +191,23 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
             nx, ny, modelIndex - 1, tauSlbNs);
     end
 
-    tauMeanFlat = average_parameter(evaluations, modelProbabilityFlat, 1);
-    tauSecondFlat = average_second_moment(evaluations, modelProbabilityFlat, 1);
+    tauMeanFlat = average_parameter(evaluations, modelProbabilityFlat, 1, ...
+        activeModels);
+    tauSecondFlat = average_second_moment(evaluations, modelProbabilityFlat, ...
+        1, activeModels);
     tauStdFlat = sqrt(max(tauSecondFlat - tauMeanFlat .^ 2, 0));
-    slbFractionFlat = average_parameter(evaluations, modelProbabilityFlat, 2);
-    backgroundFractionFlat = average_parameter(evaluations, modelProbabilityFlat, 7);
-    signalFractionFlat = average_parameter(evaluations, modelProbabilityFlat, 8);
-    slbPhotonFractionFlat = average_parameter(evaluations, modelProbabilityFlat, 9);
-    membrane1PhotonFractionFlat = average_parameter(evaluations, modelProbabilityFlat, 10);
-    membrane2PhotonFractionFlat = average_parameter(evaluations, modelProbabilityFlat, 11);
+    slbFractionFlat = average_parameter(evaluations, modelProbabilityFlat, 2, ...
+        activeModels);
+    backgroundFractionFlat = average_parameter(evaluations, ...
+        modelProbabilityFlat, 7, activeModels);
+    signalFractionFlat = average_parameter(evaluations, ...
+        modelProbabilityFlat, 8, activeModels);
+    slbPhotonFractionFlat = average_parameter(evaluations, ...
+        modelProbabilityFlat, 9, activeModels);
+    membrane1PhotonFractionFlat = average_parameter(evaluations, ...
+        modelProbabilityFlat, 10, activeModels);
+    membrane2PhotonFractionFlat = average_parameter(evaluations, ...
+        modelProbabilityFlat, 11, activeModels);
 
     selected = selected_maps(evaluations, modelMapFlat, validFlat, ...
         nx, ny, tauSlbNs);
@@ -186,7 +219,9 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
     out.modelNames = {'fixed SLB only', ...
         'fixed SLB + one membrane lifetime', ...
         'fixed SLB + two membrane lifetimes'};
-    out.modelPrior = opts.modelPrior(:).';
+    out.modelPrior = effectivePrior;
+    out.maxMembraneStates = double(opts.maxMembraneStates);
+    out.evaluatedModels = activeModels;
     out.modelProbability = reshape(permute(single(modelProbabilityFlat), ...
         [2 3 1]), nx, ny, 3);
     out.probabilityFixedSlbOnly = out.modelProbability(:, :, 1);
@@ -239,11 +274,21 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
     clippedMask = reshape(evaluations(1).fixedSlbCountClipped, nx, ny);
     clippedPixelCount = nnz(clippedMask & validMask);
     clippedPixelFraction = clippedPixelCount / max(nnz(validMask), 1);
-    if fixedCountEnabled
+    if fixedCountEnabled && opts.slbCountPriorNodes > 0
+        constraintMode = 'spatial expected photon-count prior';
+        clippingDefinition = ...
+            'observed N is below the lower two-sigma calibration support';
+    elseif fixedCountEnabled
         constraintMode = 'direct expected photon-count allocation';
-        unsupportedFraction = [0 0 0];
+        clippingDefinition = ...
+            'target count is replaced by observed N when N < target';
     else
         constraintMode = 'unconstrained legacy amplitude';
+        clippingDefinition = 'not applicable';
+    end
+    if fixedCountEnabled
+        unsupportedFraction = [0 0 0];
+    else
         unsupportedFraction = [NaN NaN NaN];
     end
     out.fixedSlbCountPrior = struct( ...
@@ -252,8 +297,9 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
         'targetPhotonCount', opts.fixedSlbPhotonCount, ...
         'photonCountStd', opts.fixedSlbPhotonCountStd, ...
         'priorNodes', opts.slbCountPriorNodes, ...
-        'countMarginalised', opts.slbCountPriorNodes > 0, ...
-        'photonCountStdUsedForInference', false, ...
+        'countMarginalised', fixedCountEnabled && opts.slbCountPriorNodes > 0, ...
+        'photonCountStdUsedForInference', ...
+            fixedCountEnabled && opts.slbCountPriorNodes > 0, ...
         'appliedExpectedPhotonCount', out.fixedSlbExpectedPhotonCount, ...
         'appliedDetectedPhotonFraction', out.fixedSlbPhotonFraction, ...
         'clippedPixelMask', clippedMask, ...
@@ -264,11 +310,11 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
         'supportThresholdZ', NaN, ...
         'unsupportedPixelFractionByModel', unsupportedFraction, ...
         'statePriorNormalisation', 'uniform over residual states within each model', ...
-        'clippingDefinition', 'target count is replaced by observed N when N < target');
+        'clippingDefinition', clippingDefinition);
     out.fixedSlbPhotonConstraint = out.fixedSlbCountPrior;
-    out.gridInfo = struct('modelStateCount', [grids.stateCount], ...
+    out.gridInfo = struct('modelStateCount', modelStateCount, ...
         'fractionStepRequested', opts.fractionStep, ...
-        'fractionStepUsed', grids(2).fractionStepUsed, ...
+        'fractionStepUsed', fractionStepUsed, ...
         'signalGrid', opts.signalGrid(:).', ...
         'minimumMembraneFraction', opts.minimumMembraneFraction, ...
         'minimumSlbFraction', opts.minimumSlbFraction, ...
@@ -278,11 +324,14 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
         'fixedModeSignalGridMeaning', ...
             'membrane share of photons remaining after fixed SLB allocation', ...
         'usedGPU', [evaluations.usedGPU]);
-    if fixedCountEnabled
-        amplitudeAssumption = sprintf([ ...
-            'The expected detected SLB count is fixed to min(%.6g, N) ' ...
-            'photons in each fitted pixel, where N is its observed total.'], ...
-            opts.fixedSlbPhotonCount);
+    if fixedCountEnabled && opts.slbCountPriorNodes > 0
+        amplitudeAssumption = [ ...
+            'The detected SLB count has a spatially calibrated Gaussian prior ' ...
+            'that is marginalised during inference.'];
+    elseif fixedCountEnabled
+        amplitudeAssumption = [ ...
+            'The expected detected SLB count is supplied by a scalar or spatial ' ...
+            'calibration and applied as a hard constraint.'];
     else
         amplitudeAssumption = 'The SLB amplitude remains pixel-dependent.';
     end
@@ -291,7 +340,8 @@ function out = flim_bayes_fixed_slb(tcspcPix, irf, pulsePeriodNs, dtNs, tauSlbNs
         amplitudeAssumption, ...
         'Added membrane lifetimes are constrained to be longer than tauSlbNs.', ...
         'Model evidence is conditional on photon total and on the configured discrete priors.', ...
-        'The background, when enabled, is uniform across the fitted TCSPC window.'};
+        'The background, when enabled, is uniform across the fitted TCSPC window.', ...
+        membrane_state_assumption(opts.maxMembraneStates)};
 end
 
 function opts = fill_options(opts, nx, ny, tauSlbNs, dtNs, modelPeriodNs)
@@ -314,6 +364,7 @@ function opts = fill_options(opts, nx, ny, tauSlbNs, dtNs, modelPeriodNs)
     defaults.minimumTauSeparationNs = max(0.10, 2 * dtNs);
     defaults.minimumTauSeparationFraction = 0.10;
     defaults.modelPrior = [1 1 1] / 3;
+    defaults.maxMembraneStates = 2;
     defaults.fixedSlbPhotonCount = [];
     defaults.fixedSlbPhotonCountStd = [];
     defaults.slbCountRelTol = 0.02;
@@ -384,27 +435,55 @@ function opts = fill_options(opts, nx, ny, tauSlbNs, dtNs, modelPeriodNs)
             'opts.modelPrior must contain three finite positive values.');
     end
     opts.modelPrior = (prior ./ sum(prior)).';
+    validateattributes(opts.maxMembraneStates, {'numeric'}, ...
+        {'real','finite','scalar','integer','>=',0,'<=',2}, ...
+        mfilename, 'opts.maxMembraneStates');
+    opts.maxMembraneStates = double(opts.maxMembraneStates);
     fixedCountEnabled = ~isempty(opts.fixedSlbPhotonCount);
     if fixedCountEnabled
-        validateattributes(opts.fixedSlbPhotonCount, {'numeric'}, ...
-            {'real','finite','scalar','positive'});
+        opts.fixedSlbPhotonCount = validate_spatial_calibration( ...
+            opts.fixedSlbPhotonCount, nx, ny, ...
+            'opts.fixedSlbPhotonCount', false);
         if ~opts.includeBackground
             error('flim_bayes_fixed_slb:FixedSlbCountBackground', ...
                 ['opts.fixedSlbPhotonCount requires includeBackground=true ' ...
                  'so model M1 can allocate photons above the fixed SLB count.']);
         end
-        opts.fixedSlbPhotonCount = double(opts.fixedSlbPhotonCount);
     end
     if ~isempty(opts.fixedSlbPhotonCountStd)
-        validateattributes(opts.fixedSlbPhotonCountStd, {'numeric'}, ...
-            {'real','finite','scalar','positive'});
-        opts.fixedSlbPhotonCountStd = double(opts.fixedSlbPhotonCountStd);
+        opts.fixedSlbPhotonCountStd = validate_spatial_calibration( ...
+            opts.fixedSlbPhotonCountStd, nx, ny, ...
+            'opts.fixedSlbPhotonCountStd', true);
     end
     if isempty(opts.useGPU)
         opts.useGPU = gpu_available();
     else
         validateattributes(opts.useGPU, {'numeric','logical'}, {'scalar'});
         opts.useGPU = logical(opts.useGPU);
+    end
+end
+
+function values = validate_spatial_calibration(values, nx, ny, name, allowZero)
+    validateattributes(values, {'numeric'}, {'real','finite'});
+    if ~(isscalar(values) || numel(values) == nx * ny)
+        error('flim_bayes_fixed_slb:SpatialCalibrationSize', ...
+            '%s must be scalar or contain exactly %d-by-%d values.', ...
+            name, nx, ny);
+    end
+    values = double(values);
+    if allowZero
+        invalid = values < 0;
+        qualifier = 'nonnegative';
+    else
+        invalid = values <= 0;
+        qualifier = 'positive';
+    end
+    if any(invalid(:))
+        error('flim_bayes_fixed_slb:SpatialCalibrationValue', ...
+            '%s must contain only %s values.', name, qualifier);
+    end
+    if ~isscalar(values)
+        values = reshape(values, nx, ny);
     end
 end
 
@@ -828,63 +907,65 @@ function evaluation = evaluate_fixed_count_grid(Y, validFlat, residualGrid, ...
     end
 
     photonTotal = sum(double(Y(:, validIndex)), 1);
-    % One grid instantiation per distinct fixed-SLB fraction. Grouping on the
-    % exact photon total gives a separate grid - and a separate pattern build,
-    % log and GPU upload - for every distinct total, which is the dominant
-    % cost. Binning totals to a relative tolerance collapses neighbouring
-    % totals whose fixed-SLB fraction is indistinguishable.
-    if slbCountRelTol > 0
-        binKey = -ones(1, numel(photonTotal));
-        positive = photonTotal > 0;
-        binKey(positive) = floor(log(photonTotal(positive)) / ...
-            log1p(slbCountRelTol));
-        [~, ~, totalGroup] = unique(binKey, 'sorted');
-        groupCount = max(totalGroup);
-        representativeTotal = zeros(1, groupCount);
-        for groupIndex = 1:groupCount
-            representativeTotal(groupIndex) = ...
-                median(photonTotal(totalGroup == groupIndex));
-        end
+    targetCountAll = spatial_calibration_values(fixedSlbPhotonCount, ...
+        validIndex, pixelCount);
+    if isempty(slbCountStd)
+        targetStdAll = zeros(size(targetCountAll));
     else
-        [representativeTotal, ~, totalGroup] = unique(photonTotal, 'sorted');
-        groupCount = numel(representativeTotal);
+        targetStdAll = spatial_calibration_values(slbCountStd, ...
+            validIndex, pixelCount);
+    end
+    centreFractionAll = min(max(targetCountAll ./ max(photonTotal, eps), 0), 1);
+    stdFractionAll = max(targetStdAll ./ max(photonTotal, eps), 0);
+
+    % A spatial prior can give every pixel a different target and uncertainty.
+    % Share likelihood grids only when both fractional prior parameters are
+    % close. This preserves the calibration map while avoiding one expensive
+    % grid construction and upload per pixel.
+    groupParameters = [centreFractionAll(:) stdFractionAll(:)];
+    if slbCountPriorNodes <= 0
+        groupParameters(:, 2) = 0;
+    end
+    if slbCountRelTol > 0
+        denominator = log1p(slbCountRelTol);
+        groupKey = floor(log(max(groupParameters, eps)) / denominator);
+        groupKey(groupParameters == 0) = -realmax('double');
+        [~, ~, totalGroup] = unique(groupKey, 'rows', 'sorted');
+    else
+        [~, ~, totalGroup] = unique(groupParameters, 'rows', 'sorted');
     end
     totalGroup = reshape(totalGroup, 1, []);
+    groupCount = max(totalGroup);
 
     gpuUsed = false;
     for groupIndex = 1:groupCount
         member = totalGroup == groupIndex;
         groupPixel = validIndex(member);
-        total = representativeTotal(groupIndex);
         % The SLB photon count is a calibration input, not a measurement, so
         % treating it as exact forces every error in it into the free
         % lifetimes or into a spurious extra component. With
         % slbCountPriorNodes > 0 the count is marginalised over a Gaussian
         % prior of width slbCountStd instead, which lets a mis-specified
         % reference be absorbed in the SLB amplitude where it belongs.
-        [candidateCounts, candidateWeights] = slbCountCandidates( ...
-            fixedSlbPhotonCount, slbCountStd, slbCountPriorNodes);
-        candidateCount = numel(candidateCounts);
+        centreFraction = median(centreFractionAll(member));
+        stdFraction = median(stdFractionAll(member));
+        [candidateFractions, candidateWeights] = slbFractionCandidates( ...
+            centreFraction, stdFraction, slbCountPriorNodes);
+        candidateCount = numel(candidateFractions);
         pixelCountInGroup = numel(groupPixel);
         logEvidenceAll = nan(candidateCount, pixelCountInGroup);
         meanAll = nan(11, pixelCountInGroup, candidateCount);
-        stdAll = nan(11, pixelCountInGroup, candidateCount);
+        stdByCandidate = nan(11, pixelCountInGroup, candidateCount);
         mapAll = nan(11, pixelCountInGroup, candidateCount);
         for candidateIndex = 1:candidateCount
-            if total <= 0
-                candidateFraction = 1;
-            else
-                candidateFraction = min( ...
-                    candidateCounts(candidateIndex) / total, 1);
-            end
             groupGrid = instantiate_fixed_count_grid(residualGrid, ...
-                slbPattern, tauSlbNs, candidateFraction);
+                slbPattern, tauSlbNs, candidateFractions(candidateIndex));
             [logEvidenceOne, meanOne, stdOne, mapOne, groupUsedGPU] = ...
                 evaluate_grid_indices(Y, groupPixel, groupGrid, useGPU, ...
                 batchSize);
             logEvidenceAll(candidateIndex, :) = logEvidenceOne;
             meanAll(:, :, candidateIndex) = meanOne;
-            stdAll(:, :, candidateIndex) = stdOne;
+            stdByCandidate(:, :, candidateIndex) = stdOne;
             mapAll(:, :, candidateIndex) = mapOne;
             gpuUsed = gpuUsed || groupUsedGPU;
         end
@@ -892,11 +973,11 @@ function evaluation = evaluate_fixed_count_grid(Y, validFlat, residualGrid, ...
         if candidateCount == 1
             logEvidence = logEvidenceAll(1, :);
             meanValue = meanAll(:, :, 1);
-            stdValue = stdAll(:, :, 1);
+            stdValue = stdByCandidate(:, :, 1);
             mapValue = mapAll(:, :, 1);
         else
             [logEvidence, meanValue, stdValue, mapValue] = ...
-                mixOverSlbCount(logEvidenceAll, meanAll, stdAll, mapAll, ...
+                mixOverSlbCount(logEvidenceAll, meanAll, stdByCandidate, mapAll, ...
                 candidateWeights);
         end
         evaluation.logEvidence(groupPixel) = logEvidence;
@@ -906,19 +987,39 @@ function evaluation = evaluate_fixed_count_grid(Y, validFlat, residualGrid, ...
         % Per-pixel bookkeeping stays exact even when the grid is shared.
         memberTotal = photonTotal(member);
         evaluation.appliedSlbPhotonCount(groupPixel) = ...
-            min(fixedSlbPhotonCount, memberTotal);
+            double(meanValue(9, :)) .* memberTotal;
+        if slbCountPriorNodes > 0
+            lowerSupport = max(targetCountAll(member) - ...
+                2 * targetStdAll(member), 0);
+        else
+            lowerSupport = targetCountAll(member);
+        end
         evaluation.fixedSlbCountClipped(groupPixel) = ...
-            memberTotal < fixedSlbPhotonCount;
+            memberTotal < lowerSupport;
         gpuUsed = gpuUsed || groupUsedGPU;
     end
     evaluation.usedGPU = gpuUsed;
 end
 
-function [counts, weights] = slbCountCandidates(centre, countStd, nodes)
-%SLBCOUNTCANDIDATES Gaussian prior nodes for the fixed SLB photon count.
+function values = spatial_calibration_values(calibration, index, pixelCount)
+    if isscalar(calibration)
+        values = repmat(double(calibration), 1, numel(index));
+    else
+        if numel(calibration) ~= pixelCount
+            error('flim_bayes_fixed_slb:SpatialCalibrationInternalSize', ...
+                'Spatial calibration does not match the flattened image size.');
+        end
+        flattened = double(calibration(:)).';
+        values = flattened(index);
+    end
+end
+
+function [fractions, weights] = slbFractionCandidates(centre, fractionStd, nodes)
+%SLBFRACTIONCANDIDATES Gaussian prior nodes for the SLB photon fraction.
 % nodes == 0 reproduces the hard constraint exactly: one node, unit weight.
-    if nodes <= 0 || isempty(countStd) || ~isfinite(countStd) || countStd <= 0
-        counts = centre;
+    if nodes <= 0 || isempty(fractionStd) || ...
+            ~isfinite(fractionStd) || fractionStd <= 0
+        fractions = min(max(centre, 0), 1);
         weights = 1;
         return;
     end
@@ -927,8 +1028,8 @@ function [counts, weights] = slbCountCandidates(centre, countStd, nodes)
     % Nodes span +/-2 sigma, which covers the prior without wasting grid
     % instantiations far out in the tails.
     offsets = 2 * offsets / max(half, 1);
-    counts = centre + offsets * countStd;
-    counts = max(counts, 0);
+    fractions = centre + offsets * fractionStd;
+    fractions = min(max(fractions, 0), 1);
     weights = exp(-0.5 * offsets .^ 2);
     weights = weights / sum(weights);
 end
@@ -1060,7 +1161,8 @@ function [logEvidence, meanOutput, stdOutput, mapOutput, gpuUsed] = ...
     end
 end
 
-function [probability, modelMap] = combine_models(evaluations, prior, validFlat)
+function [probability, modelMap] = combine_models(evaluations, prior, ...
+        validFlat, activeModels)
     pixelCount = numel(validFlat);
     probability = nan(3, pixelCount);
     modelMap = zeros(1, pixelCount, 'uint8');
@@ -1068,8 +1170,8 @@ function [probability, modelMap] = combine_models(evaluations, prior, validFlat)
     if isempty(validIndex)
         return;
     end
-    logPosterior = zeros(3, numel(validIndex));
-    for modelIndex = 1:3
+    logPosterior = -inf(3, numel(validIndex));
+    for modelIndex = find(activeModels & prior(:).' > 0)
         logPosterior(modelIndex, :) = ...
             evaluations(modelIndex).logEvidence(validIndex) + log(prior(modelIndex));
     end
@@ -1081,9 +1183,9 @@ function [probability, modelMap] = combine_models(evaluations, prior, validFlat)
     modelMap(validIndex) = uint8(selected);
 end
 
-function value = average_parameter(evaluations, probability, row)
+function value = average_parameter(evaluations, probability, row, activeModels)
     value = zeros(1, size(probability, 2));
-    for modelIndex = 1:3
+    for modelIndex = find(activeModels)
         value = value + probability(modelIndex, :) .* ...
             double(evaluations(modelIndex).mean(row, :));
     end
@@ -1091,9 +1193,10 @@ function value = average_parameter(evaluations, probability, row)
     value(invalid) = NaN;
 end
 
-function value = average_second_moment(evaluations, probability, row)
+function value = average_second_moment(evaluations, probability, row, ...
+        activeModels)
     value = zeros(1, size(probability, 2));
-    for modelIndex = 1:3
+    for modelIndex = find(activeModels)
         meanValue = double(evaluations(modelIndex).mean(row, :));
         stdValue = double(evaluations(modelIndex).std(row, :));
         value = value + probability(modelIndex, :) .* ...
@@ -1167,6 +1270,17 @@ end
 
 function map = flat_to_map(values, nx, ny)
     map = reshape(single(values), nx, ny);
+end
+
+function text = membrane_state_assumption(maxMembraneStates)
+    if maxMembraneStates >= 2
+        text = ['All three models were evaluated; no membrane-state ' ...
+            'ceiling was applied.'];
+    else
+        text = sprintf(['The comparison was truncated at %d free membrane ' ...
+            'state(s); richer models carry zero posterior probability by ' ...
+            'construction, not by evidence.'], maxMembraneStates);
+    end
 end
 
 function available = gpu_available()
