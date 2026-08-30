@@ -16,8 +16,9 @@ function out = run_free_dye_lifetime_above_surface(dataRoot, opts)
 % tail, between-scan scatter means real heterogeneity.
 
     if nargin < 1 || isempty(dataRoot)
-        dataRoot = ['D:\Luminosa\Data\260813\' ...
-            'RT_Jurkat_CD58_memglow_20260813_1'];
+%         dataRoot = ['D:\Luminosa\Data\260813\' ...
+%             'RT_Jurkat_CD58_memglow_20260813_1'];
+dataRoot = 'D:\Luminosa\Data\260813\4deg_Jurkat_CD58_memglow';
     end
     if nargin < 2 || isempty(opts); opts = struct(); end
     if ~isfield(opts, 'outputRoot') || isempty(opts.outputRoot)
