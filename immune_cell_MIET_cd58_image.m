@@ -64,7 +64,11 @@ function out = immune_cell_MIET_cd58_image(ptuFile, cfg)
         source = dir(ptuFile);
         if cached.datenum >= source.datenum
             loaded = load(cfg.cacheFile, 'out');
-            if isfield(loaded, 'out')
+            % Version 1 caches were written with rows and columns transposed.
+            % Recompute rather than transpose in place, so the stored image can
+            % never disagree with the code that produced it.
+            if isfield(loaded, 'out') && isfield(loaded.out, 'formatVersion') ...
+                    && loaded.out.formatVersion >= 2
                 out = loaded.out;
                 fprintf('immune_cell_MIET_cd58_image: reusing %s\n', cfg.cacheFile);
                 return;
@@ -97,7 +101,13 @@ function out = immune_cell_MIET_cd58_image(ptuFile, cfg)
              '%s.'], cfg.excitationNm, ptuFile);
     end
 
-    imageSize = [max(line) max(col)];
+    % im_col indexes the analysis grid's ROWS and im_line its COLUMNS, not the
+    % other way round. Verified against the pipeline's own intensity map on a
+    % square acquisition: this assignment correlates 0.982, the transpose only
+    % 0.814. A square scan hides the error - a roughly round, centred cell still
+    % correlates well when transposed - so it only surfaced on the 558x560
+    % acquisitions, where the photons fell outside the grid.
+    imageSize = [max(col) max(line)];
     if ~isempty(cfg.imageSize)
         target = double(cfg.imageSize(:)).';
         if any(imageSize > target)
@@ -108,9 +118,10 @@ function out = immune_cell_MIET_cd58_image(ptuFile, cfg)
         end
         imageSize = target;
     end
-    intensity = accumarray([line col], 1, imageSize);
+    intensity = accumarray([col line], 1, imageSize);
 
     out = struct();
+    out.formatVersion = 2;   % 1 had rows and columns transposed
     out.intensity = intensity;
     out.photons = numel(line);
     out.gate = gate;

@@ -106,7 +106,13 @@ function out = immune_cell_MIET_topography_figure(heightMapsMat, cfg)
     if ~any(footprint(:)); footprint = isfinite(heightNm); end
 
     cd58 = loadPieImage(acquisitionDir, size(heightNm), 485);
-    membrane = loadPieImage(acquisitionDir, size(heightNm), 640);
+    % The 640 window is only drawn when the MemGlow plane is switched on, and
+    % extracting it costs a full pass over the raw PTU. Load it on demand.
+    if cfg.showMembraneLayer
+        membrane = loadPieImage(acquisitionDir, size(heightNm), 640);
+    else
+        membrane = zeros(size(heightNm));
+    end
     if isempty(cfg.pixelSizeUm)
         cfg.pixelSizeUm = pixelSizeFromHeader(acquisitionDir);
     end
