@@ -15,7 +15,10 @@ function figureHandle = showFits(timeNs, names, curves, fittedCurves, ...
         semilogy(timeNs, max(curves{plotIndex}, 0.5), 'k-', 'LineWidth', 1);
         hold on;
         if exponentialCounts(plotIndex) > 0
-            semilogy(timeNs, max(fittedCurves{plotIndex}, 0.5), ...
+            fitToPlot = fittedCurves{plotIndex};
+            finiteBins = isfinite(fitToPlot);
+            fitToPlot(finiteBins) = max(fitToPlot(finiteBins), 0.5);
+            semilogy(timeNs, fitToPlot, ...
                 'r-', 'LineWidth', 1.4);
             validTau = lifetimes(plotIndex, isfinite(lifetimes(plotIndex, :)));
             tauText = strtrim(sprintf('%.2f ', validTau));

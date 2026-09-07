@@ -34,6 +34,10 @@ cfg.lysoExcludeMitoRadius = 0;  % Increase to widen mitochondrial exclusion.
 % Number of common bins in the mitochondrial/lysosome lifetime histograms.
 cfg.lifetimeHistogramBins = 20;
 
+% Regional model eligibility (inclusive lower limits).
+cfg.minPhotonsPerRegionFit = 10; % Below 10: no fit.
+cfg.minPhotonsForTwoExp = 500;   % 10-499: single exponential only.
+
 cfg.showFigures = true;
 cfg.saveOutputs = true;
 result = PTU_MitoLysoCytosol_BayesFLIM(ptuFile, cfg);

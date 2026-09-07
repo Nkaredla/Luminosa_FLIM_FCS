@@ -3,9 +3,15 @@ function [ok, exponentialCount, tauNs, tauMeanNs, coefficients, ...
         curves, regionName, irf, dtNs, maximumExponentials, oneStateSeed, ...
         twoStateSeed, lifetimeBounds, includeBackground, minimumPhotons, ...
         maximumIterations, requiredBicImprovement, minimumSeparationFraction, ...
-        minimumAmplitudeFraction)
+        minimumAmplitudeFraction, minimumTwoExpPhotons, tailOffsetNs)
 %FITREGIONS Apply model selection independently to every curve column.
 
+    if nargin < 15 || isempty(minimumTwoExpPhotons)
+        minimumTwoExpPhotons = 500;
+    end
+    if nargin < 16
+        tailOffsetNs = [];
+    end
     regionCount = size(curves, 2);
     binCount = size(curves, 1);
     ok = false(regionCount, 1);
@@ -14,7 +20,7 @@ function [ok, exponentialCount, tauNs, tauMeanNs, coefficients, ...
     tauMeanNs = nan(regionCount, 1);
     coefficients = zeros(regionCount, 3);
     speciesFraction = nan(regionCount, 2);
-    fitCounts = zeros(binCount, regionCount);
+    fitCounts = nan(binCount, regionCount);
     metrics = nan(regionCount, 8);
     messages = cell(regionCount, 1);
 
@@ -27,6 +33,7 @@ function [ok, exponentialCount, tauNs, tauMeanNs, coefficients, ...
             selectModel(curves(:, region), irf, dtNs, maximumExponentials, ...
             oneStateSeed, twoStateSeed, lifetimeBounds, includeBackground, ...
             minimumPhotons, maximumIterations, requiredBicImprovement, ...
-            minimumSeparationFraction, minimumAmplitudeFraction);
+            minimumSeparationFraction, minimumAmplitudeFraction, ...
+            minimumTwoExpPhotons, tailOffsetNs);
     end
 end

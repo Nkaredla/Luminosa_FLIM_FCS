@@ -57,7 +57,9 @@ function cfg = defaultConfig(cfg)
     defaults.tauSeeds2 = [0.4 2.5];
     defaults.tauBoundsNs = [0.05 10];
     defaults.includeBackground = true;
-    defaults.minPhotonsPerRegionFit = 100;
+    defaults.minPhotonsPerRegionFit = 10;
+    defaults.minPhotonsForTwoExp = 500;
+    defaults.segmentOnly = false; % Used by the tail-only entry point.
     defaults.fitMaxIter = 500;
     defaults.bicImprovementForTwoExp = 2.0;
     defaults.minStateSeparationFraction = 0.10;
@@ -84,4 +86,8 @@ function cfg = defaultConfig(cfg)
             cfg.(names{k}) = defaults.(names{k});
         end
     end
+    validateattributes(cfg.minPhotonsPerRegionFit, {'numeric'}, ...
+        {'scalar', 'real', 'finite', '>=', 10});
+    validateattributes(cfg.minPhotonsForTwoExp, {'numeric'}, ...
+        {'scalar', 'real', 'finite', '>=', 500});
 end

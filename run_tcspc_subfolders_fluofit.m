@@ -3,7 +3,7 @@ outputFolder = []; % root-level batch summary folder is chosen automatically
 
 opts = struct();
 opts.fitMethod = 'tail'; % fast tail fitting: no IRF reconvolution
-opts.tailCutAfterPeakNs = 0.3; % start fitting after the TCSPC peak
+opts.tailCutAfterPeakNs = 1.0; % start fitting after the TCSPC peak
 opts.tailRejectLastNPoints = 20; % remove final tail bins before Tailfit/DistTailfit
 opts.tailSolver = 'pirls';
 opts.irfMode = 'per_curve'; % ignored when opts.fitMethod='tail'
@@ -17,7 +17,7 @@ opts.irfClipFraction = 1e-3;
 opts.tau0 = [0.5 2.0]; % initial guess for direct biexponential Tailfit
 opts.init = 0; % tail mode: 0 skips DistTailfit; 1 also runs DistTailfit
 opts.fluofitSolver = 'pirls'; % 'mle' use 'pirls' for PIRLSnonneg amplitude fitting
-opts.bestIrfTau0 = [0.4 2.0]; % biexponential screening fit used only to choose the IRF
+opts.bestIrfTau0 = [1.0 3.0]; % biexponential screening fit used only to choose the IRF
 opts.bestIrfSolver = opts.fluofitSolver;
 opts.plotFits = true;
 opts.saveFitFigures = true;

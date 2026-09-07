@@ -36,8 +36,11 @@ function result = PTU_MitoLysoCytosol_BayesFLIM(ptuFile, cfg)
     if cfg.cnum < max(cfg.mitoPulseIndex, cfg.b12PulseIndex)
         error('A requested laser index exceeds cfg.cnum.');
     end
-    requiredFunctions = {'PTU_FLIM_GPU', 'flim_bayes_lowphoton', ...
-        'Calc_mIRF_Global_GammaShifted_fast'};
+    requiredFunctions = {'PTU_FLIM_GPU'};
+    if ~cfg.segmentOnly
+        requiredFunctions = [requiredFunctions, {'flim_bayes_lowphoton', ...
+            'Calc_mIRF_Global_GammaShifted_fast'}];
+    end
     for k = 1:numel(requiredFunctions)
         if exist(requiredFunctions{k}, 'file') ~= 2
             error('Required function %s.m is not on the MATLAB path.', requiredFunctions{k});
@@ -132,6 +135,25 @@ function result = PTU_MitoLysoCytosol_BayesFLIM(ptuFile, cfg)
     timeNs = ((0:gateLength-1)' + 0.5) * dtNs;
     pulsePeriodNs = double(ptu.head.MeasDesc_GlobalResolution) * 1e9;
 
+    % The tail-only entry point reuses extraction and segmentation, stopping
+    % before IRF estimation, reconvolution fits, or Bayesian pixel processing.
+    if cfg.segmentOnly
+        result = struct('file', ptuFile, 'config', cfg, 'head', ptu.head);
+        result.gates = struct('dtNs', dtNs, 'startsBin', gateStarts, ...
+            'stopsBin', gateStops, 'lengthBins', gateLength);
+        result.intensity = struct('mitochondria640Det2', mitoIntensity, ...
+            'b12_560Det1', b12Intensity);
+        result.masks = struct('cell', cellMask, 'cellBoundary', cellBoundary, ...
+            'mitochondria', mitoMask, 'lysosome', lysoMask, ...
+            'cytosol', cytosolMask, 'compartmentMap', compartmentMap);
+        result.labels = struct('mitochondria', mitoLabels, 'lysosome', lysoLabels);
+        result.tcspc = struct('timeNs', timeNs, 'globalB12', globalCurve, ...
+            'mitochondria', mitoCurves, 'lysosome', lysoCurves, ...
+            'cytosol', cytosolCurve, 'mitochondriaPhotonCounts', mitoPhotonCounts, ...
+            'lysosomePhotonCounts', lysoPhotonCounts);
+        return;
+    end
+
     %% Estimate or load the B12 IRF
     [irf, irfSource, irfParameters, irfTau, irfFit, irfChi] = ...
         estimateIrf(globalCurve, dtNs, cfg.irf, ...
@@ -141,7 +163,8 @@ function result = PTU_MitoLysoCytosol_BayesFLIM(ptuFile, cfg)
     fitArguments = {irf, dtNs, cfg.maxExp, cfg.tauSeeds1, cfg.tauSeeds2, ...
         cfg.tauBoundsNs, cfg.includeBackground, cfg.minPhotonsPerRegionFit, ...
         cfg.fitMaxIter, cfg.bicImprovementForTwoExp, ...
-        cfg.minStateSeparationFraction, cfg.minStateAmplitudeFraction};
+        cfg.minStateSeparationFraction, cfg.minStateAmplitudeFraction, ...
+        cfg.minPhotonsForTwoExp};
     [globalOk, globalOrder, globalTau, globalTauMean, globalCoeff, globalFraction, ...
         globalFitCounts, globalMetrics, globalMessage] = ...
         selectModel(globalCurve, fitArguments{:});
@@ -163,7 +186,7 @@ function result = PTU_MitoLysoCytosol_BayesFLIM(ptuFile, cfg)
         lysoFitCounts, lysoMetrics, lysoMessages] = fitRegions( ...
         lysoCurves, 'lysosome', fitArguments{:});
 
-    %% Run Bayesian maps, retaining regional values in photon-poor interior pixels
+    %% Run Bayesian maps only for eligible regional fits
     fprintf('Building B12 TCSPC cube and Bayesian compartment maps...\n');
     b12Cube = photonCube(b12Bins, b12Pixels, nx, ny, gateLength);
     floatMaps = nan(nx, ny, 11, 'single');
@@ -172,23 +195,18 @@ function result = PTU_MitoLysoCytosol_BayesFLIM(ptuFile, cfg)
 
     mitoBayesOk = false(mitoRegionCount, 1);
     mitoBayesMessages = cell(mitoRegionCount, 1);
-    mitoBayesPhotons = zeros(mitoRegionCount, 1);
+    mitoBayesPhotons = mitoPhotonCounts(:);
     mitoBayesTau = nan(mitoRegionCount, 2);
     mitoBayesModelSummary = zeros(mitoRegionCount, 3);
     for region = 1:mitoRegionCount
-        if mitoOk(region)
-            seedTau = mitoTau(region, :);
-            seedTauMean = mitoTauMean(region);
-            seedFraction = mitoFraction(region, :);
-        elseif pooledMitoOk
-            seedTau = pooledMitoTau;
-            seedTauMean = pooledMitoTauMean;
-            seedFraction = pooledMitoFraction;
-        else
-            seedTau = globalTau;
-            seedTauMean = globalTauMean;
-            seedFraction = globalFraction;
+        % Do not bypass regional eligibility with a pooled/global seed.
+        if ~mitoOk(region)
+            mitoBayesMessages{region} = mitoMessages{region};
+            continue;
         end
+        seedTau = mitoTau(region, :);
+        seedTauMean = mitoTauMean(region);
+        seedFraction = mitoFraction(region, :);
         regionMask = mitoLabels == region;
         [floatPatch, modelPatch, posteriorPatch, xRange, yRange, ...
             mitoBayesOk(region), mitoBayesMessages{region}, mitoBayesPhotons(region), ...
@@ -206,23 +224,18 @@ function result = PTU_MitoLysoCytosol_BayesFLIM(ptuFile, cfg)
 
     lysoBayesOk = false(lysoRegionCount, 1);
     lysoBayesMessages = cell(lysoRegionCount, 1);
-    lysoBayesPhotons = zeros(lysoRegionCount, 1);
+    lysoBayesPhotons = lysoPhotonCounts(:);
     lysoBayesTau = nan(lysoRegionCount, 2);
     lysoBayesModelSummary = zeros(lysoRegionCount, 3);
     for region = 1:lysoRegionCount
-        if lysoOk(region)
-            seedTau = lysoTau(region, :);
-            seedTauMean = lysoTauMean(region);
-            seedFraction = lysoFraction(region, :);
-        elseif pooledLysoOk
-            seedTau = pooledLysoTau;
-            seedTauMean = pooledLysoTauMean;
-            seedFraction = pooledLysoFraction;
-        else
-            seedTau = globalTau;
-            seedTauMean = globalTauMean;
-            seedFraction = globalFraction;
+        % Do not bypass regional eligibility with a pooled/global seed.
+        if ~lysoOk(region)
+            lysoBayesMessages{region} = lysoMessages{region};
+            continue;
         end
+        seedTau = lysoTau(region, :);
+        seedTauMean = lysoTauMean(region);
+        seedFraction = lysoFraction(region, :);
         regionMask = lysoLabels == region;
         [floatPatch, modelPatch, posteriorPatch, xRange, yRange, ...
             lysoBayesOk(region), lysoBayesMessages{region}, lysoBayesPhotons(region), ...
@@ -243,9 +256,9 @@ function result = PTU_MitoLysoCytosol_BayesFLIM(ptuFile, cfg)
         cytosolSeedMean = cytosolTauMean;
         cytosolSeedFraction = cytosolFraction;
     else
-        cytosolSeedTau = globalTau;
-        cytosolSeedMean = globalTauMean;
-        cytosolSeedFraction = globalFraction;
+        cytosolSeedTau = [NaN NaN];
+        cytosolSeedMean = NaN;
+        cytosolSeedFraction = [NaN NaN];
     end
     [floatPatch, modelPatch, posteriorPatch, xRange, yRange, ...
         cytosolBayesOk, cytosolBayesMessage, cytosolBayesPhotons, ...
