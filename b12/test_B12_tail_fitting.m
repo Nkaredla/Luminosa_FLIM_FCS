@@ -22,6 +22,23 @@ function test_B12_tail_fitting
             assert(ok && isfinite(metrics(6)));
         end
     end
+
+    % Tail mode: 10 is excluded, while 11-499 is fit directly as biexponential
+    % and has no computed one-exponential BIC.
+    tailArgs = args;
+    tailArgs{8} = 11;
+    for photons = [10 11 499]
+        curve = zeros(80, 1);
+        curve(3) = 10000;
+        curve(11:end) = photonHistogram(photons, 70);
+        [ok, order, ~, ~, ~, ~, ~, metrics] = fitRegions(curve, ...
+            'forced tail', tailArgs{:}, 1, true);
+        if photons == 10
+            assert(~ok && order == 0);
+        else
+            assert(ok && order == 2 && isinf(metrics(5)) && isfinite(metrics(6)));
+        end
+    end
     % A bright peak must not admit biexponential fitting of a photon-poor tail.
     for photons = [9 10 499 500]
         curve = zeros(80, 1);

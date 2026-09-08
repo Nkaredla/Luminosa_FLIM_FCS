@@ -20,10 +20,11 @@ pooled organelle fits are diagnostics and do not fill skipped regions.
 
 - `cfg.tailOffsetNs = 1`: retain bins starting at least 1 ns after the peak.
   The offset is rounded up to whole bins (1.024 ns for 0.128 ns bins).
-- `cfg.minPhotonsPerRegionFit = 10`: fewer photons means no exponential fit.
-- `cfg.minPhotonsForTwoExp = 500`: 10–499 photons permits only a single
-  exponential; 500 or more permits the existing one/two-exponential BIC
-  selection. These settings can be raised, but not below the 10/500 floors.
+- `cfg.minPhotonsPerRegionFit = 11`: 10 or fewer retained photons means no fit.
+- `cfg.minPhotonsForTwoExp = 500`: regions with 11–499 retained photons are
+  fit directly with two exponentials. A single-exponential fit is neither run
+  nor selected for this group. At 500 or more photons, the existing one/two-
+  exponential BIC selection is used.
 
 Tail-only eligibility counts photons **after** the cutoff; the main program
 counts the full gated curve. Too few retained time bins also skips the

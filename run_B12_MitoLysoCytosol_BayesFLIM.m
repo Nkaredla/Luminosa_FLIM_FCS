@@ -14,7 +14,10 @@ cfg.b12DetectorIndex = 1;     % Det1
 cfg.cellThresholdScale = 0.85;
 cfg.cellSmoothSigma = 2;
 cfg.cellCloseRadius = 2;
-cfg.cellDilateRadius = 5;
+cfg.cellDilateRadius = 1;
+cfg.cellGrowthFraction = 0.5;  % Lower: include dimmer edges connected to cores.
+cfg.cellBackgroundSigma = 3;  % Higher: reject more background/noise.
+cfg.minCellCoreArea = 10;     % Remove isolated bright seeds (pixels).
 cfg.minCellArea = 650;
 
 % Mitochondrial segmentation from 640 nm / Det2.

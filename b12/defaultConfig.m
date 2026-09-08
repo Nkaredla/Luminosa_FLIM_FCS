@@ -23,8 +23,11 @@ function cfg = defaultConfig(cfg)
     % Multiplies the B12 Otsu threshold. Higher values make the detected
     % cell boundary smaller and stricter; lower values include dimmer edges.
     defaults.cellThresholdScale = 0.85;
-    defaults.cellCloseRadius = 5;
-    defaults.cellDilateRadius = 2;
+    defaults.cellCloseRadius = 2;
+    defaults.cellDilateRadius = 1;
+    defaults.cellGrowthFraction = 0.5;
+    defaults.cellBackgroundSigma = 3;
+    defaults.minCellCoreArea = 10;
     defaults.minCellArea = 150;
 
     defaults.mitoSmoothSigma = 1.0;

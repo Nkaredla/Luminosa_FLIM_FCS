@@ -14,7 +14,10 @@ cfg.b12DetectorIndex = 1;     % Det1
 cfg.cellThresholdScale = 0.85;
 cfg.cellSmoothSigma = 2;
 cfg.cellCloseRadius = 2;
-cfg.cellDilateRadius = 5;
+cfg.cellDilateRadius = 1;
+cfg.cellGrowthFraction = 0.5;  % Lower: include dimmer edges connected to cores.
+cfg.cellBackgroundSigma = 3;  % Higher: reject more background/noise.
+cfg.minCellCoreArea = 10;     % Remove isolated bright seeds (pixels).
 cfg.minCellArea = 650;
 
 % Mitochondrial segmentation from 640 nm / Det2.
@@ -35,8 +38,8 @@ cfg.lysoExcludeMitoRadius = 0;  % Increase to widen mitochondrial exclusion.
 cfg.lifetimeHistogramBins = 20;
 
 % Regional model eligibility (inclusive lower limits).
-cfg.minPhotonsPerRegionFit = 10; % Below 10: no fit.
-cfg.minPhotonsForTwoExp = 500;   % 10-499: single exponential only.
+cfg.minPhotonsPerRegionFit = 11; % 10 or fewer retained photons: no fit.
+cfg.minPhotonsForTwoExp = 500;   % 11-499: forced biexponential tail fit.
 
 cfg.tailOffsetNs = 1; % Fit from each segmented TCSPC peak + 1 ns.
 cfg.showFigures = true;

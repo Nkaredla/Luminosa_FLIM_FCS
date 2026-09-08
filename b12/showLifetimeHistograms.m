@@ -20,15 +20,14 @@ function figureHandle = showLifetimeHistograms(mitoTauNs, mitoModelOrder, ...
     tiledlayout(figureHandle, 1, 2, 'Padding', 'compact', 'TileSpacing', 'compact');
 
     nexttile;
-    histogram(mitoTauNs(validMito1, 1), binEdges, 'FaceColor', component1Colour, ...
+    component1 = histogram(mitoTauNs(validMito1, 1), binEdges, 'FaceColor', component1Colour, ...
         'EdgeColor', component1Colour, 'FaceAlpha', 0.55);
     hold on;
-    histogram(mitoTauNs(validMito2, 2), binEdges, 'FaceColor', component2Colour, ...
+    component2 = histogram(mitoTauNs(validMito2, 2), binEdges, 'FaceColor', component2Colour, ...
         'EdgeColor', component2Colour, 'FaceAlpha', 0.55);
     xlabel('Lifetime (ns)');
     ylabel('Connected-region count');
     title(sprintf('Mitochondria: C1 n=%d, C2 n=%d', nnz(validMito1), nnz(validMito2)));
-    legend('Component 1 (short)', 'Component 2 (long)', 'Location', 'best');
     grid on;
     xlim([lowerBound upperBound]);
 
@@ -41,7 +40,10 @@ function figureHandle = showLifetimeHistograms(mitoTauNs, mitoModelOrder, ...
     xlabel('Lifetime (ns)');
     ylabel('Connected-region count');
     title(sprintf('Lysosomes: C1 n=%d, C2 n=%d', nnz(validLyso1), nnz(validLyso2)));
-    legend('Component 1 (short)', 'Component 2 (long)', 'Location', 'best');
     grid on;
     xlim([lowerBound upperBound]);
+    sharedLegend = legend([component1 component2], ...
+        {'Component 1 (short)', 'Component 2 (long)'}, ...
+        'Orientation', 'horizontal', 'Box', 'off');
+    sharedLegend.Layout.Tile = 'south';
 end

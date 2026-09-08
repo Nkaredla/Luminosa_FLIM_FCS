@@ -3,12 +3,14 @@ function [ok, exponentialCount, tauNs, tauMeanNs, coefficients, ...
         counts, irf, dtNs, maximumExponentials, oneStateSeed, twoStateSeed, ...
         lifetimeBounds, includeBackground, minimumPhotons, maximumIterations, ...
         requiredBicImprovement, minimumSeparationFraction, minimumAmplitudeFraction, ...
-        minimumTwoExpPhotons, tailOffsetNs)
+        minimumTwoExpPhotons, tailOffsetNs, forceTwoExpBelowThreshold)
 %SELECTMODEL Fit one/two exponentials and select the parsimonious BIC model.
 % Optional minimumTwoExpPhotons defaults to 500. Optional tailOffsetNs fits
 % only bins at least that far after this curve's peak, without reconvolution.
 % Eligibility and metrics count only photons in the fitted window. Excluded
 % bins and skipped fits have NaN fitCounts. Hard floors are 10/500 photons.
+% forceTwoExpBelowThreshold directly fits two exponentials for eligible curves
+% below minimumTwoExpPhotons, without calculating a single-exponential fit.
 % metrics = [selected deviance, selected BIC, selected reduced chi-square,
 %            photons, one-exp BIC, two-exp BIC, one-exp chi2, two-exp chi2].
 
@@ -17,6 +19,9 @@ function [ok, exponentialCount, tauNs, tauMeanNs, coefficients, ...
     end
     if nargin < 15
         tailOffsetNs = [];
+    end
+    if nargin < 16 || isempty(forceTwoExpBelowThreshold)
+        forceTwoExpBelowThreshold = false;
     end
     minimumPhotons = max(10, minimumPhotons);
     minimumTwoExpPhotons = max(500, minimumTwoExpPhotons);
@@ -56,6 +61,27 @@ function [ok, exponentialCount, tauNs, tauMeanNs, coefficients, ...
 
     if numel(counts) <= 2 + double(includeBackground)
         message = 'Too few retained TCSPC bins for a single-exponential fit.';
+        return;
+    end
+
+    if forceTwoExpBelowThreshold && photonCount < minimumTwoExpPhotons
+        if maximumExponentials < 2 || ...
+                numel(counts) <= 4 + double(includeBackground)
+            message = 'Too few retained TCSPC bins for a biexponential fit.';
+            return;
+        end
+        [tau2, mean2, coeff2, fraction2, fitted2, deviance2, bic2, chi2] = ...
+            fitFixedOrder(counts, irf, dtNs, 2, oneStateSeed, ...
+            twoStateSeed, lifetimeBounds, includeBackground, maximumIterations);
+        ok = true;
+        exponentialCount = 2;
+        tauNs = tau2;
+        tauMeanNs = mean2;
+        coefficients = coeff2;
+        speciesFraction = fraction2;
+        fitCounts(firstFitBin:end) = fitted2;
+        metrics = [deviance2, bic2, chi2, photonCount, inf, bic2, NaN, chi2];
+        message = '';
         return;
     end
 

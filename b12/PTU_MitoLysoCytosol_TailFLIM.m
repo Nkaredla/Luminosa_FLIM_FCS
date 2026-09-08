@@ -2,8 +2,8 @@ function result = PTU_MitoLysoCytosol_TailFLIM(input, cfg)
 %PTU_MITOLYSOCYTOSOL_TAILFLIM Segment B12 compartments and fit only decay tails.
 % input is a PTU path or an existing result from the main B12 analysis.
 % Each curve is cut independently at its TCSPC peak + cfg.tailOffsetNs (1 ns).
-% Only retained photons count: <10 skips fitting; 10-499 allows one exponential;
-% >=500 allows one/two model selection. No IRF estimation or Bayesian maps run.
+% Only retained photons count: <=10 skips fitting; 11-499 is fit directly
+% with two exponentials; >=500 uses one/two BIC model selection.
 % Fractions/amplitudes describe the retained tail, not the original full decay.
 %
 % result = PTU_MitoLysoCytosol_TailFLIM('D:\data\RawImage.ptu');
@@ -27,6 +27,8 @@ function result = PTU_MitoLysoCytosol_TailFLIM(input, cfg)
         cfg = inherited;
     end
     cfg = defaultConfig(cfg);
+    % The tail-only workflow treats "more than 10" literally.
+    cfg.minPhotonsPerRegionFit = max(cfg.minPhotonsPerRegionFit, 11);
     if ~isfield(cfg, 'tailOffsetNs') || isempty(cfg.tailOffsetNs)
         cfg.tailOffsetNs = 1;
     end
@@ -65,7 +67,8 @@ function result = PTU_MitoLysoCytosol_TailFLIM(input, cfg)
             cfg.tauSeeds1, cfg.tauSeeds2, cfg.tauBoundsNs, ...
             cfg.includeBackground, cfg.minPhotonsPerRegionFit, cfg.fitMaxIter, ...
             cfg.bicImprovementForTwoExp, cfg.minStateSeparationFraction, ...
-            cfg.minStateAmplitudeFraction, cfg.minPhotonsForTwoExp, cfg.tailOffsetNs);
+            cfg.minStateAmplitudeFraction, cfg.minPhotonsForTwoExp, ...
+            cfg.tailOffsetNs, true);
         [~, peakBins] = max(counts, [], 1);
         startBins = min(size(counts, 1) + 1, peakBins + ceil(cfg.tailOffsetNs / dtNs));
         startTimes = (startBins(:) - 0.5) * dtNs;
