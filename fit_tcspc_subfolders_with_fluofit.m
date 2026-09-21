@@ -2562,14 +2562,21 @@ counts = counts(keep);
 irfOnAxis = irfOnAxis(keep);
 end
 
-function rawResolutionSec = getPtuResolutionSec(head)
+function rawResolutionSec = getPtuResolutionSec(head, opts)
 if isfield(head, 'MeasDesc_Resolution') && ~isempty(head.MeasDesc_Resolution)
-    rawResolutionSec = double(head.MeasDesc_Resolution(1));
+    rawResolutionSec = double(head.MeasDesc_Resolution(1)); % seconds
 elseif isfield(head, 'Resolution') && ~isempty(head.Resolution)
-    rawResolutionSec = double(head.Resolution(1)) * 1e-9;
+    rawResolutionSec = double(head.Resolution(1)) * 1e-9; % ns -> seconds
+elseif isfield(head, 'Resolution_ns') && ~isempty(head.Resolution_ns)
+    rawResolutionSec = double(head.Resolution_ns(1)) * 1e-9; % ns -> seconds
+elseif isfield(opts, 'ptuResolutionSec') && ~isempty(opts.ptuResolutionSec)
+    rawResolutionSec = double(opts.ptuResolutionSec); % manual override
 else
-    error('PTU header does not contain MeasDesc_Resolution.');
+    names = fieldnames(head);
+    error('PTU header does not contain TCSPC resolution. Available header fields include: %s', ...
+        strjoin(names(1:min(numel(names), 30)), ', '));
 end
+
 if ~isfinite(rawResolutionSec) || rawResolutionSec <= 0
     error('Invalid PTU TCSPC resolution.');
 end

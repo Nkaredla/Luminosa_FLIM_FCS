@@ -1,8 +1,9 @@
-rootFolder = 'E:\AAA_Chaofan_Rho';
+rootFolder = 'D:\Luminosa\Data\Chaofan';
 outputFolder = []; % root-level batch summary folder is chosen automatically
 
 opts = struct();
 opts.fitMethod = 'tail'; % fast tail fitting: no IRF reconvolution
+opts.detectorChannels = 2; % use only detector channel 2 from PTU_Read for tail fitting
 opts.tailCutAfterPeakNs = 1.0; % start fitting after the TCSPC peak
 opts.tailRejectLastNPoints = 20; % remove final tail bins before Tailfit/DistTailfit
 opts.tailSolver = 'pirls';
