@@ -40,11 +40,18 @@ function out = immune_cell_MIET_profile_figure(heightMapsMat, cfg)
 % smoothAlongPixels along it. Both are printed on the figure, because together
 % they set the lateral resolution of the trace.
 %
-% The average ignores NaNs rather than filling them, so the trace is built only
-% from pixels that actually inverted. That is the opposite choice from the
-% topography rendering, which fills holes to get a continuous surface: a
-% profile is read quantitatively, so an interpolated value in it would be
-% indistinguishable from a measured one.
+% PIXELS WITHOUT A HEIGHT ARE CENSORED, NOT DROPPED
+%
+% A pixel above the calibration ceiling has no height, but it is not missing
+% information: its lifetime says the membrane is at least as high as the
+% ceiling. Dropping it (the old 'omitnan') kept only the downward noise
+% fluctuations in regions near tau_0, so the regions FARTHEST from the metal
+% came out LOWEST. Such pixels now enter the band median as +Inf (and
+% below-floor pixels as -Inf). The median stays exact while fewer than half
+% the band is censored; where more than half is, the trace is not drawn and
+% the cut is marked 'above range' (white triangles at the ceiling) or 'below
+% floor' instead. Pixels with no lifetime at all are still ignored. Map panels
+% use the same white/grey colouring as Luminosa_GUI (MIET_HEIGHT_STATUS_RGB).
 %
 % cfg fields
 %   binning       'sliding4x4'
@@ -96,6 +103,7 @@ function out = immune_cell_MIET_profile_figure(heightMapsMat, cfg)
 
     heightNm = double(stage.heightNm);
     heightNm(~stage.heightMask) = NaN;
+    statusCode = double(stage.statusCode);
     footprint = logical(stage.displayMask);
     if ~any(footprint(:)); footprint = isfinite(heightNm); end
     cd58 = loadCd58(acquisitionDir, size(heightNm));
@@ -103,9 +111,10 @@ function out = immune_cell_MIET_profile_figure(heightMapsMat, cfg)
 
     [rows, cols] = croppedRange(footprint, 6);
     heightCrop = heightNm(rows, cols);
+    statusCrop = statusCode(rows, cols);
     maskCrop = footprint(rows, cols);
     cd58Crop = cd58(rows, cols);
-    if nnz(isfinite(heightCrop) & maskCrop) < 50
+    if nnz((isfinite(heightCrop) | statusCrop >= 2) & maskCrop) < 50
         error('immune_cell_MIET_profile_figure:TooFewPixels', ...
             'Only %d usable height pixels in %s', ...
             nnz(isfinite(heightCrop) & maskCrop), heightMapsMat);
@@ -137,9 +146,12 @@ function out = immune_cell_MIET_profile_figure(heightMapsMat, cfg)
     profile.xUm = xUm;
     profile.yUm = yUm;
     along = max(1, round(cfg.smoothAlongPixels));
-    profile.heightAlongX = smoothAlong(bandMedian(heightCrop(rowBand, :), 1), along);
+    ranked = censoredHeights(heightCrop, statusCrop);
+    profile.heightAlongX = smoothAlong(bandMedian(ranked(rowBand, :), 1), along);
     profile.cd58AlongX = smoothAlong(bandMedian(cd58Crop(rowBand, :), 1), along);
-    profile.heightAlongY = smoothAlong(bandMedian(heightCrop(:, colBand), 2), along);
+    profile.heightAlongY = smoothAlong(bandMedian(ranked(:, colBand), 2), along);
+    profile.ceilingNm = double(heightMaps.calibration.heightNm(end));
+    profile.floorNm = double(heightMaps.calibration.heightNm(1));
     profile.cd58AlongY = smoothAlong(bandMedian(cd58Crop(:, colBand), 2), along);
     profile.smoothAlongPixels = along;
     profile.rowCentre = rowCentre;
@@ -156,14 +168,14 @@ function out = immune_cell_MIET_profile_figure(heightMapsMat, cfg)
 
     out.bandPixels = band;
     out.bandUm = band * pxUm;
-    renderProfiles(heightCrop, cd58Crop, maskCrop, profile, xUm, yUm, ...
+    renderProfiles(heightCrop, statusCrop, cd58Crop, maskCrop, profile, xUm, yUm, ...
         lateralLabel, band, band * pxUm, cfg, heightMaps, acquisition, out.figure);
     fprintf('  %s\n', out.figure);
 end
 
 % ------------------------------------------------------------------ rendering
 
-function renderProfiles(height, cd58, mask, profile, xUm, yUm, lateralLabel, ...
+function renderProfiles(height, status, cd58, mask, profile, xUm, yUm, lateralLabel, ...
         band, bandUm, cfg, heightMaps, acquisition, outputFile)
     fs = cfg.fontSize;
     colourX = [0.30 0.80 1.00];      % cut along x
@@ -179,9 +191,12 @@ function renderProfiles(height, cd58, mask, profile, xUm, yUm, lateralLabel, ...
 
     % ---- the two maps, with the cuts drawn on them -----------------------
     axHeight = axes('Parent', h, 'Position', [0.055 0.60 0.26 0.34]);
-    drawMapWithCuts(axHeight, xUm, yUm, height, ...
-        perceptualColormapOrBuiltin(cfg.colormap), profile, colourX, colourY, ...
-        lateralLabel, 'MIET height [nm]', fs, robustLimits(height, cfg.displayClip));
+    heightMap = perceptualColormapOrBuiltin(cfg.colormap);
+    heightLimits = robustLimits(height, cfg.displayClip);
+    heightRgb = miet_height_status_rgb(height, status, heightLimits, heightMap, ...
+        'Background', [0.92 0.92 0.92]);
+    drawMapWithCuts(axHeight, xUm, yUm, heightRgb, heightMap, profile, ...
+        colourX, colourY, lateralLabel, 'MIET height [nm]', fs, heightLimits);
     axCd58 = axes('Parent', h, 'Position', [0.395 0.60 0.26 0.34]);
     drawMapWithCuts(axCd58, xUm, yUm, cd58, ...
         perceptualColormapOrBuiltin(cfg.cd58Colormap), profile, colourX, ...
@@ -190,9 +205,13 @@ function renderProfiles(height, cd58, mask, profile, xUm, yUm, lateralLabel, ...
     % ---- the profiles ----------------------------------------------------
     ax = axes('Parent', h, 'Position', [0.075 0.09 0.86 0.40]);
     yyaxis(ax, 'left');
-    plot(ax, xUm, profile.heightAlongX, '-', 'Color', colourX, 'LineWidth', 2);
+    plot(ax, xUm, finiteOnly(profile.heightAlongX), '-', 'Color', colourX, 'LineWidth', 2);
     hold(ax, 'on');
-    plot(ax, yUm, profile.heightAlongY, '-', 'Color', colourY, 'LineWidth', 2);
+    plot(ax, yUm, finiteOnly(profile.heightAlongY), '-', 'Color', colourY, 'LineWidth', 2);
+    % Censored stretches: the band median is beyond the calibration, so the
+    % height is only known to be above the ceiling (or below the floor).
+    markCensored(ax, xUm, profile.heightAlongX, profile, colourX);
+    markCensored(ax, yUm, profile.heightAlongY, profile, colourY);
     ylabel(ax, 'MIET height [nm]', 'FontSize', fs + 1);
     set(ax, 'YColor', [0.15 0.15 0.15]);
 
@@ -205,10 +224,18 @@ function renderProfiles(height, cd58, mask, profile, xUm, yUm, lateralLabel, ...
     xlabel(ax, sprintf('distance [%s]', lateralLabel), 'FontSize', fs + 1);
     set(ax, 'FontSize', fs, 'Box', 'off', 'LineWidth', 1.0);
     grid(ax, 'on');
+    % Legend-only entries for the censored markers and the map colouring.
+    yyaxis(ax, 'left');
+    plot(ax, NaN, NaN, '^', 'MarkerFaceColor', [1 1 1], 'MarkerEdgeColor', [0.3 0.3 0.3]);
+    plot(ax, NaN, NaN, 'v', 'MarkerFaceColor', [0.5 0.5 0.5], 'MarkerEdgeColor', [0.3 0.3 0.3]);
+    % yyaxis legends list every left-axis line before the right-axis ones.
     legend(ax, { sprintf('height, cut along x (y = %.2f)', profile.cutYUm), ...
                  sprintf('height, cut along y (x = %.2f)', profile.cutXUm), ...
+                 sprintf('above calibration (>%.0f nm), white on map', profile.ceilingNm), ...
+                 'below calibration floor, grey on map', ...
                  'CD58, cut along x', 'CD58, cut along y' }, ...
-        'Location', 'northoutside', 'Orientation', 'horizontal', ...
+        'NumColumns', 3, ...
+        'Location', 'northoutside', ...
         'FontSize', fs - 1, 'Box', 'off');
 
     calib = heightMaps.calibration;
@@ -229,8 +256,13 @@ end
 
 function drawMapWithCuts(ax, xUm, yUm, data, map, profile, colourX, colourY, ...
         lateralLabel, barLabel, fs, limits)
-    handle = imagesc(ax, [min(xUm) max(xUm)], [min(yUm) max(yUm)], data);
-    set(handle, 'AlphaData', isfinite(data));
+% data is a scalar map (NaN transparent) or an already-coloured RGB image.
+    if ndims(data) == 3
+        image(ax, [min(xUm) max(xUm)], [min(yUm) max(yUm)], data);
+    else
+        handle = imagesc(ax, [min(xUm) max(xUm)], [min(yUm) max(yUm)], data);
+        set(handle, 'AlphaData', isfinite(data));
+    end
     colormap(ax, map);
     if all(isfinite(limits)) && limits(2) > limits(1)
         caxis(ax, limits); %#ok<CAXIS>
@@ -252,8 +284,37 @@ end
 
 % ------------------------------------------------------------------- helpers
 
+function ranked = censoredHeights(height, status)
+% Out-of-range pixels keep their ORDER: above the ceiling ranks above every
+% height, below the floor below every height. NaN is left only for pixels with
+% no lifetime at all.
+    ranked = height;
+    ranked(status == 3) = Inf;
+    ranked(status == 2) = -Inf;
+end
+
+function values = finiteOnly(values)
+    values(~isfinite(values)) = NaN;
+end
+
+function markCensored(ax, distance, values, profile, colour)
+    above = isinf(values) & values > 0;
+    below = isinf(values) & values < 0;
+    if any(above)
+        plot(ax, distance(above), profile.ceilingNm * ones(1, nnz(above)), '^', ...
+            'MarkerSize', 4, 'MarkerFaceColor', [1 1 1], 'MarkerEdgeColor', colour, ...
+            'HandleVisibility', 'off');
+    end
+    if any(below)
+        plot(ax, distance(below), profile.floorNm * ones(1, nnz(below)), 'v', ...
+            'MarkerSize', 4, 'MarkerFaceColor', [0.5 0.5 0.5], 'MarkerEdgeColor', colour, ...
+            'HandleVisibility', 'off');
+    end
+end
+
 function values = bandMedian(block, dimension)
-% Median across the band, ignoring the NaNs that mark pixels with no height.
+% Median across the band. Censored pixels are +/-Inf (see censoredHeights);
+% NaN marks pixels with no lifetime and is ignored.
     values = median(block, dimension, 'omitnan');
     values = values(:).';
 end

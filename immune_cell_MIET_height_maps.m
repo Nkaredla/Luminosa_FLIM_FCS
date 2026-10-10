@@ -283,8 +283,17 @@ function writeHeightFigure(stage, calibration, tauSlbNs, outputFile, cfg)
     h = figure('Color', 'w', 'Visible', visibility, 'Position', [50 50 1560 900]);
     layout = tiledlayout(h, 2, 3, 'Padding', 'compact', 'TileSpacing', 'compact');
 
-    showPanel(nexttile(layout), height, perceptualColormap(cfg.colormap), ...
-        heightLimits, 'MIET height', 'height [nm]');
+    % Height panel through the shared colouring (same as Luminosa_GUI): pixels
+    % above the ceiling are white, below the floor grey. Drawn as NaN they
+    % looked like the dark low end of the map, i.e. like close contact.
+    style = miet_out_of_range_style();
+    heightMap = perceptualColormap(cfg.colormap);
+    ax = nexttile(layout);
+    heightRgb = miet_height_status_rgb(height, stage.statusCode, heightLimits, ...
+        heightMap, 'Background', [0.15 0.15 0.15]);
+    showPanel(ax, heightRgb, heightMap, heightLimits, ...
+        {'MIET height', sprintf('white: >%.0f nm (beyond MIET range)', ...
+        calibration.heightNm(end)), 'grey: below calibration floor'}, 'height [nm]');
     showPanel(nexttile(layout), heightStd, perceptualColormap('magma'), ...
         stdLimits, 'propagated height uncertainty', '\sigma_z [nm]');
     showPanel(nexttile(layout), correction, perceptualColormap('coolwarm'), ...
@@ -296,7 +305,7 @@ function writeHeightFigure(stage, calibration, tauSlbNs, outputFile, cfg)
     status = double(stage.statusCode);
     status(status == 0) = NaN;
     ax = nexttile(layout);
-    showPanel(ax, status, [0.16 0.44 0.71; 0.85 0.37 0.01; 0.55 0.13 0.42], ...
+    showPanel(ax, status, [0.16 0.44 0.71; style.belowColour; style.aboveColour], ...
         [0.5 3.5], 'inversion status', '');
     colorbar(ax, 'Ticks', 1:3, 'TickLabels', ...
         {'inverted', 'below floor', 'above ceiling'});
@@ -328,13 +337,18 @@ function writeHeightFigure(stage, calibration, tauSlbNs, outputFile, cfg)
 end
 
 function showPanel(ax, data, map, limits, titleText, barLabel)
-    handle = imagesc(ax, data);
-    set(handle, 'AlphaData', isfinite(data));
+% data is a scalar map (NaN transparent) or an already-coloured RGB image.
+    if ndims(data) == 3
+        image(ax, data);
+    else
+        handle = imagesc(ax, data);
+        set(handle, 'AlphaData', isfinite(data));
+    end
     colormap(ax, map);
     if all(isfinite(limits)) && limits(2) > limits(1)
         caxis(ax, limits); %#ok<CAXIS>
     end
-    [nRow, nCol] = size(data);
+    [nRow, nCol, ~] = size(data);
     axis(ax, 'image');
     set(ax, 'PlotBoxAspectRatio', [nCol nRow 1]);
     set(ax, 'XTick', [], 'YTick', [], 'Color', [0.15 0.15 0.15]);

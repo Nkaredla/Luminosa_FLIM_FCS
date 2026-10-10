@@ -2453,8 +2453,9 @@ function Luminosa_GUI
             if isfield(results(idx), 'lifetimeNs')
                 lifetimeMap = results(idx).lifetimeNs;
             end
-            heightMap = lifetimeMapToHeightMap(lifetimeMap, calibLifetimeNs, calibHeightNm);
+            [heightMap, statusMap] = lifetimeMapToHeightMap(lifetimeMap, calibLifetimeNs, calibHeightNm);
             results(idx).heightNm = heightMap;
+            results(idx).heightStatus = statusMap;
             results(idx).heightLabel = 'MIET height (nm)';
             results(idx).calibrationLabel = calibMeta.label;
             results(idx).calibrationFile = calibMeta.file;
@@ -2653,6 +2654,13 @@ function Luminosa_GUI
             if ~isempty(hVals)
                 lines{end+1} = sprintf('Height range (nm): %.3f .. %.3f', min(hVals), max(hVals));
             end
+            if isfield(entry, 'heightStatus') && ~isempty(entry.heightStatus)
+                nLife = nnz(entry.heightStatus > 0);
+                lines{end+1} = sprintf('Above calibration ceiling (white): %.1f%% of pixels', ...
+                    100 * nnz(entry.heightStatus == 3) / max(nLife, 1));
+                lines{end+1} = sprintf('Below calibration floor (grey): %.1f%% of pixels', ...
+                    100 * nnz(entry.heightStatus == 2) / max(nLife, 1));
+            end
         end
 
         if isfield(entry, 'processingLabel') && ~isempty(entry.processingLabel)
@@ -2691,11 +2699,22 @@ function Luminosa_GUI
             return;
         end
 
-        showMietScalarMap(mapData, intensityMap, titleStr, modeName);
+        statusMap = [];
+        if strcmp(modeName, 'height')
+            entries = getActiveMietEntries();
+            entry = entries(currentMietEntryIndex());
+            if isfield(entry, 'heightStatus')
+                statusMap = entry.heightStatus;
+            end
+        end
+        showMietScalarMap(mapData, intensityMap, titleStr, modeName, statusMap);
         setMietInfoLines(buildMietInfoLines());
     end
 
-    function showMietScalarMap(mapData, intensityMap, titleStr, modeName)
+    function showMietScalarMap(mapData, intensityMap, titleStr, modeName, statusMap)
+        if nargin < 5 || ~isequal(size(statusMap), size(mapData))
+            statusMap = [];
+        end
         if isempty(app.axMIET) || ~isvalid(app.axMIET) || isempty(mapData)
             return;
         end
@@ -2714,14 +2733,33 @@ function Luminosa_GUI
 
         if nargin >= 2 && ~isempty(intensityMap) && isequal(size(intensityMap), size(mapData))
             bright = applyGamma(double(intensityMap), app.gamma);
-            rgb = flim_rgb(mapData, bright, valueRange, cmap);
+            if strcmp(modeName, 'height')
+                % Shared with the batch figures: beyond-ceiling (lifetime near
+                % free space, i.e. FAR from the surface) is white, below-floor
+                % grey; a missing height never borrows a colour from the scale.
+                bright = max(min(bright, 1), 0);
+                rgb = miet_height_status_rgb(mapData, statusMap, valueRange, cmap, ...
+                    'Intensity', bright);
+            else
+                rgb = flim_rgb(mapData, bright, valueRange, cmap);
+            end
             image(app.axMIET, rgb);
             axis(app.axMIET, 'image');
             axis(app.axMIET, 'off');
-        else
-            imagesc(app.axMIET, mapData);
+        elseif strcmp(modeName, 'height')
+            image(app.axMIET, miet_height_status_rgb(mapData, statusMap, valueRange, cmap));
             axis(app.axMIET, 'image');
             axis(app.axMIET, 'on');
+        else
+            hImg = imagesc(app.axMIET, mapData);
+            set(hImg, 'AlphaData', isfinite(mapData));
+            set(app.axMIET, 'Color', [0 0 0]);
+            axis(app.axMIET, 'image');
+            axis(app.axMIET, 'on');
+        end
+        if ~isempty(statusMap) && any(statusMap(:) >= 2)
+            titleStr = sprintf('%s  (white: above calibration, >%s nm; grey: below floor)', ...
+                titleStr, mietCeilingText());
         end
         colormap(app.axMIET, cmap);
         caxis(app.axMIET, valueRange);
@@ -2988,8 +3026,13 @@ function Luminosa_GUI
         meta.lifetimeRangeNs = [min(lifetimeNs) max(lifetimeNs)];
     end
 
-    function heightMap = lifetimeMapToHeightMap(lifetimeMap, calibLifetimeNs, calibHeightNm)
+    function [heightMap, statusMap] = lifetimeMapToHeightMap(lifetimeMap, calibLifetimeNs, calibHeightNm)
+        % statusMap: 0 no lifetime, 1 inverted, 2 below the calibration floor
+        % (more quenched than the curve allows), 3 above its ceiling (beyond
+        % MIET range). Pixels with status 2/3 have no height and must not be
+        % drawn with a colour from the height scale.
         heightMap = [];
+        statusMap = [];
         if isempty(lifetimeMap)
             return;
         end
@@ -2997,6 +3040,10 @@ function Luminosa_GUI
         lifetimeMap = double(lifetimeMap);
         heightMap = nan(size(lifetimeMap), 'double');
         valid = isfinite(lifetimeMap);
+        statusMap = zeros(size(lifetimeMap), 'uint8');
+        statusMap(valid & lifetimeMap < min(calibLifetimeNs)) = 2;
+        statusMap(valid & lifetimeMap > max(calibLifetimeNs)) = 3;
+        statusMap(valid & statusMap == 0) = 1;
         if ~any(valid(:))
             return;
         end
@@ -6319,16 +6366,35 @@ function Luminosa_GUI
         if tmax <= tmin
             tmax = tmin + eps;
         end
+        % min/max silently replace NaN by the bound, which would paint every
+        % NaN pixel with the lowest colour of the map; keep NaN black instead.
+        missing = ~isfinite(tau);
         tau = min(max(tau, tmin), tmax);
         tnorm = (tau - tmin) / (tmax - tmin);
         idx = 1 + tnorm * (size(cmap,1) - 1);
 
         rgb = zeros([size(tau) 3]);
         for c = 1:3
-            rgb(:,:,c) = interp1(1:size(cmap,1), cmap(:,c), idx, 'linear', 'extrap') .* inten;
+            channel = interp1(1:size(cmap,1), cmap(:,c), idx, 'linear', 'extrap') .* inten;
+            channel(missing) = 0;
+            rgb(:,:,c) = channel;
         end
         rgb = max(min(rgb, 1), 0);
     end
+
+    function txt = mietCeilingText()
+        txt = '?';
+        entries = getActiveMietEntries();
+        idx = currentMietEntryIndex();
+        if isempty(entries) || isempty(idx)
+            return;
+        end
+        entry = entries(idx);
+        if isfield(entry, 'calibrationHeightRangeNm') && numel(entry.calibrationHeightRangeNm) == 2
+            txt = sprintf('%.0f', entry.calibrationHeightRangeNm(2));
+        end
+    end
+
 end
 
 function fitAll = fitWholeDecayModelSweep(countsRawFull, dtNs, irf, maxExp, includeBG)

@@ -32,6 +32,16 @@ function out = immune_cell_MIET_topography_figure(heightMapsMat, cfg)
 % the figure, the fill NEVER leaves this function, and nothing quantitative is
 % taken from the rendered array.
 %
+% ONLY TRUE HOLES ARE FILLED; OUT-OF-RANGE PIXELS ARE SHOWN AS SUCH
+%
+% A pixel above the calibration ceiling is not a hole: its lifetime says the
+% membrane is at least as high as the ceiling. Filling it from its neighbours
+% pulled the regions farthest from the metal DOWN to the level of their
+% lower-lying edges. Such pixels are now placed AT the ceiling (a lower bound)
+% and coloured white, and below-floor pixels sit at the floor in grey - the
+% same colouring as Luminosa_GUI and the other batch figures
+% (MIET_HEIGHT_STATUS_RGB). Only pixels with no lifetime are diffusion-filled.
+%
 % cfg fields
 %   binning         'sliding4x4'
 %   colormaps       {'turbo','parula','copper'}
@@ -102,6 +112,7 @@ function out = immune_cell_MIET_topography_figure(heightMapsMat, cfg)
 
     heightNm = double(stage.heightNm);
     heightNm(~stage.heightMask) = NaN;
+    statusCode = double(stage.statusCode);
     footprint = logical(stage.displayMask);
     if ~any(footprint(:)); footprint = isfinite(heightNm); end
 
@@ -120,6 +131,11 @@ function out = immune_cell_MIET_topography_figure(heightMapsMat, cfg)
     [rows, cols] = croppedRange(footprint, 6);
     heightCrop = heightNm(rows, cols);
     maskCrop = footprint(rows, cols);
+    statusCrop = statusCode(rows, cols);
+    ceilingNm = double(heightMaps.calibration.heightNm(end));
+    floorNm = double(heightMaps.calibration.heightNm(1));
+    above = statusCrop == 3 & maskCrop;
+    below = statusCrop == 2 & maskCrop;
     cd58Crop = cd58(rows, cols);
     membraneCrop = membrane(rows, cols);
 
@@ -128,9 +144,19 @@ function out = immune_cell_MIET_topography_figure(heightMapsMat, cfg)
         error('immune_cell_MIET_topography_figure:TooFewPixels', ...
             'Only %d usable height pixels in %s', nnz(valid), heightMapsMat);
     end
-    filledFraction = 1 - nnz(valid) / max(nnz(maskCrop), 1);
-    rendered = fillAndSmooth(heightCrop, valid, maskCrop, cfg.smoothPixels);
+    aboveFraction = nnz(above) / max(nnz(maskCrop), 1);
+    belowFraction = nnz(below) / max(nnz(maskCrop), 1);
+    % Out-of-range pixels are bounds, not holes: place them at the ceiling /
+    % floor so the fill cannot drag them toward their neighbours.
+    known = valid | above | below;
+    bounded = heightCrop;
+    bounded(above) = ceilingNm;
+    bounded(below) = floorNm;
+    filledFraction = 1 - nnz(known) / max(nnz(maskCrop), 1);
+    rendered = fillAndSmooth(bounded, known, maskCrop, cfg.smoothPixels);
     measured = double(valid);
+    aboveMap = blockMean(double(above), cfg.renderDownsample);
+    belowMap = blockMean(double(below), cfg.renderDownsample);
     [rendered, maskCrop, cd58Crop, measured, pixelScale] = ...
         downsampleForRender(rendered, maskCrop, cd58Crop, measured, ...
         cfg.renderDownsample);
@@ -138,7 +164,7 @@ function out = immune_cell_MIET_topography_figure(heightMapsMat, cfg)
     cfg.pixelSizeUm = cfg.pixelSizeUm * pixelScale;
     if filledFraction > 0.5
         warning('immune_cell_MIET_topography_figure:MostlyFilled', ...
-            ['%s: only %.0f%% of the footprint was inverted, so most of the ' ...
+            ['%s: only %.0f%% of the footprint has a lifetime, so most of the ' ...
              'rendered surface is interpolated. The figure marks it, but read ' ...
              'the shape with care.'], acquisition, 100 * (1 - filledFraction));
     end
@@ -152,6 +178,9 @@ function out = immune_cell_MIET_topography_figure(heightMapsMat, cfg)
     out.acquisition = acquisition;
     out.binning = cfg.binning;
     out.filledFraction = filledFraction;
+    out.aboveCeilingFraction = aboveFraction;
+    out.belowFloorFraction = belowFraction;
+    out.ceilingNm = ceilingNm;
     out.heightLimitsNm = limits;
     out.medianHeightNm = median(heightCrop(valid));
     out.figures = {};
@@ -160,8 +189,8 @@ function out = immune_cell_MIET_topography_figure(heightMapsMat, cfg)
         name = cfg.colormaps{index};
         file = fullfile(cfg.outputDir, sprintf('%s_%s.png', cfg.namePrefix, name));
         renderOne(rendered, maskCrop, cd58Crop, membraneCrop, measured, ...
-            limits, name, cfg, heightMaps, stage, acquisition, ...
-            filledFraction, file);
+            aboveMap, belowMap, limits, name, cfg, heightMaps, stage, acquisition, ...
+            [filledFraction aboveFraction belowFraction], file);
         out.figures{end + 1} = file; %#ok<AGROW>
         fprintf('  %s\n', file);
     end
@@ -169,8 +198,9 @@ end
 
 % ------------------------------------------------------------------ rendering
 
-function renderOne(height, mask, cd58, membrane, measured, limits, mapName, ...
-        cfg, heightMaps, stage, acquisition, filledFraction, outputFile)
+function renderOne(height, mask, cd58, membrane, measured, aboveMap, belowMap, ...
+        limits, mapName, cfg, heightMaps, stage, acquisition, fractions, outputFile)
+    filledFraction = fractions(1);
     height(~mask) = NaN;
     [nRow, nCol] = size(height);
     fs = cfg.fontSize;
@@ -188,7 +218,8 @@ function renderOne(height, mask, cd58, membrane, measured, limits, mapName, ...
     ySpan = max(max(yUm) - min(yUm), eps);
 
     zRange = max(limits(2) - limits(1), eps);
-    zTop = limits(2) + 0.08 * zRange;
+    % The ceiling plateau may lie above the colour range; keep it in view.
+    zTop = max(limits(2), max(height(:), [], 'omitnan')) + 0.08 * zRange;
     layerZ = sort(double(cfg.layerZ), 'descend');
     wantedLayers = 2 + double(cfg.showMembraneLayer);
     if numel(layerZ) < wantedLayers
@@ -235,7 +266,8 @@ function renderOne(height, mask, cd58, membrane, measured, limits, mapName, ...
     % Order matters and is the caller's: directly under the surface sits the
     % SAME height data as a flat projection, so the 3D relief and its map can
     % be read against each other, and the 485 nm CD58 image goes underneath.
-    heightRgb = heightProjectionRgb(height, mask, limits, mapName);
+    heightRgb = paintOutOfRange(heightProjectionRgb(height, mask, limits, mapName), ...
+        aboveMap, belowMap, mask);
     layerRgb = { heightRgb, toRgb(cd58, cfg.cd58Colormap, [0.02 0.99]) };
     layerName = { 'MIET height, 2D projection', 'CD58-Atto488, 485 nm' };
     if cfg.showMembraneLayer
@@ -267,7 +299,8 @@ function renderOne(height, mask, cd58, membrane, measured, limits, mapName, ...
     end
 
     % ---- membrane topography --------------------------------------------
-    faceRgb = desaturateFilled(height, measured, mask, limits, mapName);
+    faceRgb = paintOutOfRange(desaturateFilled(height, measured, mask, limits, mapName), ...
+        aboveMap, belowMap, mask);
     surf(ax, X, Y, height, faceRgb, 'EdgeColor', 'none', 'FaceColor', 'interp', ...
         'FaceLighting', 'gouraud', 'BackFaceLighting', 'unlit', ...
         'AmbientStrength', 0.45, 'DiffuseStrength', 0.75, ...
@@ -312,10 +345,12 @@ function renderOne(height, mask, cd58, membrane, measured, limits, mapName, ...
         'Interpreter', 'none', 'HorizontalAlignment', 'center', ...
         'VerticalAlignment', 'top');
     annotation(h, 'textbox', [0.02 0.885 0.96 0.045], 'Color', [0.78 0.78 0.78], ...
-        'String', sprintf(['%s  |  median %.1f nm  |  z x%.0f  |  %.0f%% ' ...
-            'inverted, rest interpolated  |  tau_0 %.2f ns, qy %.3f'], ...
-            prettyBinning(cfg.binning), median(height(isfinite(height))), ...
-            zExagFactor, 100 * (1 - filledFraction), ...
+        'String', sprintf(['%s  |  median %s  |  z x%.0f  |  white: %.0f%% ' ...
+            'above calibration (>%.0f nm, shown at it)  |  grey: %.0f%% below floor  |  ' ...
+            '%.0f%% interpolated  |  tau_0 %.2f ns, qy %.3f'], ...
+            prettyBinning(cfg.binning), censoredMedianText(height, fractions(2)), ...
+            zExagFactor, 100 * fractions(2), double(heightMaps.calibration.heightNm(end)), ...
+            100 * fractions(3), 100 * filledFraction, ...
             calibField(calib, 'tauFreeNs'), calibField(calib, 'quantumYield')), ...
         'EdgeColor', 'none', 'FontSize', fs, 'Interpreter', 'none', ...
         'HorizontalAlignment', 'center', 'VerticalAlignment', 'top');
@@ -395,6 +430,31 @@ function rgb = desaturateFilled(height, measured, mask, limits, mapName)
     weight(~mask) = 1;
     neutral = 0.38;
     rgb = rgb .* weight + neutral * (1 - weight);
+end
+
+function text = censoredMedianText(height, aboveFraction)
+% Above-ceiling pixels sit AT the ceiling in the rendered array. That leaves
+% the median exact while fewer than half are censored; beyond that the median
+% itself is above the calibration and has no number.
+    if aboveFraction >= 0.5
+        text = '> calibration ceiling';
+    else
+        text = sprintf('%.1f nm', median(height(isfinite(height))));
+    end
+end
+
+function rgb = paintOutOfRange(rgb, aboveMap, belowMap, mask)
+% Blend toward the shared out-of-range colours by the fraction of each render
+% block that was above the ceiling / below the floor, so a block made mostly of
+% out-of-range pixels reads as such even after downsampling.
+    style = miet_out_of_range_style();
+    if ~isequal(size(aboveMap), [size(rgb, 1) size(rgb, 2)]); return; end
+    a = min(max(aboveMap, 0), 1); a(~mask) = 0;
+    b = min(max(belowMap, 0), 1); b(~mask) = 0;
+    for c = 1:3
+        rgb(:, :, c) = rgb(:, :, c) .* (1 - a - b) + ...
+            style.aboveColour(c) * a + style.belowColour(c) * b;
+    end
 end
 
 function rgb = toRgb(image, mapName, clipQuantiles)
