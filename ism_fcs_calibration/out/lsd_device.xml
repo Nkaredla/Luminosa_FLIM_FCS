@@ -1,0 +1,277 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PQAutomationValues Version="1.0">
+  <Device Name="SCM" DBDeviceName="Sepia2">
+    <Field DBFieldName="SoftLock" Value="False"/>
+    <Field DBFieldName="Locked" Value="False"/>
+  </Device>
+  <Device Name="SOMD" DBDeviceName="Sepia2">
+    <Field DBFieldName="Frequency" Value="40000000"/>
+    <Field DBFieldName="Mode" Value="1"/>
+    <Field DBFieldName="AlexPeriod" Value="1000"/>
+    <Field DBFieldName="ExternLevel" Value="-100"/>
+    <Field DBFieldName="ExternSync" Value="False"/>
+    <Field DBFieldName="Synchronized" Value="False"/>
+  </Device>
+  <Device Name="LaserHead1" DBDeviceName="Sepia2" Model="LDH-D-C-405S" Wavelength="405">
+    <Field DBFieldName="Intensity1" Value="80" ValueString="0.00 µW"/>
+    <Field DBFieldName="CW1" Value="False"/>
+    <Field DBFieldName="OutputEnabled1" Value="False"/>
+    <Field DBFieldName="OffsetCoarse1" Value="0"/>
+  </Device>
+  <Device Name="Attenuator1" DBDeviceName="Attenuator_1">
+    <Field DBFieldName="Position" Value="41"/>
+  </Device>
+  <Device Name="LaserHead2" DBDeviceName="Sepia2" Model="LDH-D-C-485S" Wavelength="485">
+    <Field DBFieldName="Intensity2" Value="55" ValueString="0.00 µW"/>
+    <Field DBFieldName="CW2" Value="False"/>
+    <Field DBFieldName="OutputEnabled2" Value="False"/>
+    <Field DBFieldName="OffsetCoarse2" Value="-1"/>
+  </Device>
+  <Device Name="Attenuator2" DBDeviceName="Attenuator_2">
+    <Field DBFieldName="Position" Value="61"/>
+  </Device>
+  <Device Name="LaserHead3" DBDeviceName="Sepia2" Model="LDH-P-FA-560" Wavelength="560">
+    <Field DBFieldName="Intensity3" Value="100" ValueString="0.00 µW"/>
+    <Field DBFieldName="CW3" Value="False"/>
+    <Field DBFieldName="OutputEnabled3" Value="False"/>
+    <Field DBFieldName="OffsetCoarse3" Value="-121"/>
+  </Device>
+  <Device Name="Attenuator3" DBDeviceName="Attenuator_3">
+    <Field DBFieldName="Position" Value="63"/>
+  </Device>
+  <Device Name="LaserHead4" DBDeviceName="Sepia2" Model="LDH-D-C-640S" Wavelength="640">
+    <Field DBFieldName="Intensity4" Value="100" ValueString="NAN µW"/>
+    <Field DBFieldName="CW4" Value="False"/>
+    <Field DBFieldName="OutputEnabled4" Value="True"/>
+    <Field DBFieldName="OffsetCoarse4" Value="0"/>
+  </Device>
+  <Device Name="Attenuator4" DBDeviceName="Attenuator_4">
+    <Field DBFieldName="Position" Value="100"/>
+  </Device>
+  <Device Name="AttenuatorLCU1" DBDeviceName="Attenuator_M1">
+    <Field DBFieldName="Position" Value="100"/>
+  </Device>
+  <Device Name="Shutter1" DBDeviceName="Shutter_1">
+    <Field DBFieldName="State" Value="True"/>
+  </Device>
+  <Device Name="BeamDisplacer1" DBDeviceName="BeamAlign_1">
+    <Field DBFieldName="Position_3" Value="58.7000007629395"/>
+    <Field DBFieldName="Position_2" Value="46.9000015258789"/>
+  </Device>
+  <Device Name="TiltMirror1" DBDeviceName="BeamAlign_1">
+    <Field DBFieldName="Position_1" Value="3439"/>
+    <Field DBFieldName="Position_0" Value="3630"/>
+  </Device>
+  <Device Name="FilterWheelFocusCam" DBDeviceName="ODFilterWheel">
+    <Field DBFieldName="Position" Value="2" ValueString="OD2"/>
+  </Device>
+  <Device Name="PolController" DBDeviceName="PolController">
+    <Field DBFieldName="PositionSteps_0" Value="1626"/>
+    <Field DBFieldName="PositionSteps_1" Value="1486"/>
+    <Field DBFieldName="Position_0" Value="182.925003051758"/>
+    <Field DBFieldName="Position_1" Value="167.175003051758"/>
+    <Field DBFieldName="Position_Def" Value="2" ValueString="Circular"/>
+  </Device>
+  <Device Name="MajorDichroic" DBDeviceName="MajorDichroic">
+    <Field DBFieldName="Position_1" Value="0" ValueString="QB405/485/560/640"/>
+  </Device>
+  <Device Name="SlipMirrorCalibCam" DBDeviceName="SlipMirrors">
+    <Field DBFieldName="Position_0" Value="1" ValueString="Out"/>
+  </Device>
+  <Device Name="PowerDiode" DBDeviceName="PowerSensor">
+    <Field DBFieldName="UpdateRate" Value="1000"/>
+    <Field DBFieldName="Value" Value="2307"/>
+  </Device>
+  <Device Name="SlipMirrorFlimBee" DBDeviceName="SlipMirrors">
+    <Field DBFieldName="Position_1" Value="0" ValueString="In"/>
+  </Device>
+  <Device Name="TubeLens" DBDeviceName="TubeLens">
+    <Field DBFieldName="Position" Value="6.30000019073486"/>
+    <Field DBFieldName="OptimalPosition" Value="6.30000019073486"/>
+  </Device>
+  <Device Name="Pinhole" DBDeviceName="Pinhole_LED">
+    <Field DBFieldName="Position" Value="2781" ValueString="500.01 µm"/>
+    <Field DBFieldName="LockPinhole" Value="False"/>
+  </Device>
+  <Device Name="PinholeLED" DBDeviceName="Pinhole_LED">
+    <Field DBFieldName="LEDIsInPath" Value="False"/>
+    <Field DBFieldName="LEDBrightness" Value="0"/>
+  </Device>
+  <Device Name="FilterWheelDet1" DBDeviceName="EmissionFilter_1">
+    <Field DBFieldName="Position" Value="0" ValueString="Empty"/>
+  </Device>
+  <Device Name="Detector1" DBDeviceName="PMAHDetector_1">
+    <Field DBFieldName="DetectorState" Value="False"/>
+    <Field DBFieldName="ShutterState" Value="0"/>
+    <Field DBFieldName="OperationStatus" Value="True"/>
+    <Field DBFieldName="Countrate" Value="0"/>
+    <Field DBFieldName="OverloadError" Value="False"/>
+    <Field DBFieldName="ResetOverloadError" Value="False"/>
+    <Field DBFieldName="OverloadCounter" Value="16"/>
+  </Device>
+  <Device Name="FilterWheelDet2" DBDeviceName="EmissionFilter_2">
+    <Field DBFieldName="Position" Value="2" ValueString="BP690/70"/>
+  </Device>
+  <Device Name="Detector2" DBDeviceName="SPADDetectors_1">
+    <Field DBFieldName="State_1" Value="False"/>
+    <Field DBFieldName="OperationStatus" Value="True"/>
+    <Field DBFieldName="Countrate_1" Value="0"/>
+    <Field DBFieldName="OverloadError_1" Value="False"/>
+    <Field DBFieldName="ResetOverloadError_1" Value="False"/>
+    <Field DBFieldName="OverloadCounter_1" Value="28"/>
+  </Device>
+  <Device Name="DichroicDetGroup1" DBDeviceName="Beamsplitter_1_2">
+    <Field DBFieldName="Position_1" Value="0" ValueString="Empty"/>
+  </Device>
+  <Device Name="FilterWheelDet3" DBDeviceName="EmissionFilter_3">
+    <Field DBFieldName="Position" Value="0" ValueString="Empty"/>
+  </Device>
+  <Device Name="Detector3" DBDeviceName="PMAHDetector_3">
+    <Field DBFieldName="DetectorState" Value="False"/>
+    <Field DBFieldName="ShutterState" Value="0"/>
+    <Field DBFieldName="OperationStatus" Value="True"/>
+    <Field DBFieldName="Countrate" Value="0"/>
+    <Field DBFieldName="OverloadError" Value="False"/>
+    <Field DBFieldName="ResetOverloadError" Value="False"/>
+    <Field DBFieldName="OverloadCounter" Value="14"/>
+  </Device>
+  <Device Name="FilterWheelDet4" DBDeviceName="EmissionFilter_4">
+    <Field DBFieldName="Position" Value="2" ValueString="BP690/70"/>
+  </Device>
+  <Device Name="Detector4" DBDeviceName="SPADDetectors_2">
+    <Field DBFieldName="State_1" Value="False"/>
+    <Field DBFieldName="OperationStatus" Value="True"/>
+    <Field DBFieldName="Countrate_1" Value="0"/>
+    <Field DBFieldName="OverloadError_1" Value="False"/>
+    <Field DBFieldName="ResetOverloadError_1" Value="False"/>
+    <Field DBFieldName="OverloadCounter_1" Value="4"/>
+  </Device>
+  <Device Name="DichroicDetGroup2" DBDeviceName="Beamsplitter_3_4">
+    <Field DBFieldName="Position_1" Value="5" ValueString="Empty"/>
+  </Device>
+  <Device Name="FilterWheelDet6" DBDeviceName="EmissionFilter_6">
+    <Field DBFieldName="Position" Value="5" ValueString="BP690/70"/>
+  </Device>
+  <Device Name="LensISM" DBDeviceName="LensISM">
+    <Field DBFieldName="Position" Value="0" ValueString="f = 45 mm"/>
+  </Device>
+  <Device Name="Detector6" DBDeviceName="SPAD23Array">
+    <Field DBFieldName="DetectorState" Value="True"/>
+    <Field DBFieldName="OperationStatus" Value="True"/>
+    <Field DBFieldName="OverloadError" Value="False"/>
+    <Field DBFieldName="ResetOverloadError" Value="False"/>
+    <Field DBFieldName="OverloadCounter" Value="0"/>
+    <Field DBFieldName="SensorTempSetpoint" Value="283"/>
+    <Field DBFieldName="HousingTemp" Value="293"/>
+    <Field DBFieldName="SensorTempDefault" Value="283"/>
+    <Field DBFieldName="FirstTCSPCChan" Value="10"/>
+  </Device>
+  <Device Name="TiltMirrorISM" DBDeviceName="ISMMotorisedMirrors">
+    <Field DBFieldName="Position_1" Value="3470"/>
+    <Field DBFieldName="Position_0" Value="3424"/>
+  </Device>
+  <Device Name="DichroicDetGroup3" DBDeviceName="Beamsplitter_5_6">
+    <Field DBFieldName="Position_1" Value="0" ValueString="Empty"/>
+  </Device>
+  <Device Name="LEDISM" DBDeviceName="EmissionFilter_6">
+    <Field DBFieldName="LEDBrightness" Value="0"/>
+  </Device>
+  <Device Name="EmissionFilter" DBDeviceName="EmissionFilter">
+    <Field DBFieldName="Position" Value="0" ValueString="Empty"/>
+  </Device>
+  <Device Name="DichroicDetGroup12_3" DBDeviceName="Beamsplitter_1_2_3_4_5_6">
+    <Field DBFieldName="Position_1" Value="1" ValueString="Mirror"/>
+  </Device>
+  <Device Name="DichroicDetGroup1_2" DBDeviceName="Beamsplitter_1_2_3_4">
+    <Field DBFieldName="Position_1" Value="0" ValueString="Empty"/>
+  </Device>
+  <Device Name="SidePort" DBDeviceName="SidePort">
+    <Field DBFieldName="Position" Value="2" ValueString="FlimBee (mirror + lens)"/>
+  </Device>
+  <Device Name="FilterTurret" DBDeviceName="OlympusFilterDIC">
+    <Field DBFieldName="FilterNumber" Value="1" ValueString="Empty"/>
+    <Field DBFieldName="CoverStatus" Value="False"/>
+  </Device>
+  <Device Name="ShutterEpi" DBDeviceName="OlympusFilterDIC">
+    <Field DBFieldName="ShutterStatus" Value="False"/>
+  </Device>
+  <Device Name="EpiIllumination" DBDeviceName="EpiIllumination">
+    <Field DBFieldName="Enabled" Value="False"/>
+    <Field DBFieldName="Intensity1" Value="0"/>
+    <Field DBFieldName="Intensity2" Value="0"/>
+    <Field DBFieldName="Intensity3" Value="0"/>
+  </Device>
+  <Device Name="AutoFocus" DBDeviceName="Autofocus">
+    <Field DBFieldName="Objective" Value="0"/>
+    <Field DBFieldName="Enabled" Value="False"/>
+    <Field DBFieldName="LensOffset" Value="-12471"/>
+    <Field DBFieldName="ErrorSignal" Value="0.109493002295494"/>
+    <Field DBFieldName="FocusZSetPoint" Value="-0.441112518310547"/>
+    <Field DBFieldName="FocusZReadVal" Value="-0.59359073638916"/>
+    <Field DBFieldName="LaserPower" Value="0"/>
+    <Field DBFieldName="Background" Value="300"/>
+    <Field DBFieldName="PinholeCenter" Value="782"/>
+    <Field DBFieldName="PinholeWidth" Value="500"/>
+    <Field DBFieldName="DACOutput" Value="5.04411125183105"/>
+    <Field DBFieldName="OutOfRange" Value="False"/>
+  </Device>
+  <Device Name="SampleStage" DBDeviceName="SampleStage">
+    <Field DBFieldName="Position_X" Value="0"/>
+    <Field DBFieldName="Position_Y" Value="0"/>
+    <Field DBFieldName="InitCenter" Value="True"/>
+    <Field DBFieldName="OperationMode" Value="2"/>
+    <Field DBFieldName="JoystickMode" Value="False"/>
+    <Field DBFieldName="HWMaxX" Value="120000"/>
+    <Field DBFieldName="HWMaxY" Value="80000"/>
+    <Field DBFieldName="DefMinX" Value="-53000"/>
+    <Field DBFieldName="DefMaxX" Value="53000"/>
+    <Field DBFieldName="DefMinY" Value="-35000"/>
+    <Field DBFieldName="DefMaxY" Value="35000"/>
+    <Field DBFieldName="MinX" Value="-53000"/>
+    <Field DBFieldName="MaxX" Value="53000"/>
+    <Field DBFieldName="MinY" Value="-35000"/>
+    <Field DBFieldName="MaxY" Value="35000"/>
+    <Field DBFieldName="Reset" Value="False"/>
+  </Device>
+  <Device Name="Objective" DBDeviceName="Objective">
+    <Field DBFieldName="Position" Value="0" ValueString="100 x Oil (NA: 1.45)"/>
+  </Device>
+  <Device Name="TransIllumination" DBDeviceName="MicController">
+    <Field DBFieldName="Brightness" Value="0"/>
+  </Device>
+  <Device Name="Powermeter" DBDeviceName="Powermeter_1">
+    <Field DBFieldName="Power" Value="0"/>
+    <Field DBFieldName="IsSaturated" Value="0"/>
+    <Field DBFieldName="UpdateTime" Value="0"/>
+    <Field DBFieldName="Wavelength" Value="0"/>
+    <Field DBFieldName="Range" Value="0"/>
+  </Device>
+  <Device Name="MicController" DBDeviceName="MicController">
+    <Field DBFieldName="SystemInitByApp" Value="True"/>
+  </Device>
+  <Device Name="BeamBlanking" DBDeviceName="MicController">
+    <Field DBFieldName="BeamBlanking" Value="False"/>
+  </Device>
+  <Device Name="MarkerSwitch" DBDeviceName="MicController">
+    <Field DBFieldName="MarkerSwitch" Value="0" ValueString="FlimBee (A)"/>
+  </Device>
+  <Device Name="SecureBox" DBDeviceName="SecureBox">
+    <Field DBFieldName="ZSwitch" Value="False"/>
+    <Field DBFieldName="AngleValue" Value="2013"/>
+  </Device>
+  <Device Name="SecureBusMaster" DBDeviceName="SecureBusMaster">
+    <Field DBFieldName="IlSafetyMode" Value="0"/>
+    <Field DBFieldName="IlNodeExistMask" Value="815"/>
+    <Field DBFieldName="IlSignalEventMask" Value="0"/>
+    <Field DBFieldName="IlNodeErrorMask" Value="0"/>
+    <Field DBFieldName="IlCombiEventMask" Value="0"/>
+    <Field DBFieldName="KeySwitch" Value="1"/>
+  </Device>
+  <Device Name="Watermonitor" DBDeviceName="Watermonitor">
+    <Field DBFieldName="SensorError" Value="0"/>
+    <Field DBFieldName="TempValue" Value="2338"/>
+    <Field DBFieldName="FlowValue" Value="40"/>
+    <Field DBFieldName="UpdateTime" Value="2000"/>
+  </Device>
+</PQAutomationValues>
+
